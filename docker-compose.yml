@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  openstack:
+    image: openstack:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openstack
+    hostname: localhost.localstack.cloud
+    ports:
+      # Main edge API endpoint (LocalStack-compatible)
+      - "127.0.0.1:4566:4566"
+      # External service port range
+      - "127.0.0.1:4510-4560:4510-4560"
+    environment:
+      # Core settings
+      - GATEWAY_LISTEN=0.0.0.0:4566
+      - LOCALSTACK_HOST=localhost.localstack.cloud:4566
+      # Persistence (set DATA_DIR and PERSISTENCE=1 to enable)
+      - PERSISTENCE=${PERSISTENCE:-0}
+      - DATA_DIR=/var/lib/localstack
+      # DNS
+      - DNS_ADDRESS=0.0.0.0
+      - DNS_PORT=53
+      - DNS_RESOLVE_IP=127.0.0.1
+      # Logging
+      - LS_LOG=${LS_LOG:-info}
+      - DEBUG=${DEBUG:-0}
+      # Services (comma-separated list, empty = all)
+      - SERVICES=${SERVICES:-}
+      # Lambda settings
+      - LAMBDA_KEEPALIVE_MS=${LAMBDA_KEEPALIVE_MS:-600000}
+      - LAMBDA_REMOVE_CONTAINERS=${LAMBDA_REMOVE_CONTAINERS:-1}
+    volumes:
+      # Persist state across restarts
+      - "openstack-data:/var/lib/localstack"
+      # Allow Lambda to access the Docker socket
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      # Init scripts
+      - "${LOCALSTACK_VOLUME_DIR:-./volume}/init-scripts:/etc/localstack/init"
+    networks:
+      - openstack-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+volumes:
+  openstack-data:
+    driver: local
+
+networks:
+  openstack-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16

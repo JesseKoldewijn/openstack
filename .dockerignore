@@ -1,0 +1,10 @@
+.git
+.github
+.opencode
+openspec
+target
+tmp
+*.log
+*.md
+docs
+.DS_Store

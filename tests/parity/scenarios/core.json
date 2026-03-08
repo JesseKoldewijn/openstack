@@ -1,0 +1,42 @@
+[
+  {
+    "id": "s3-basic-lifecycle",
+    "profile": "core",
+    "service": "s3",
+    "setup": [
+      {
+        "id": "s3-create-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "create-bucket", "--bucket", "{{bucket}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "s3-put-object",
+        "protocol": "rest-xml",
+        "command": ["s3api", "put-object", "--bucket", "{{bucket}}", "--key", "item.txt", "--body", "README.md"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "assertions": [],
+    "cleanup": [
+      {
+        "id": "s3-delete-object",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-object", "--bucket", "{{bucket}}", "--key", "item.txt"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "s3-delete-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-bucket", "--bucket", "{{bucket}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  }
+]

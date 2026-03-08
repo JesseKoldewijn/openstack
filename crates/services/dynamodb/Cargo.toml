@@ -1,0 +1,27 @@
+[package]
+name = "openstack-dynamodb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openstack-config.workspace = true
+openstack-service-framework.workspace = true
+openstack-state.workspace = true
+openstack-aws-protocol.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde_json.workspace = true

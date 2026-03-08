@@ -1,0 +1,28 @@
+[package]
+name = "openstack-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openstack-config.workspace = true
+openstack-aws-protocol.workspace = true
+openstack-service-framework.workspace = true
+openstack-state.workspace = true
+openstack-internal-api.workspace = true
+
+tokio.workspace = true
+axum.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+uuid.workspace = true

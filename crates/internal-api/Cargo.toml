@@ -1,0 +1,23 @@
+[package]
+name = "openstack-internal-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openstack-config.workspace = true
+openstack-service-framework.workspace = true
+openstack-state.workspace = true
+
+tokio.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

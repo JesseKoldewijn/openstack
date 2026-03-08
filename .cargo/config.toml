@@ -1,0 +1,21 @@
+[build]
+# Default target for local dev — no override needed.
+# To cross-compile locally, set CARGO_BUILD_TARGET or pass --target.
+
+# ── linux/amd64 (musl static binary) ─────────────────────────────────────────
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# ── linux/arm64 (musl static binary) ─────────────────────────────────────────
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# ── linux/amd64 (glibc, used in CI with cross tool) ──────────────────────────
+[target.x86_64-unknown-linux-gnu]
+# No extra flags — default glibc toolchain works out of the box on ubuntu runners.
+
+# ── linux/arm64 (glibc, used in CI with cross tool) ──────────────────────────
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"

@@ -1,0 +1,48 @@
+[package]
+name = "openstack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openstack"
+path = "src/main.rs"
+
+[dependencies]
+openstack-config.workspace = true
+openstack-gateway.workspace = true
+openstack-internal-api.workspace = true
+openstack-dns.workspace = true
+openstack-service-framework.workspace = true
+openstack-state.workspace = true
+
+# Services
+openstack-s3.workspace = true
+openstack-sqs.workspace = true
+openstack-sns.workspace = true
+openstack-dynamodb.workspace = true
+openstack-lambda.workspace = true
+openstack-iam.workspace = true
+openstack-sts.workspace = true
+openstack-kms.workspace = true
+openstack-cloudformation.workspace = true
+openstack-cloudwatch.workspace = true
+openstack-kinesis.workspace = true
+openstack-firehose.workspace = true
+openstack-eventbridge.workspace = true
+openstack-stepfunctions.workspace = true
+openstack-apigateway.workspace = true
+openstack-ec2.workspace = true
+openstack-route53.workspace = true
+openstack-ses.workspace = true
+openstack-ssm.workspace = true
+openstack-secretsmanager.workspace = true
+openstack-acm.workspace = true
+openstack-ecr.workspace = true
+openstack-opensearch.workspace = true
+openstack-redshift.workspace = true
+
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

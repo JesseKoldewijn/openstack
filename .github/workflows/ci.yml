@@ -1,0 +1,297 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-clippy
+          key: clippy-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test-${{ matrix.os }}
+          key: test-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run unit tests
+        run: cargo test --workspace --lib --bins
+      - name: Run integration tests
+        run: cargo test --workspace --tests
+        env:
+          # Docker may not be available on all runners; skip Lambda tests
+          SKIP_DOCKER_TESTS: "1"
+
+  build:
+    name: Build (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-build-release
+          key: build-release-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build release binary
+        run: cargo build --release --bin openstack
+      - name: Upload binary artifact
+        if: env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openstack-linux-amd64
+          path: target/release/openstack
+          retention-days: 7
+
+  verify-build-artifact:
+    name: Verify release artifact
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: openstack-linux-amd64
+          path: ./artifacts
+      - name: Smoke check binary
+        run: |
+          chmod +x ./artifacts/openstack
+          timeout 10s ./artifacts/openstack --help > /dev/null
+          timeout 10s ./artifacts/openstack --version > /dev/null
+
+  parity-core:
+    name: Parity (core)
+    runs-on: ubuntu-latest
+    env:
+      PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-parity-core
+          key: parity-core-${{ hashFiles('**/Cargo.lock') }}
+      - name: Ensure AWS CLI is installed
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          if command -v pipx >/dev/null 2>&1; then
+            pipx install awscli || pipx upgrade awscli
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          if ! command -v aws >/dev/null 2>&1; then
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            if command -v sudo >/dev/null 2>&1; then
+              sudo ./aws/install --update
+            else
+              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
+              export PATH="$HOME/.local/bin:$PATH"
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+          fi
+          aws --version
+      - name: Preflight parity environment
+        run: |
+          set -euo pipefail
+          command -v aws
+          aws --version
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+      - name: Run parity core profile
+        run: cargo run -p openstack-integration-tests --bin parity_runner -- core
+      - name: Summarize parity core failures
+        if: always() && env.ACT != 'true'
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+          import sys
+
+          reports = sorted(glob.glob("target/parity-reports/core-*.json"), key=os.path.getmtime)
+          if not reports:
+              print("No parity core report found.")
+              sys.exit(0)
+
+          latest = reports[-1]
+          print(f"Parity core report: {latest}")
+          with open(latest, "r", encoding="utf-8") as f:
+              report = json.load(f)
+
+          failed = [r for r in report.get("results", []) if not r.get("passed", False)]
+          if not failed:
+              print("No failed scenarios in parity core report.")
+              sys.exit(0)
+
+          print(f"Failed scenarios: {len(failed)}")
+          for scenario in failed:
+              mismatches = scenario.get("mismatches", [])
+              kinds = sorted({m.get("kind", "unknown") for m in mismatches})
+              first = mismatches[0] if mismatches else {}
+              print("---")
+              print(f"Scenario: {scenario.get('scenario_id', '<unknown>')}")
+              print(f"Service: {scenario.get('service', '<unknown>')}")
+              print(f"Mismatches: {len(mismatches)}")
+              print(f"Kinds: {', '.join(kinds) if kinds else 'none'}")
+              if first:
+                  print(
+                      "Example: "
+                      f"{first.get('step_id', '<step>')} / {first.get('path', '<path>')}"
+                  )
+          PY
+      - name: Upload parity report artifacts
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-core-report
+          path: target/parity-reports/*.json
+          retention-days: 7
+
+  parity-extended:
+    name: Parity (extended, non-required)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    continue-on-error: true
+    env:
+      PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-parity-extended
+          key: parity-extended-${{ hashFiles('**/Cargo.lock') }}
+      - name: Ensure AWS CLI is installed
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          if command -v pipx >/dev/null 2>&1; then
+            pipx install awscli || pipx upgrade awscli
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          if ! command -v aws >/dev/null 2>&1; then
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            if command -v sudo >/dev/null 2>&1; then
+              sudo ./aws/install --update
+            else
+              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
+              export PATH="$HOME/.local/bin:$PATH"
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+          fi
+          aws --version
+      - name: Preflight parity environment
+        run: |
+          set -euo pipefail
+          command -v aws
+          aws --version
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+      - name: Run parity extended profile
+        run: cargo run -p openstack-integration-tests --bin parity_runner -- extended
+      - name: Summarize parity extended failures
+        if: always() && env.ACT != 'true'
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+          import sys
+
+          reports = sorted(glob.glob("target/parity-reports/extended-*.json"), key=os.path.getmtime)
+          if not reports:
+              print("No parity extended report found.")
+              sys.exit(0)
+
+          latest = reports[-1]
+          print(f"Parity extended report: {latest}")
+          with open(latest, "r", encoding="utf-8") as f:
+              report = json.load(f)
+
+          failed = [r for r in report.get("results", []) if not r.get("passed", False)]
+          if not failed:
+              print("No failed scenarios in parity extended report.")
+              sys.exit(0)
+
+          print(f"Failed scenarios: {len(failed)}")
+          for scenario in failed:
+              mismatches = scenario.get("mismatches", [])
+              kinds = sorted({m.get("kind", "unknown") for m in mismatches})
+              first = mismatches[0] if mismatches else {}
+              print("---")
+              print(f"Scenario: {scenario.get('scenario_id', '<unknown>')}")
+              print(f"Service: {scenario.get('service', '<unknown>')}")
+              print(f"Mismatches: {len(mismatches)}")
+              print(f"Kinds: {', '.join(kinds) if kinds else 'none'}")
+              if first:
+                  print(
+                      "Example: "
+                      f"{first.get('step_id', '<step>')} / {first.get('path', '<path>')}"
+                  )
+          PY
+      - name: Upload parity extended report artifacts
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-extended-report
+          path: target/parity-reports/*.json
+          retention-days: 7
+
+  required-checks:
+    name: Required checks
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy, test, verify-build-artifact, parity-core]
+    steps:
+      - name: All required checks passed
+        run: echo "All required CI checks passed."

@@ -1,0 +1,19 @@
+[
+  {
+    "id": "s3-list-buckets-core-extension",
+    "profile": "extended",
+    "service": "s3",
+    "setup": [
+      {
+        "id": "s3-list-buckets",
+        "protocol": "rest-xml",
+        "command": ["s3api", "list-buckets"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [],
+    "assertions": [],
+    "cleanup": []
+  }
+]
