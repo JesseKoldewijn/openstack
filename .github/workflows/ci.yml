@@ -448,32 +448,15 @@ jobs:
       - name: Add benchmark full table to workflow summary
         if: always()
         run: |
-          python3 - <<'PY'
-          import glob
-          import json
-          import os
-
-          files = sorted(glob.glob("target/benchmark-reports/all-services-smoke-*.json"), key=os.path.getmtime)
-          if not files:
-              raise SystemExit(0)
-          with open(files[-1], "r", encoding="utf-8") as handle:
-              report = json.load(handle)
-          summary = report.get("summary", {})
-          lines = [
-              "## Benchmark All Services (Full)",
-              "",
-              "| Metric | Value |",
-              "|---|---:|",
-              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
-              f"| Openstack Errors | {summary.get('openstack_error_count', 0)} |",
-              f"| LocalStack Errors | {summary.get('localstack_error_count', 0)} |",
-              f"| Avg p50 Ratio | {summary.get('avg_latency_p50_ratio')} |",
-              f"| Avg p95 Ratio | {summary.get('avg_latency_p95_ratio')} |",
-              f"| Avg Throughput Ratio | {summary.get('avg_throughput_ratio')} |",
-          ]
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
-              out.write("\n".join(lines) + "\n")
-          PY
+          python3 scripts/benchmark_report_tables.py \
+            --current-glob "target/benchmark-reports/all-services-smoke-*.json" \
+            --title "Benchmark All Services (Full)" \
+            --repo "${{ github.repository }}" \
+            --workflow-file "ci.yml" \
+            --artifact-name "benchmark-smoke-full-report" \
+            --run-id "${{ github.run_id }}" \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_full_summary.md"
       - name: Upload benchmark full report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -529,32 +512,15 @@ jobs:
       - name: Add benchmark fast table to workflow summary
         if: always()
         run: |
-          python3 - <<'PY'
-          import glob
-          import json
-          import os
-
-          files = sorted(glob.glob("target/benchmark-reports/all-services-smoke-fast-*.json"), key=os.path.getmtime)
-          if not files:
-              raise SystemExit(0)
-          with open(files[-1], "r", encoding="utf-8") as handle:
-              report = json.load(handle)
-          summary = report.get("summary", {})
-          lines = [
-              "## Benchmark All Services (Fast)",
-              "",
-              "| Metric | Value |",
-              "|---|---:|",
-              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
-              f"| Openstack Errors | {summary.get('openstack_error_count', 0)} |",
-              f"| LocalStack Errors | {summary.get('localstack_error_count', 0)} |",
-              f"| Avg p50 Ratio | {summary.get('avg_latency_p50_ratio')} |",
-              f"| Avg p95 Ratio | {summary.get('avg_latency_p95_ratio')} |",
-              f"| Avg Throughput Ratio | {summary.get('avg_throughput_ratio')} |",
-          ]
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
-              out.write("\n".join(lines) + "\n")
-          PY
+          python3 scripts/benchmark_report_tables.py \
+            --current-glob "target/benchmark-reports/all-services-smoke-fast-*.json" \
+            --title "Benchmark All Services (Fast)" \
+            --repo "${{ github.repository }}" \
+            --workflow-file "ci.yml" \
+            --artifact-name "benchmark-smoke-fast-report" \
+            --run-id "${{ github.run_id }}" \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_fast_summary.md"
       - name: Upload benchmark fast report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -738,6 +704,28 @@ jobs:
           pattern: benchmark-*-report
           merge-multiple: true
           path: artifacts/benchmark
+      - name: Build benchmark full comparison markdown
+        if: always()
+        run: |
+          python3 scripts/benchmark_report_tables.py \
+            --current-glob "artifacts/benchmark/all-services-smoke-*.json" \
+            --title "Benchmark All Services (Full)" \
+            --repo "${{ github.repository }}" \
+            --workflow-file "ci.yml" \
+            --artifact-name "benchmark-smoke-full-report" \
+            --run-id "${{ github.run_id }}" \
+            --output-path "benchmark_full_comment.md"
+      - name: Build benchmark fast comparison markdown
+        if: always()
+        run: |
+          python3 scripts/benchmark_report_tables.py \
+            --current-glob "artifacts/benchmark/all-services-smoke-fast-*.json" \
+            --title "Benchmark All Services (Fast)" \
+            --repo "${{ github.repository }}" \
+            --workflow-file "ci.yml" \
+            --artifact-name "benchmark-smoke-fast-report" \
+            --run-id "${{ github.run_id }}" \
+            --output-path "benchmark_fast_comment.md"
       - name: Build PR markdown summary
         id: build_comment
         run: |
@@ -777,22 +765,17 @@ jobs:
                   )
               lines.append("")
 
-          benchmark_reports = sorted(glob.glob("artifacts/benchmark/*.json"), key=os.path.getmtime)
-          if benchmark_reports:
-              lines.extend([
-                  "### Benchmark",
-                  "",
-                  "| Profile | Scenarios | OS Errors | LS Errors | Avg p50 | Avg p95 | Avg Throughput |",
-                  "|---|---:|---:|---:|---:|---:|---:|",
-              ])
-              for path in benchmark_reports:
-                  with open(path, "r", encoding="utf-8") as handle:
-                      benchmark = json.load(handle)
-                  bs = benchmark.get("summary", {})
-                  lines.append(
-                      f"| `{benchmark.get('profile', 'n/a')}` | {bs.get('total_scenarios', 0)} | {bs.get('openstack_error_count', 0)} | {bs.get('localstack_error_count', 0)} | {bs.get('avg_latency_p50_ratio')} | {bs.get('avg_latency_p95_ratio')} | {bs.get('avg_throughput_ratio')} |"
-                  )
+          full_benchmark_md = Path("benchmark_full_comment.md")
+          fast_benchmark_md = Path("benchmark_fast_comment.md")
+          if full_benchmark_md.exists() or fast_benchmark_md.exists():
+              lines.append("### Benchmark")
               lines.append("")
+              if full_benchmark_md.exists():
+                  lines.append(full_benchmark_md.read_text(encoding="utf-8").strip())
+                  lines.append("")
+              if fast_benchmark_md.exists():
+                  lines.append(fast_benchmark_md.read_text(encoding="utf-8").strip())
+                  lines.append("")
 
           content = "\n".join(lines).strip() + "\n"
           Path("pr_results_comment.md").write_text(content, encoding="utf-8")
