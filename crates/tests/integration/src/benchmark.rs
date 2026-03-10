@@ -214,11 +214,13 @@ pub async fn run_profile(
         ));
     }
 
-    let mut parity_config = crate::parity::ParityConfig::default();
-    parity_config.localstack_image = config.localstack_image.clone();
-    parity_config.openstack_endpoint = config.openstack_endpoint.clone();
-    parity_config.localstack_endpoint = config.localstack_endpoint.clone();
-    parity_config.target_services = Some(profile.services.clone());
+    let parity_config = crate::parity::ParityConfig {
+        localstack_image: config.localstack_image.clone(),
+        openstack_endpoint: config.openstack_endpoint.clone(),
+        localstack_endpoint: config.localstack_endpoint.clone(),
+        target_services: Some(profile.services.clone()),
+        ..crate::parity::ParityConfig::default()
+    };
 
     let mut manager = TargetManager::start(&parity_config).await?;
     let openstack_meta = BenchmarkTargetMetadata {
