@@ -9,6 +9,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+  PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
+  PARITY_BENCHMARK_RUNTIME_MODE: symmetric-docker
+  PARITY_BENCHMARK_EXECUTION_ORDER: alternating
+  PARITY_DOCKER_CPU_LIMIT: "2"
+  PARITY_DOCKER_MEMORY_LIMIT: 4g
+  PARITY_DOCKER_NETWORK_MODE: bridge
 
 jobs:
   benchmark-deep:
@@ -52,9 +58,15 @@ jobs:
           command -v aws
           aws --version
           docker --version
+          docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark deep profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile hot-path-deep
+      - name: Run benchmark fairness high profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-high
+      - name: Run benchmark fairness extreme profile (heavy objects, non-blocking)
+        continue-on-error: true
+        env:
+          BENCHMARK_HEAVY_OBJECTS: "1"
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-extreme
       - name: Upload benchmark deep report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4

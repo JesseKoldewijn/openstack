@@ -1,0 +1,140 @@
+[
+  {
+    "id": "s3-heavy-1gb",
+    "profile": "fair-extreme",
+    "service": "s3",
+    "scenario_class": "performance",
+    "load_tier": "extreme",
+    "protocol": "rest-xml",
+    "setup": [
+      {
+        "id": "s3-create-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "create-bucket", "--bucket", "{{bucket}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "operation": {
+      "id": "s3-put-object-heavy-1gb",
+      "protocol": "rest-xml",
+      "command": [
+        "s3api",
+        "put-object",
+        "--bucket",
+        "{{bucket}}",
+        "--key",
+        "heavy-1gb-{{run_id}}.bin",
+        "--body",
+        "tests/benchmark/fixtures/1073741824.bin"
+      ],
+      "expect_success": true,
+      "capture_json": null
+    },
+    "cleanup": [
+      {
+        "id": "s3-delete-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-bucket", "--bucket", "{{bucket}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "warmup_iterations": 0,
+    "measured_iterations": 1,
+    "operations_per_iteration": 1,
+    "concurrency": 1
+  },
+  {
+    "id": "s3-heavy-5gb",
+    "profile": "fair-extreme",
+    "service": "s3",
+    "scenario_class": "performance",
+    "load_tier": "extreme",
+    "protocol": "rest-xml",
+    "setup": [
+      {
+        "id": "s3-create-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "create-bucket", "--bucket", "{{bucket}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "operation": {
+      "id": "s3-put-object-heavy-5gb",
+      "protocol": "rest-xml",
+      "command": [
+        "s3api",
+        "put-object",
+        "--bucket",
+        "{{bucket}}",
+        "--key",
+        "heavy-5gb-{{run_id}}.bin",
+        "--body",
+        "tests/benchmark/fixtures/5368709120.bin"
+      ],
+      "expect_success": true,
+      "capture_json": null
+    },
+    "cleanup": [
+      {
+        "id": "s3-delete-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-bucket", "--bucket", "{{bucket}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "warmup_iterations": 0,
+    "measured_iterations": 1,
+    "operations_per_iteration": 1,
+    "concurrency": 1
+  },
+  {
+    "id": "s3-heavy-10gb",
+    "profile": "fair-extreme",
+    "service": "s3",
+    "scenario_class": "performance",
+    "load_tier": "extreme",
+    "protocol": "rest-xml",
+    "setup": [
+      {
+        "id": "s3-create-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "create-bucket", "--bucket", "{{bucket}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "operation": {
+      "id": "s3-put-object-heavy-10gb",
+      "protocol": "rest-xml",
+      "command": [
+        "s3api",
+        "put-object",
+        "--bucket",
+        "{{bucket}}",
+        "--key",
+        "heavy-10gb-{{run_id}}.bin",
+        "--body",
+        "tests/benchmark/fixtures/10737418240.bin"
+      ],
+      "expect_success": true,
+      "capture_json": null
+    },
+    "cleanup": [
+      {
+        "id": "s3-delete-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-bucket", "--bucket", "{{bucket}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "warmup_iterations": 0,
+    "measured_iterations": 1,
+    "operations_per_iteration": 1,
+    "concurrency": 1
+  }
+]

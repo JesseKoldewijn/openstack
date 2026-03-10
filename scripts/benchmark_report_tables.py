@@ -28,6 +28,10 @@ def weighted_value(report: Dict[str, Any], target: str, key: str) -> Optional[fl
     weighted_sum = 0.0
     total_weight = 0.0
     for result in report.get("results", []):
+        if result.get("scenario_class") != "performance":
+            continue
+        if result.get("skipped"):
+            continue
         metrics = result.get(target, {}).get("metrics", {})
         value = metrics.get(key)
         weight = float(metrics.get("operation_count", 0))
@@ -44,6 +48,12 @@ def fmt_num(value: Optional[float], places: int = 3) -> str:
     if value is None:
         return "n/a"
     return f"{value:.{places}f}"
+
+
+def service_ratio(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"
 
 
 def pct_delta(current: Optional[float], previous: Optional[float]) -> Optional[float]:
@@ -150,9 +160,18 @@ def build_markdown(
     previous_run_id: Optional[str],
 ) -> str:
     lines = [f"## {title}", "", "### Current: OpenStack vs LocalStack", ""]
+
+    summary = current_report.get("summary", {})
     lines.extend(
         [
-            "| Metric | OpenStack (weighted) | LocalStack (weighted) | OS/LS ratio |",
+            f"Scenarios: total={summary.get('total_scenarios', 'n/a')}, performance={summary.get('performance_scenarios', 'n/a')}, coverage={summary.get('coverage_scenarios', 'n/a')}, skipped={summary.get('skipped_scenarios', 'n/a')}",
+            "",
+        ]
+    )
+
+    lines.extend(
+        [
+            "| Metric (performance only) | OpenStack (weighted) | LocalStack (weighted) | OS/LS ratio |",
             "|---|---:|---:|---:|",
         ]
     )
@@ -164,6 +183,28 @@ def build_markdown(
         if ls_value is not None and abs(ls_value) > 1e-12 and os_value is not None:
             ratio = os_value / ls_value
         lines.append(f"| {label} | {fmt_num(os_value)} | {fmt_num(ls_value)} | {fmt_num(ratio)} |")
+
+    per_service = current_report.get("summary", {}).get("per_service", {})
+    if per_service:
+        lines.extend([
+            "",
+            "### Per-Service Comparison (OS/LS)",
+            "",
+            "| Service | Scenarios | Skipped | p95 ratio | p99 ratio | Throughput ratio |",
+            "|---|---:|---:|---:|---:|---:|",
+        ])
+        for service in sorted(per_service.keys()):
+            entry = per_service[service]
+            lines.append(
+                "| {service} | {scenarios} | {skipped} | {p95} | {p99} | {tp} |".format(
+                    service=service,
+                    scenarios=entry.get("total_scenarios", 0),
+                    skipped=entry.get("skipped_scenarios", 0),
+                    p95=service_ratio(entry.get("avg_latency_p95_ratio")),
+                    p99=service_ratio(entry.get("avg_latency_p99_ratio")),
+                    tp=service_ratio(entry.get("avg_throughput_ratio")),
+                )
+            )
 
     if previous_report is None:
         lines.extend(["", "No previous successful run baseline found for this lane."])

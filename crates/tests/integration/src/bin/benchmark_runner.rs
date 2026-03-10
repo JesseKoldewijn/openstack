@@ -44,5 +44,32 @@ async fn main() -> anyhow::Result<()> {
         report.summary.localstack_error_count
     );
 
+    if let Some(v) = report.summary.avg_latency_p95_ratio {
+        println!("average p95 ratio (OS/LS): {v:.3}");
+    }
+    if let Some(v) = report.summary.avg_throughput_ratio {
+        println!("average throughput ratio (OS/LS): {v:.3}");
+    }
+
+    println!("per-service comparison:");
+    for (service, summary) in &report.summary.per_service {
+        let p95 = summary
+            .avg_latency_p95_ratio
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let p99 = summary
+            .avg_latency_p99_ratio
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let throughput = summary
+            .avg_throughput_ratio
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        println!(
+            "  - {service}: scenarios={}, skipped={}, p95_ratio={}, p99_ratio={}, throughput_ratio={}",
+            summary.total_scenarios, summary.skipped_scenarios, p95, p99, throughput
+        );
+    }
+
     Ok(())
 }

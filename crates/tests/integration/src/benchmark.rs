@@ -1,20 +1,77 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::parity::{ProtocolFamily, ScenarioStep, TargetManager};
+use crate::harness::TestHarness;
+use crate::parity::{ProtocolFamily, ScenarioStep};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BenchmarkRuntimeMode {
+    Asymmetric,
+    SymmetricDocker,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionOrderPolicy {
+    OpenstackFirst,
+    LocalstackFirst,
+    Alternating,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BenchmarkScenarioClass {
+    Coverage,
+    #[default]
+    Performance,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BenchmarkLoadTier {
+    #[default]
+    Medium,
+    Low,
+    High,
+    Extreme,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DockerRuntimeConstraints {
+    pub cpu_limit: Option<String>,
+    pub memory_limit: Option<String>,
+    pub network_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkRuntimeMetadata {
+    pub mode: BenchmarkRuntimeMode,
+    pub execution_order_policy: ExecutionOrderPolicy,
+    pub docker_constraints: Option<DockerRuntimeConstraints>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkConfig {
     pub localstack_image: String,
+    pub openstack_image: String,
     pub report_dir: PathBuf,
     pub profiles: HashMap<String, BenchmarkProfile>,
     pub openstack_endpoint: Option<String>,
     pub localstack_endpoint: Option<String>,
+    pub runtime_mode: BenchmarkRuntimeMode,
+    pub execution_order_policy: ExecutionOrderPolicy,
+    pub docker_cpu_limit: Option<String>,
+    pub docker_memory_limit: Option<String>,
+    pub docker_network_mode: String,
+    pub docker_startup_timeout_secs: u64,
+    pub heavy_object_enabled: bool,
 }
 
 impl Default for BenchmarkConfig {
@@ -70,14 +127,81 @@ impl Default for BenchmarkConfig {
                 ],
             },
         );
+        profiles.insert(
+            "fair-low".to_string(),
+            BenchmarkProfile {
+                name: "fair-low".to_string(),
+                warmup_iterations: 1,
+                measured_iterations: 2,
+                operations_per_iteration: 4,
+                concurrency: 1,
+                services: all_service_names(),
+            },
+        );
+        profiles.insert(
+            "fair-medium".to_string(),
+            BenchmarkProfile {
+                name: "fair-medium".to_string(),
+                warmup_iterations: 1,
+                measured_iterations: 3,
+                operations_per_iteration: 10,
+                concurrency: 2,
+                services: all_service_names(),
+            },
+        );
+        profiles.insert(
+            "fair-high".to_string(),
+            BenchmarkProfile {
+                name: "fair-high".to_string(),
+                warmup_iterations: 2,
+                measured_iterations: 6,
+                operations_per_iteration: 40,
+                concurrency: 8,
+                services: vec![
+                    "s3".into(),
+                    "sqs".into(),
+                    "dynamodb".into(),
+                    "lambda".into(),
+                    "kinesis".into(),
+                    "opensearch".into(),
+                    "cloudwatch".into(),
+                ],
+            },
+        );
+        profiles.insert(
+            "fair-extreme".to_string(),
+            BenchmarkProfile {
+                name: "fair-extreme".to_string(),
+                warmup_iterations: 0,
+                measured_iterations: 1,
+                operations_per_iteration: 1,
+                concurrency: 1,
+                services: vec!["s3".into()],
+            },
+        );
 
         Self {
             localstack_image: std::env::var("PARITY_LOCALSTACK_IMAGE")
                 .unwrap_or_else(|_| "localstack/localstack:3.7.2".to_string()),
+            openstack_image: std::env::var("PARITY_OPENSTACK_IMAGE")
+                .unwrap_or_else(|_| "ghcr.io/jessekoldewijn/openstack:latest".to_string()),
             report_dir: PathBuf::from("target/benchmark-reports"),
             profiles,
             openstack_endpoint: std::env::var("PARITY_OPENSTACK_ENDPOINT").ok(),
             localstack_endpoint: std::env::var("PARITY_LOCALSTACK_ENDPOINT").ok(),
+            runtime_mode: benchmark_runtime_mode_from_env(),
+            execution_order_policy: execution_order_policy_from_env(),
+            docker_cpu_limit: std::env::var("PARITY_DOCKER_CPU_LIMIT").ok(),
+            docker_memory_limit: std::env::var("PARITY_DOCKER_MEMORY_LIMIT").ok(),
+            docker_network_mode: std::env::var("PARITY_DOCKER_NETWORK_MODE")
+                .unwrap_or_else(|_| "bridge".to_string()),
+            docker_startup_timeout_secs: std::env::var("PARITY_DOCKER_STARTUP_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(60),
+            heavy_object_enabled: std::env::var("BENCHMARK_HEAVY_OBJECTS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         }
     }
 }
@@ -97,6 +221,10 @@ pub struct BenchmarkScenario {
     pub id: String,
     pub profile: String,
     pub service: String,
+    #[serde(default)]
+    pub scenario_class: BenchmarkScenarioClass,
+    #[serde(default)]
+    pub load_tier: BenchmarkLoadTier,
     pub protocol: ProtocolFamily,
     pub setup: Vec<ScenarioStep>,
     pub operation: ScenarioStep,
@@ -118,11 +246,16 @@ pub struct BenchmarkRunConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkTargetMetadata {
     pub endpoint: String,
+    pub runtime: String,
+    pub image: Option<String>,
+    pub cpu_limit: Option<String>,
+    pub memory_limit: Option<String>,
+    pub network_mode: Option<String>,
     pub localstack_image: Option<String>,
     pub localstack_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BenchmarkMetrics {
     pub latency_p50_ms: f64,
     pub latency_p95_ms: f64,
@@ -159,6 +292,10 @@ pub struct BenchmarkComparison {
 pub struct BenchmarkScenarioResult {
     pub scenario_id: String,
     pub service: String,
+    pub scenario_class: BenchmarkScenarioClass,
+    pub load_tier: BenchmarkLoadTier,
+    pub skipped: bool,
+    pub skip_reason: Option<String>,
     pub run_config: BenchmarkRunConfig,
     pub openstack: BenchmarkTargetResult,
     pub localstack: BenchmarkTargetResult,
@@ -168,10 +305,27 @@ pub struct BenchmarkScenarioResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkSummary {
     pub total_scenarios: usize,
+    pub performance_scenarios: usize,
+    pub coverage_scenarios: usize,
+    pub skipped_scenarios: usize,
     pub openstack_error_count: usize,
     pub localstack_error_count: usize,
     pub avg_latency_p50_ratio: Option<f64>,
     pub avg_latency_p95_ratio: Option<f64>,
+    pub avg_latency_p99_ratio: Option<f64>,
+    pub avg_throughput_ratio: Option<f64>,
+    pub per_service: BTreeMap<String, BenchmarkServiceSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkServiceSummary {
+    pub total_scenarios: usize,
+    pub skipped_scenarios: usize,
+    pub openstack_error_count: usize,
+    pub localstack_error_count: usize,
+    pub avg_latency_p50_ratio: Option<f64>,
+    pub avg_latency_p95_ratio: Option<f64>,
+    pub avg_latency_p99_ratio: Option<f64>,
     pub avg_throughput_ratio: Option<f64>,
 }
 
@@ -180,10 +334,297 @@ pub struct BenchmarkReport {
     pub profile: String,
     pub run_id: String,
     pub generated_at: String,
+    pub runtime: BenchmarkRuntimeMetadata,
     pub openstack_target: BenchmarkTargetMetadata,
     pub localstack_target: BenchmarkTargetMetadata,
     pub results: Vec<BenchmarkScenarioResult>,
     pub summary: BenchmarkSummary,
+}
+
+#[derive(Debug)]
+struct BenchmarkManagedTarget {
+    endpoint: String,
+    runtime: String,
+    image: Option<String>,
+    cpu_limit: Option<String>,
+    memory_limit: Option<String>,
+    network_mode: Option<String>,
+}
+
+struct BenchmarkTargetManager {
+    openstack: BenchmarkManagedTarget,
+    localstack: BenchmarkManagedTarget,
+    openstack_container_id: Option<String>,
+    localstack_container_id: Option<String>,
+    openstack_harness: Option<TestHarness>,
+}
+
+impl BenchmarkTargetManager {
+    async fn start(config: &BenchmarkConfig, services: &[String]) -> anyhow::Result<Self> {
+        match config.runtime_mode {
+            BenchmarkRuntimeMode::Asymmetric => Self::start_asymmetric(config, services).await,
+            BenchmarkRuntimeMode::SymmetricDocker => {
+                Self::start_symmetric_docker(config, services).await
+            }
+        }
+    }
+
+    async fn start_asymmetric(
+        config: &BenchmarkConfig,
+        services: &[String],
+    ) -> anyhow::Result<Self> {
+        let services_csv = services.join(",");
+
+        let (openstack, openstack_harness) = if let Some(endpoint) = &config.openstack_endpoint {
+            (
+                BenchmarkManagedTarget {
+                    endpoint: endpoint.clone(),
+                    runtime: "external".to_string(),
+                    image: None,
+                    cpu_limit: None,
+                    memory_limit: None,
+                    network_mode: None,
+                },
+                None,
+            )
+        } else {
+            let harness = TestHarness::start_services(&services_csv).await;
+            (
+                BenchmarkManagedTarget {
+                    endpoint: harness.base_url.clone(),
+                    runtime: "in-process".to_string(),
+                    image: None,
+                    cpu_limit: None,
+                    memory_limit: None,
+                    network_mode: None,
+                },
+                Some(harness),
+            )
+        };
+
+        let (localstack, localstack_container_id) =
+            if let Some(endpoint) = &config.localstack_endpoint {
+                (
+                    BenchmarkManagedTarget {
+                        endpoint: endpoint.clone(),
+                        runtime: "external".to_string(),
+                        image: Some(config.localstack_image.clone()),
+                        cpu_limit: None,
+                        memory_limit: None,
+                        network_mode: None,
+                    },
+                    None,
+                )
+            } else {
+                let port = free_port()?;
+                let endpoint = format!("http://127.0.0.1:{port}");
+                let localstack_services = services
+                    .iter()
+                    .map(|service| map_service_for_localstack(service))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let output = Command::new("docker")
+                    .args([
+                        "run",
+                        "-d",
+                        "--rm",
+                        "-p",
+                        &format!("127.0.0.1:{port}:4566"),
+                        "-e",
+                        &format!("SERVICES={localstack_services}"),
+                        "-e",
+                        "DEBUG=1",
+                        &config.localstack_image,
+                    ])
+                    .output()?;
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "failed to start localstack: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                wait_for_health(
+                    &endpoint,
+                    Duration::from_secs(config.docker_startup_timeout_secs),
+                )
+                .await?;
+                (
+                    BenchmarkManagedTarget {
+                        endpoint,
+                        runtime: "docker".to_string(),
+                        image: Some(config.localstack_image.clone()),
+                        cpu_limit: None,
+                        memory_limit: None,
+                        network_mode: None,
+                    },
+                    Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+                )
+            };
+
+        Ok(Self {
+            openstack,
+            localstack,
+            openstack_container_id: None,
+            localstack_container_id,
+            openstack_harness,
+        })
+    }
+
+    async fn start_symmetric_docker(
+        config: &BenchmarkConfig,
+        services: &[String],
+    ) -> anyhow::Result<Self> {
+        if config.openstack_endpoint.is_some() || config.localstack_endpoint.is_some() {
+            return Err(anyhow::anyhow!(
+                "symmetric-docker mode requires managed targets; unset PARITY_OPENSTACK_ENDPOINT and PARITY_LOCALSTACK_ENDPOINT"
+            ));
+        }
+
+        let services_csv = services.join(",");
+        let localstack_services = services
+            .iter()
+            .map(|service| map_service_for_localstack(service))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let openstack_port = free_port()?;
+        let localstack_port = free_port()?;
+        let openstack_endpoint = format!("http://127.0.0.1:{openstack_port}");
+        let localstack_endpoint = format!("http://127.0.0.1:{localstack_port}");
+
+        let mut openstack_args = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--rm".to_string(),
+            "--network".to_string(),
+            config.docker_network_mode.clone(),
+            "-p".to_string(),
+            format!("127.0.0.1:{openstack_port}:4566"),
+            "-e".to_string(),
+            format!("SERVICES={services_csv}"),
+            "-e".to_string(),
+            "DEBUG=1".to_string(),
+        ];
+        if let Some(cpu) = &config.docker_cpu_limit {
+            openstack_args.push("--cpus".to_string());
+            openstack_args.push(cpu.clone());
+        }
+        if let Some(memory) = &config.docker_memory_limit {
+            openstack_args.push("--memory".to_string());
+            openstack_args.push(memory.clone());
+        }
+        openstack_args.push(config.openstack_image.clone());
+
+        let openstack_output = Command::new("docker").args(&openstack_args).output()?;
+        if !openstack_output.status.success() {
+            return Err(anyhow::anyhow!(
+                "failed to start openstack container: {}",
+                String::from_utf8_lossy(&openstack_output.stderr)
+            ));
+        }
+        let openstack_container_id = String::from_utf8_lossy(&openstack_output.stdout)
+            .trim()
+            .to_string();
+
+        let mut localstack_args = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--rm".to_string(),
+            "--network".to_string(),
+            config.docker_network_mode.clone(),
+            "-p".to_string(),
+            format!("127.0.0.1:{localstack_port}:4566"),
+            "-e".to_string(),
+            format!("SERVICES={localstack_services}"),
+            "-e".to_string(),
+            "DEBUG=1".to_string(),
+        ];
+        if let Some(cpu) = &config.docker_cpu_limit {
+            localstack_args.push("--cpus".to_string());
+            localstack_args.push(cpu.clone());
+        }
+        if let Some(memory) = &config.docker_memory_limit {
+            localstack_args.push("--memory".to_string());
+            localstack_args.push(memory.clone());
+        }
+        localstack_args.push(config.localstack_image.clone());
+
+        let localstack_output = Command::new("docker").args(&localstack_args).output()?;
+        if !localstack_output.status.success() {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &openstack_container_id])
+                .output();
+            return Err(anyhow::anyhow!(
+                "failed to start localstack container: {}",
+                String::from_utf8_lossy(&localstack_output.stderr)
+            ));
+        }
+        let localstack_container_id = String::from_utf8_lossy(&localstack_output.stdout)
+            .trim()
+            .to_string();
+
+        let timeout = Duration::from_secs(config.docker_startup_timeout_secs);
+        if let Err(err) = preflight_symmetric_runtime(
+            config,
+            &openstack_container_id,
+            &localstack_container_id,
+            &openstack_endpoint,
+            &localstack_endpoint,
+            timeout,
+        )
+        .await
+        {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &openstack_container_id])
+                .output();
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &localstack_container_id])
+                .output();
+            return Err(err);
+        }
+
+        Ok(Self {
+            openstack: BenchmarkManagedTarget {
+                endpoint: openstack_endpoint,
+                runtime: "docker".to_string(),
+                image: Some(config.openstack_image.clone()),
+                cpu_limit: config.docker_cpu_limit.clone(),
+                memory_limit: config.docker_memory_limit.clone(),
+                network_mode: Some(config.docker_network_mode.clone()),
+            },
+            localstack: BenchmarkManagedTarget {
+                endpoint: localstack_endpoint,
+                runtime: "docker".to_string(),
+                image: Some(config.localstack_image.clone()),
+                cpu_limit: config.docker_cpu_limit.clone(),
+                memory_limit: config.docker_memory_limit.clone(),
+                network_mode: Some(config.docker_network_mode.clone()),
+            },
+            openstack_container_id: Some(openstack_container_id),
+            localstack_container_id: Some(localstack_container_id),
+            openstack_harness: None,
+        })
+    }
+
+    async fn stop(&mut self) {
+        if let Some(container_id) = &self.localstack_container_id {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", container_id])
+                .output();
+        }
+        self.localstack_container_id = None;
+
+        if let Some(container_id) = &self.openstack_container_id {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", container_id])
+                .output();
+        }
+        self.openstack_container_id = None;
+
+        if let Some(harness) = self.openstack_harness.take() {
+            harness.shutdown();
+        }
+    }
 }
 
 pub async fn run_profile(
@@ -214,38 +655,68 @@ pub async fn run_profile(
         ));
     }
 
-    let parity_config = crate::parity::ParityConfig {
-        localstack_image: config.localstack_image.clone(),
-        openstack_endpoint: config.openstack_endpoint.clone(),
-        localstack_endpoint: config.localstack_endpoint.clone(),
-        target_services: Some(profile.services.clone()),
-        ..crate::parity::ParityConfig::default()
+    let runtime = BenchmarkRuntimeMetadata {
+        mode: config.runtime_mode,
+        execution_order_policy: config.execution_order_policy,
+        docker_constraints: (config.runtime_mode == BenchmarkRuntimeMode::SymmetricDocker).then(
+            || DockerRuntimeConstraints {
+                cpu_limit: config.docker_cpu_limit.clone(),
+                memory_limit: config.docker_memory_limit.clone(),
+                network_mode: config.docker_network_mode.clone(),
+            },
+        ),
     };
 
-    let mut manager = TargetManager::start(&parity_config).await?;
+    let mut manager = BenchmarkTargetManager::start(config, &profile.services).await?;
     let openstack_meta = BenchmarkTargetMetadata {
         endpoint: manager.openstack.endpoint.clone(),
+        runtime: manager.openstack.runtime.clone(),
+        image: manager.openstack.image.clone(),
+        cpu_limit: manager.openstack.cpu_limit.clone(),
+        memory_limit: manager.openstack.memory_limit.clone(),
+        network_mode: manager.openstack.network_mode.clone(),
         localstack_image: None,
         localstack_version: None,
     };
     let localstack_meta = BenchmarkTargetMetadata {
         endpoint: manager.localstack.endpoint.clone(),
+        runtime: manager.localstack.runtime.clone(),
+        image: manager.localstack.image.clone(),
+        cpu_limit: manager.localstack.cpu_limit.clone(),
+        memory_limit: manager.localstack.memory_limit.clone(),
+        network_mode: manager.localstack.network_mode.clone(),
         localstack_image: Some(config.localstack_image.clone()),
         localstack_version: localstack_version_from_image(&config.localstack_image),
     };
 
     let mut results = Vec::new();
-    for scenario in scenarios {
+    for (idx, scenario) in scenarios.into_iter().enumerate() {
         let scenario_run = scenario_run_config(&profile, &scenario);
-        let openstack_metrics =
-            execute_scenario(&manager.openstack.endpoint, &scenario, &scenario_run).await;
-        let localstack_metrics =
-            execute_scenario(&manager.localstack.endpoint, &scenario, &scenario_run).await;
+        let skip_reason = heavy_object_skip_reason(config, &scenario);
+        let skipped = skip_reason.is_some();
+
+        let (openstack_metrics, localstack_metrics) = if skipped {
+            (BenchmarkMetrics::default(), BenchmarkMetrics::default())
+        } else {
+            execute_in_order(
+                &manager,
+                &scenario,
+                &scenario_run,
+                config.execution_order_policy,
+                idx,
+            )
+            .await
+        };
+
         let comparison = compare_metrics(&openstack_metrics, &localstack_metrics);
 
         results.push(BenchmarkScenarioResult {
             scenario_id: scenario.id.clone(),
             service: scenario.service.clone(),
+            scenario_class: scenario.scenario_class,
+            load_tier: scenario.load_tier,
+            skipped,
+            skip_reason,
             run_config: scenario_run,
             openstack: BenchmarkTargetResult {
                 metadata: openstack_meta.clone(),
@@ -264,6 +735,7 @@ pub async fn run_profile(
         profile: profile_name.to_string(),
         run_id: run_id.clone(),
         generated_at: Utc::now().to_rfc3339(),
+        runtime,
         openstack_target: openstack_meta,
         localstack_target: localstack_meta,
         results,
@@ -277,6 +749,37 @@ pub async fn run_profile(
 
     manager.stop().await;
     Ok(report)
+}
+
+fn parse_size_bytes(input: &str) -> Option<u64> {
+    let trimmed = input.trim();
+    if let Ok(v) = trimmed.parse::<u64>() {
+        return Some(v);
+    }
+
+    let upper = trimmed.to_ascii_uppercase();
+    if let Some(prefix) = upper.strip_suffix("GB") {
+        return prefix
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(|v| v * 1024 * 1024 * 1024);
+    }
+    if let Some(prefix) = upper.strip_suffix("MB") {
+        return prefix.trim().parse::<u64>().ok().map(|v| v * 1024 * 1024);
+    }
+    if let Some(prefix) = upper.strip_suffix("KB") {
+        return prefix.trim().parse::<u64>().ok().map(|v| v * 1024);
+    }
+    None
+}
+
+fn benchmark_file_for_size(size_bytes: u64) -> String {
+    let root = std::env::var("BENCHMARK_LARGE_FILES_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "tests/benchmark/fixtures".to_string());
+    format!("{root}/{size_bytes}.bin")
 }
 
 fn scenario_run_config(
@@ -295,6 +798,185 @@ fn scenario_run_config(
             .unwrap_or(profile.operations_per_iteration),
         concurrency: scenario.concurrency.unwrap_or(profile.concurrency).max(1),
     }
+}
+
+async fn execute_in_order(
+    manager: &BenchmarkTargetManager,
+    scenario: &BenchmarkScenario,
+    scenario_run: &BenchmarkRunConfig,
+    policy: ExecutionOrderPolicy,
+    scenario_idx: usize,
+) -> (BenchmarkMetrics, BenchmarkMetrics) {
+    let openstack_first = match policy {
+        ExecutionOrderPolicy::OpenstackFirst => true,
+        ExecutionOrderPolicy::LocalstackFirst => false,
+        ExecutionOrderPolicy::Alternating => scenario_idx.is_multiple_of(2),
+    };
+
+    if openstack_first {
+        let openstack_metrics =
+            execute_scenario(&manager.openstack.endpoint, scenario, scenario_run).await;
+        let localstack_metrics =
+            execute_scenario(&manager.localstack.endpoint, scenario, scenario_run).await;
+        (openstack_metrics, localstack_metrics)
+    } else {
+        let localstack_metrics =
+            execute_scenario(&manager.localstack.endpoint, scenario, scenario_run).await;
+        let openstack_metrics =
+            execute_scenario(&manager.openstack.endpoint, scenario, scenario_run).await;
+        (openstack_metrics, localstack_metrics)
+    }
+}
+
+fn heavy_object_skip_reason(
+    config: &BenchmarkConfig,
+    scenario: &BenchmarkScenario,
+) -> Option<String> {
+    if scenario.load_tier != BenchmarkLoadTier::Extreme {
+        return None;
+    }
+    if scenario.service != "s3" {
+        return None;
+    }
+    if !scenario.id.contains("heavy") {
+        return None;
+    }
+    if config.heavy_object_enabled {
+        let Some(size_bytes) = parse_heavy_s3_size_bytes(&scenario.id) else {
+            return Some("unable to parse heavy object size from scenario id".to_string());
+        };
+        let path = benchmark_file_for_size(size_bytes);
+        if !Path::new(&path).exists() {
+            return Some(format!(
+                "heavy object fixture missing: {path} (set BENCHMARK_LARGE_FILES_DIR or disable BENCHMARK_HEAVY_OBJECTS)"
+            ));
+        }
+        return None;
+    }
+
+    Some(
+        "heavy object scenarios require BENCHMARK_HEAVY_OBJECTS=1 and sufficient runtime resources"
+            .to_string(),
+    )
+}
+
+fn benchmark_runtime_mode_from_env() -> BenchmarkRuntimeMode {
+    match std::env::var("PARITY_BENCHMARK_RUNTIME_MODE") {
+        Ok(mode) if mode.eq_ignore_ascii_case("symmetric-docker") => {
+            BenchmarkRuntimeMode::SymmetricDocker
+        }
+        _ => BenchmarkRuntimeMode::Asymmetric,
+    }
+}
+
+fn execution_order_policy_from_env() -> ExecutionOrderPolicy {
+    match std::env::var("PARITY_BENCHMARK_EXECUTION_ORDER") {
+        Ok(policy) if policy.eq_ignore_ascii_case("localstack-first") => {
+            ExecutionOrderPolicy::LocalstackFirst
+        }
+        Ok(policy) if policy.eq_ignore_ascii_case("alternating") => {
+            ExecutionOrderPolicy::Alternating
+        }
+        _ => ExecutionOrderPolicy::OpenstackFirst,
+    }
+}
+
+fn map_service_for_localstack(service: &str) -> String {
+    match service {
+        "events" => "eventbridge".to_string(),
+        "states" => "stepfunctions".to_string(),
+        _ => service.to_string(),
+    }
+}
+
+async fn preflight_symmetric_runtime(
+    config: &BenchmarkConfig,
+    openstack_container_id: &str,
+    localstack_container_id: &str,
+    openstack_endpoint: &str,
+    localstack_endpoint: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    wait_for_health(openstack_endpoint, timeout).await?;
+    wait_for_health(localstack_endpoint, timeout).await?;
+
+    let inspect = |id: &str| -> anyhow::Result<(Option<String>, Option<String>, Option<String>)> {
+        let output = Command::new("docker")
+            .args([
+                "inspect",
+                "--format",
+                "{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{.HostConfig.NetworkMode}}",
+                id,
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "failed to inspect container {id}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let mut parts = line.split('|');
+        let nano_cpus = parts
+            .next()
+            .filter(|s| !s.is_empty() && *s != "0")
+            .map(ToString::to_string);
+        let memory = parts
+            .next()
+            .filter(|s| !s.is_empty() && *s != "0")
+            .map(ToString::to_string);
+        let network_mode = parts
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        Ok((nano_cpus, memory, network_mode))
+    };
+
+    let openstack_limits = inspect(openstack_container_id)?;
+    let localstack_limits = inspect(localstack_container_id)?;
+
+    if openstack_limits != localstack_limits {
+        return Err(anyhow::anyhow!(
+            "symmetric runtime preflight failed: openstack and localstack container limits differ"
+        ));
+    }
+
+    if let Some(expected_network) = Some(config.docker_network_mode.as_str())
+        && openstack_limits.2.as_deref() != Some(expected_network)
+    {
+        return Err(anyhow::anyhow!(
+            "symmetric runtime preflight failed: expected network mode {expected_network}, got {:?}",
+            openstack_limits.2
+        ));
+    }
+
+    Ok(())
+}
+
+async fn wait_for_health(endpoint: &str, timeout: Duration) -> anyhow::Result<()> {
+    let health = format!("{endpoint}/_localstack/health");
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if Instant::now() > deadline {
+            return Err(anyhow::anyhow!(
+                "timed out waiting for benchmark target health at {health}"
+            ));
+        }
+
+        if let Ok(resp) = reqwest::get(&health).await
+            && resp.status().is_success()
+        {
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn free_port() -> anyhow::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
 }
 
 async fn execute_scenario(
@@ -535,32 +1217,115 @@ fn safe_ratio(left: f64, right: f64) -> Option<f64> {
 fn summarize_results(results: &[BenchmarkScenarioResult]) -> BenchmarkSummary {
     let mut p50_ratios = Vec::new();
     let mut p95_ratios = Vec::new();
+    let mut p99_ratios = Vec::new();
     let mut throughput_ratios = Vec::new();
     let mut openstack_error_count = 0usize;
     let mut localstack_error_count = 0usize;
+    let mut performance_scenarios = 0usize;
+    let mut coverage_scenarios = 0usize;
+    let mut skipped_scenarios = 0usize;
+    let mut per_service: BTreeMap<String, Vec<&BenchmarkScenarioResult>> = BTreeMap::new();
 
     for result in results {
+        per_service
+            .entry(result.service.clone())
+            .or_default()
+            .push(result);
+
+        match result.scenario_class {
+            BenchmarkScenarioClass::Coverage => coverage_scenarios += 1,
+            BenchmarkScenarioClass::Performance => performance_scenarios += 1,
+        }
+        if result.skipped {
+            skipped_scenarios += 1;
+        }
+
         openstack_error_count += result.openstack.metrics.error_count;
         localstack_error_count += result.localstack.metrics.error_count;
 
-        if let Some(value) = result.comparison.latency_p50_ratio {
-            p50_ratios.push(value);
+        if !result.skipped && result.scenario_class == BenchmarkScenarioClass::Performance {
+            if let Some(value) = result.comparison.latency_p50_ratio {
+                p50_ratios.push(value);
+            }
+            if let Some(value) = result.comparison.latency_p95_ratio {
+                p95_ratios.push(value);
+            }
+            if let Some(value) = safe_ratio(
+                result.openstack.metrics.latency_p99_ms,
+                result.localstack.metrics.latency_p99_ms,
+            ) {
+                p99_ratios.push(value);
+            }
+            if let Some(value) = result.comparison.throughput_ratio {
+                throughput_ratios.push(value);
+            }
         }
-        if let Some(value) = result.comparison.latency_p95_ratio {
-            p95_ratios.push(value);
+    }
+
+    let mut per_service_summary = BTreeMap::new();
+    for (service, service_results) in per_service {
+        let mut service_p50 = Vec::new();
+        let mut service_p95 = Vec::new();
+        let mut service_p99 = Vec::new();
+        let mut service_tp = Vec::new();
+        let mut service_skipped = 0usize;
+        let mut service_openstack_errors = 0usize;
+        let mut service_localstack_errors = 0usize;
+
+        for result in &service_results {
+            if result.skipped {
+                service_skipped += 1;
+            }
+            service_openstack_errors += result.openstack.metrics.error_count;
+            service_localstack_errors += result.localstack.metrics.error_count;
+
+            if !result.skipped && result.scenario_class == BenchmarkScenarioClass::Performance {
+                if let Some(v) = result.comparison.latency_p50_ratio {
+                    service_p50.push(v);
+                }
+                if let Some(v) = result.comparison.latency_p95_ratio {
+                    service_p95.push(v);
+                }
+                let p99 = safe_ratio(
+                    result.openstack.metrics.latency_p99_ms,
+                    result.localstack.metrics.latency_p99_ms,
+                );
+                if let Some(v) = p99 {
+                    service_p99.push(v);
+                }
+                if let Some(v) = result.comparison.throughput_ratio {
+                    service_tp.push(v);
+                }
+            }
         }
-        if let Some(value) = result.comparison.throughput_ratio {
-            throughput_ratios.push(value);
-        }
+
+        per_service_summary.insert(
+            service,
+            BenchmarkServiceSummary {
+                total_scenarios: service_results.len(),
+                skipped_scenarios: service_skipped,
+                openstack_error_count: service_openstack_errors,
+                localstack_error_count: service_localstack_errors,
+                avg_latency_p50_ratio: average(&service_p50),
+                avg_latency_p95_ratio: average(&service_p95),
+                avg_latency_p99_ratio: average(&service_p99),
+                avg_throughput_ratio: average(&service_tp),
+            },
+        );
     }
 
     BenchmarkSummary {
         total_scenarios: results.len(),
+        performance_scenarios,
+        coverage_scenarios,
+        skipped_scenarios,
         openstack_error_count,
         localstack_error_count,
         avg_latency_p50_ratio: average(&p50_ratios),
         avg_latency_p95_ratio: average(&p95_ratios),
+        avg_latency_p99_ratio: average(&p99_ratios),
         avg_throughput_ratio: average(&throughput_ratios),
+        per_service: per_service_summary,
     }
 }
 
@@ -611,6 +1376,14 @@ fn localstack_version_from_image(image: &str) -> Option<String> {
     image.split(':').nth(1).map(|v| v.to_string())
 }
 
+fn parse_heavy_s3_size_bytes(scenario_id: &str) -> Option<u64> {
+    if !scenario_id.starts_with("s3-heavy-") {
+        return None;
+    }
+    let size_part = scenario_id.strip_prefix("s3-heavy-")?;
+    parse_size_bytes(size_part)
+}
+
 fn all_service_names() -> Vec<String> {
     vec![
         "acm",
@@ -645,27 +1418,83 @@ fn all_service_names() -> Vec<String> {
 
 fn load_profile_scenarios(profile_name: &str, run_id: &str) -> Vec<BenchmarkScenario> {
     let mut scenarios = default_benchmark_scenarios(run_id);
-    let path = PathBuf::from(format!("tests/benchmark/scenarios/{profile_name}.json"));
+    let path = resolve_scenarios_path(profile_name);
     if path.exists()
         && let Ok(content) = std::fs::read_to_string(&path)
         && let Ok(mut external_scenarios) = serde_json::from_str::<Vec<BenchmarkScenario>>(&content)
     {
+        let default_ids = scenarios
+            .iter()
+            .map(|scenario| scenario.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+
         for scenario in &mut external_scenarios {
             inject_run_context(scenario, run_id);
+            normalize_scenario_metadata(scenario);
         }
-        scenarios = external_scenarios;
+
+        scenarios.extend(
+            external_scenarios
+                .into_iter()
+                .filter(|scenario| !default_ids.contains(&scenario.id)),
+        );
+    } else if profile_name == "fair-extreme" {
+        let fallback = resolve_scenarios_path("fair-extreme");
+        if fallback.exists()
+            && let Ok(content) = std::fs::read_to_string(&fallback)
+            && let Ok(mut external_scenarios) =
+                serde_json::from_str::<Vec<BenchmarkScenario>>(&content)
+        {
+            for scenario in &mut external_scenarios {
+                inject_run_context(scenario, run_id);
+                normalize_scenario_metadata(scenario);
+            }
+            scenarios = external_scenarios;
+        }
+    }
+
+    for scenario in &mut scenarios {
+        normalize_scenario_metadata(scenario);
     }
 
     scenarios
 }
 
-fn profile_matches(selected: &str, scenario_profile: &str) -> bool {
-    if selected == "all-services-smoke-fast" {
-        return scenario_profile == "all-services-smoke"
-            || scenario_profile == "all-services-smoke-fast";
+fn resolve_scenarios_path(profile_name: &str) -> PathBuf {
+    let relative = format!("tests/benchmark/scenarios/{profile_name}.json");
+    let direct = PathBuf::from(&relative);
+    if direct.exists() {
+        return direct;
     }
 
-    selected == scenario_profile
+    let workspace_relative = PathBuf::from(format!("../../../{relative}"));
+    if workspace_relative.exists() {
+        return workspace_relative;
+    }
+
+    direct
+}
+
+fn profile_matches(selected: &str, scenario_profile: &str) -> bool {
+    match selected {
+        "all-services-smoke-fast" => {
+            scenario_profile == "all-services-smoke"
+                || scenario_profile == "all-services-smoke-fast"
+        }
+        "fair-low" => {
+            scenario_profile == "all-services-smoke"
+                || scenario_profile == "all-services-smoke-fast"
+        }
+        "fair-medium" => {
+            scenario_profile == "all-services-smoke"
+                || scenario_profile == "all-services-smoke-fast"
+        }
+        "fair-high" => {
+            scenario_profile == "hot-path-deep" || scenario_profile == "all-services-smoke"
+        }
+        "fair-extreme" => scenario_profile == "hot-path-deep" || scenario_profile == "fair-extreme",
+        _ => selected == scenario_profile,
+    }
 }
 
 fn inject_run_context(scenario: &mut BenchmarkScenario, run_id: &str) {
@@ -690,6 +1519,55 @@ fn inject_run_context(scenario: &mut BenchmarkScenario, run_id: &str) {
     }
 }
 
+fn normalize_scenario_metadata(scenario: &mut BenchmarkScenario) {
+    apply_heavy_object_path_override(scenario);
+
+    if scenario.id.contains("probe") {
+        scenario.scenario_class = BenchmarkScenarioClass::Coverage;
+        if scenario.load_tier == BenchmarkLoadTier::Medium {
+            scenario.load_tier = BenchmarkLoadTier::Low;
+        }
+        return;
+    }
+
+    if scenario.id.contains("heavy") {
+        scenario.scenario_class = BenchmarkScenarioClass::Performance;
+        scenario.load_tier = BenchmarkLoadTier::Extreme;
+        return;
+    }
+
+    if scenario.profile.contains("fast") {
+        scenario.scenario_class = BenchmarkScenarioClass::Performance;
+        if scenario.load_tier == BenchmarkLoadTier::Medium {
+            scenario.load_tier = BenchmarkLoadTier::Low;
+        }
+        return;
+    }
+
+    if scenario.profile.contains("deep") {
+        scenario.scenario_class = BenchmarkScenarioClass::Performance;
+        if scenario.load_tier == BenchmarkLoadTier::Medium {
+            scenario.load_tier = BenchmarkLoadTier::High;
+        }
+    }
+}
+
+fn apply_heavy_object_path_override(scenario: &mut BenchmarkScenario) {
+    let Some(size_bytes) = parse_heavy_s3_size_bytes(&scenario.id) else {
+        return;
+    };
+    let override_path = benchmark_file_for_size(size_bytes);
+    if let Some(body_idx) = scenario
+        .operation
+        .command
+        .iter()
+        .position(|part| part == "--body")
+        && let Some(path_arg) = scenario.operation.command.get_mut(body_idx + 1)
+    {
+        *path_arg = override_path;
+    }
+}
+
 fn scenario_step(id: &str, protocol: ProtocolFamily, command: Vec<String>) -> ScenarioStep {
     ScenarioStep {
         id: id.to_string(),
@@ -701,191 +1579,75 @@ fn scenario_step(id: &str, protocol: ProtocolFamily, command: Vec<String>) -> Sc
 }
 
 pub fn default_benchmark_scenarios(_run_id: &str) -> Vec<BenchmarkScenario> {
-    vec![
-        BenchmarkScenario {
-            id: "s3-put-small-object".to_string(),
-            profile: "all-services-smoke".to_string(),
-            service: "s3".to_string(),
-            protocol: ProtocolFamily::RestXml,
-            setup: vec![scenario_step(
-                "s3-create-bucket",
-                ProtocolFamily::RestXml,
-                vec![
-                    "s3api".into(),
-                    "create-bucket".into(),
-                    "--bucket".into(),
-                    "{{bucket}}".into(),
-                ],
-            )],
-            operation: scenario_step(
-                "s3-put-object",
-                ProtocolFamily::RestXml,
-                vec![
-                    "s3api".into(),
-                    "put-object".into(),
-                    "--bucket".into(),
-                    "{{bucket}}".into(),
-                    "--key".into(),
-                    "item-{{run_id}}.txt".into(),
-                    "--body".into(),
-                    "README.md".into(),
-                ],
-            ),
-            cleanup: vec![scenario_step(
-                "s3-delete-bucket",
-                ProtocolFamily::RestXml,
-                vec![
-                    "s3api".into(),
-                    "delete-bucket".into(),
-                    "--bucket".into(),
-                    "{{bucket}}".into(),
-                ],
-            )],
-            warmup_iterations: None,
-            measured_iterations: None,
-            operations_per_iteration: None,
-            concurrency: None,
-        },
-        BenchmarkScenario {
-            id: "sqs-send-message".to_string(),
-            profile: "all-services-smoke".to_string(),
-            service: "sqs".to_string(),
-            protocol: ProtocolFamily::QueryXml,
-            setup: vec![
-                scenario_step(
-                    "sqs-create-queue",
-                    ProtocolFamily::QueryXml,
-                    vec![
-                        "sqs".into(),
-                        "create-queue".into(),
-                        "--queue-name".into(),
-                        "{{queue}}".into(),
-                    ],
-                ),
-                scenario_step(
-                    "sqs-get-queue-url",
-                    ProtocolFamily::QueryXml,
-                    vec![
-                        "sqs".into(),
-                        "get-queue-url".into(),
-                        "--queue-name".into(),
-                        "{{queue}}".into(),
-                    ],
-                ),
-            ],
-            operation: scenario_step(
-                "sqs-send-message",
-                ProtocolFamily::QueryXml,
-                vec![
-                    "sqs".into(),
-                    "send-message".into(),
-                    "--queue-url".into(),
-                    "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/{{queue}}"
-                        .into(),
-                    "--message-body".into(),
-                    "bench-{{run_id}}".into(),
-                ],
-            ),
-            cleanup: vec![scenario_step(
-                "sqs-delete-queue",
-                ProtocolFamily::QueryXml,
-                vec![
-                    "sqs".into(),
-                    "delete-queue".into(),
-                    "--queue-url".into(),
-                    "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/{{queue}}"
-                        .into(),
-                ],
-            )],
-            warmup_iterations: None,
-            measured_iterations: None,
-            operations_per_iteration: None,
-            concurrency: None,
-        },
-        BenchmarkScenario {
-            id: "ddb-get-item".to_string(),
-            profile: "all-services-smoke".to_string(),
-            service: "dynamodb".to_string(),
-            protocol: ProtocolFamily::Json,
-            setup: vec![
-                scenario_step(
-                    "ddb-create-table",
-                    ProtocolFamily::Json,
-                    vec![
-                        "dynamodb".into(),
-                        "create-table".into(),
-                        "--table-name".into(),
-                        "{{table}}".into(),
-                        "--attribute-definitions".into(),
-                        "AttributeName=pk,AttributeType=S".into(),
-                        "--key-schema".into(),
-                        "AttributeName=pk,KeyType=HASH".into(),
-                        "--billing-mode".into(),
-                        "PAY_PER_REQUEST".into(),
-                    ],
-                ),
-                scenario_step(
-                    "ddb-put-item",
-                    ProtocolFamily::Json,
-                    vec![
-                        "dynamodb".into(),
-                        "put-item".into(),
-                        "--table-name".into(),
-                        "{{table}}".into(),
-                        "--item".into(),
-                        "{\"pk\":{\"S\":\"k1\"},\"value\":{\"S\":\"v1\"}}".into(),
-                    ],
-                ),
-            ],
-            operation: scenario_step(
-                "ddb-get-item",
-                ProtocolFamily::Json,
-                vec![
-                    "dynamodb".into(),
-                    "get-item".into(),
-                    "--table-name".into(),
-                    "{{table}}".into(),
-                    "--key".into(),
-                    "{\"pk\":{\"S\":\"k1\"}}".into(),
-                ],
-            ),
-            cleanup: vec![scenario_step(
-                "ddb-delete-table",
-                ProtocolFamily::Json,
-                vec![
-                    "dynamodb".into(),
-                    "delete-table".into(),
-                    "--table-name".into(),
-                    "{{table}}".into(),
-                ],
-            )],
-            warmup_iterations: None,
-            measured_iterations: None,
-            operations_per_iteration: None,
-            concurrency: None,
-        },
-        BenchmarkScenario {
-            id: "sts-get-caller-identity".to_string(),
-            profile: "all-services-smoke".to_string(),
-            service: "sts".to_string(),
-            protocol: ProtocolFamily::QueryXml,
-            setup: vec![],
-            operation: scenario_step(
-                "sts-get-caller-identity",
-                ProtocolFamily::QueryXml,
-                vec!["sts".into(), "get-caller-identity".into()],
-            ),
-            cleanup: vec![],
-            warmup_iterations: None,
-            measured_iterations: None,
-            operations_per_iteration: None,
-            concurrency: None,
-        },
-    ]
+    all_service_names()
+        .into_iter()
+        .filter_map(|service| {
+            let (protocol, command) = performance_command_for_service(&service)?;
+            Some(BenchmarkScenario {
+                id: format!("{service}-list-performance"),
+                profile: "all-services-smoke".to_string(),
+                service,
+                scenario_class: BenchmarkScenarioClass::Performance,
+                load_tier: BenchmarkLoadTier::Low,
+                protocol: protocol.clone(),
+                setup: vec![],
+                operation: scenario_step("service-performance-op", protocol, command),
+                cleanup: vec![],
+                warmup_iterations: None,
+                measured_iterations: None,
+                operations_per_iteration: None,
+                concurrency: None,
+            })
+        })
+        .collect()
+}
+
+fn performance_command_for_service(service: &str) -> Option<(ProtocolFamily, Vec<String>)> {
+    let command = match service {
+        "acm" => vec!["acm", "list-certificates"],
+        "apigateway" => vec!["apigateway", "get-rest-apis"],
+        "cloudformation" => vec!["cloudformation", "list-stacks"],
+        "cloudwatch" => vec!["cloudwatch", "list-metrics"],
+        "dynamodb" => vec!["dynamodb", "list-tables"],
+        "ec2" => vec!["ec2", "describe-instances"],
+        "ecr" => vec!["ecr", "describe-repositories"],
+        "events" => vec!["events", "list-rules"],
+        "firehose" => vec!["firehose", "list-delivery-streams"],
+        "iam" => vec!["iam", "list-users"],
+        "kinesis" => vec!["kinesis", "list-streams"],
+        "kms" => vec!["kms", "list-keys"],
+        "lambda" => vec!["lambda", "list-functions"],
+        "opensearch" => vec!["opensearch", "list-domain-names"],
+        "redshift" => vec!["redshift", "describe-clusters"],
+        "route53" => vec!["route53", "list-hosted-zones"],
+        "s3" => vec!["s3api", "list-buckets"],
+        "secretsmanager" => vec!["secretsmanager", "list-secrets"],
+        "ses" => vec!["ses", "list-identities"],
+        "sns" => vec!["sns", "list-topics"],
+        "sqs" => vec!["sqs", "list-queues"],
+        "ssm" => vec!["ssm", "describe-parameters"],
+        "states" => vec!["stepfunctions", "list-state-machines"],
+        "sts" => vec!["sts", "get-caller-identity"],
+        _ => return None,
+    };
+
+    let protocol = match service {
+        "s3" | "route53" => ProtocolFamily::RestXml,
+        "iam" | "sts" | "ses" | "cloudformation" | "ec2" | "redshift" | "sqs" | "sns" => {
+            ProtocolFamily::QueryXml
+        }
+        "lambda" | "apigateway" | "opensearch" => ProtocolFamily::RestJson,
+        _ => ProtocolFamily::Json,
+    };
+
+    Some((
+        protocol,
+        command.into_iter().map(ToString::to_string).collect(),
+    ))
 }
 
 pub fn ensure_profile_scenarios(profile_name: &str) -> anyhow::Result<()> {
-    let path = Path::new("tests/benchmark/scenarios").join(format!("{profile_name}.json"));
+    let path = resolve_scenarios_path(profile_name);
     if path.exists() {
         return Ok(());
     }
@@ -901,6 +1663,8 @@ pub fn ensure_profile_scenarios(profile_name: &str) -> anyhow::Result<()> {
                 id: "s3-put-large-object".to_string(),
                 profile: "hot-path-deep".to_string(),
                 service: "s3".to_string(),
+                scenario_class: BenchmarkScenarioClass::Performance,
+                load_tier: BenchmarkLoadTier::High,
                 protocol: ProtocolFamily::RestXml,
                 setup: vec![scenario_step(
                     "s3-create-bucket",
@@ -945,6 +1709,8 @@ pub fn ensure_profile_scenarios(profile_name: &str) -> anyhow::Result<()> {
                 id: "sqs-send-burst".to_string(),
                 profile: "hot-path-deep".to_string(),
                 service: "sqs".to_string(),
+                scenario_class: BenchmarkScenarioClass::Performance,
+                load_tier: BenchmarkLoadTier::High,
                 protocol: ProtocolFamily::QueryXml,
                 setup: vec![scenario_step(
                     "sqs-create-queue",
@@ -987,6 +1753,8 @@ pub fn ensure_profile_scenarios(profile_name: &str) -> anyhow::Result<()> {
                 id: "ddb-read-hot-key".to_string(),
                 profile: "hot-path-deep".to_string(),
                 service: "dynamodb".to_string(),
+                scenario_class: BenchmarkScenarioClass::Performance,
+                load_tier: BenchmarkLoadTier::High,
                 protocol: ProtocolFamily::Json,
                 setup: vec![
                     scenario_step(
@@ -1045,6 +1813,144 @@ pub fn ensure_profile_scenarios(profile_name: &str) -> anyhow::Result<()> {
                 operations_per_iteration: Some(50),
                 concurrency: Some(10),
             },
+            BenchmarkScenario {
+                id: "s3-heavy-1gb".to_string(),
+                profile: "hot-path-deep".to_string(),
+                service: "s3".to_string(),
+                scenario_class: BenchmarkScenarioClass::Performance,
+                load_tier: BenchmarkLoadTier::Extreme,
+                protocol: ProtocolFamily::RestXml,
+                setup: vec![scenario_step(
+                    "s3-create-bucket",
+                    ProtocolFamily::RestXml,
+                    vec![
+                        "s3api".into(),
+                        "create-bucket".into(),
+                        "--bucket".into(),
+                        "{{bucket}}".into(),
+                    ],
+                )],
+                operation: scenario_step(
+                    "s3-put-object-heavy-1gb",
+                    ProtocolFamily::RestXml,
+                    vec![
+                        "s3api".into(),
+                        "put-object".into(),
+                        "--bucket".into(),
+                        "{{bucket}}".into(),
+                        "--key".into(),
+                        "heavy-1gb-{{run_id}}.bin".into(),
+                        "--body".into(),
+                        benchmark_file_for_size(1024 * 1024 * 1024),
+                    ],
+                ),
+                cleanup: vec![scenario_step(
+                    "s3-delete-bucket",
+                    ProtocolFamily::RestXml,
+                    vec![
+                        "s3api".into(),
+                        "delete-bucket".into(),
+                        "--bucket".into(),
+                        "{{bucket}}".into(),
+                    ],
+                )],
+                warmup_iterations: Some(0),
+                measured_iterations: Some(1),
+                operations_per_iteration: Some(1),
+                concurrency: Some(1),
+            },
+            BenchmarkScenario {
+                id: "s3-heavy-5gb".to_string(),
+                profile: "hot-path-deep".to_string(),
+                service: "s3".to_string(),
+                scenario_class: BenchmarkScenarioClass::Performance,
+                load_tier: BenchmarkLoadTier::Extreme,
+                protocol: ProtocolFamily::RestXml,
+                setup: vec![scenario_step(
+                    "s3-create-bucket",
+                    ProtocolFamily::RestXml,
+                    vec![
+                        "s3api".into(),
+                        "create-bucket".into(),
+                        "--bucket".into(),
+                        "{{bucket}}".into(),
+                    ],
+                )],
+                operation: scenario_step(
+                    "s3-put-object-heavy-5gb",
+                    ProtocolFamily::RestXml,
+                    vec![
+                        "s3api".into(),
+                        "put-object".into(),
+                        "--bucket".into(),
+                        "{{bucket}}".into(),
+                        "--key".into(),
+                        "heavy-5gb-{{run_id}}.bin".into(),
+                        "--body".into(),
+                        benchmark_file_for_size(5 * 1024 * 1024 * 1024),
+                    ],
+                ),
+                cleanup: vec![scenario_step(
+                    "s3-delete-bucket",
+                    ProtocolFamily::RestXml,
+                    vec![
+                        "s3api".into(),
+                        "delete-bucket".into(),
+                        "--bucket".into(),
+                        "{{bucket}}".into(),
+                    ],
+                )],
+                warmup_iterations: Some(0),
+                measured_iterations: Some(1),
+                operations_per_iteration: Some(1),
+                concurrency: Some(1),
+            },
+            BenchmarkScenario {
+                id: "s3-heavy-10gb".to_string(),
+                profile: "hot-path-deep".to_string(),
+                service: "s3".to_string(),
+                scenario_class: BenchmarkScenarioClass::Performance,
+                load_tier: BenchmarkLoadTier::Extreme,
+                protocol: ProtocolFamily::RestXml,
+                setup: vec![scenario_step(
+                    "s3-create-bucket",
+                    ProtocolFamily::RestXml,
+                    vec![
+                        "s3api".into(),
+                        "create-bucket".into(),
+                        "--bucket".into(),
+                        "{{bucket}}".into(),
+                    ],
+                )],
+                operation: scenario_step(
+                    "s3-put-object-heavy-10gb",
+                    ProtocolFamily::RestXml,
+                    vec![
+                        "s3api".into(),
+                        "put-object".into(),
+                        "--bucket".into(),
+                        "{{bucket}}".into(),
+                        "--key".into(),
+                        "heavy-10gb-{{run_id}}.bin".into(),
+                        "--body".into(),
+                        benchmark_file_for_size(10 * 1024 * 1024 * 1024),
+                    ],
+                ),
+                cleanup: vec![scenario_step(
+                    "s3-delete-bucket",
+                    ProtocolFamily::RestXml,
+                    vec![
+                        "s3api".into(),
+                        "delete-bucket".into(),
+                        "--bucket".into(),
+                        "{{bucket}}".into(),
+                    ],
+                )],
+                warmup_iterations: Some(0),
+                measured_iterations: Some(1),
+                operations_per_iteration: Some(1),
+                concurrency: Some(1),
+            },
         ],
         other => return Err(anyhow::anyhow!("unknown profile for scenario generation: {other}")),
     };
@@ -1056,10 +1962,14 @@ pub fn ensure_profile_scenarios(profile_name: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchmarkMetrics, compare_metrics, percentile, summarize_results};
+    use super::{
+        BenchmarkLoadTier, BenchmarkMetrics, BenchmarkScenarioClass, all_service_names,
+        compare_metrics, default_benchmark_scenarios, load_profile_scenarios,
+        parse_heavy_s3_size_bytes, percentile, summarize_results,
+    };
     use crate::benchmark::{
-        BenchmarkComparison, BenchmarkRunConfig, BenchmarkScenarioResult, BenchmarkTargetMetadata,
-        BenchmarkTargetResult,
+        BenchmarkComparison, BenchmarkRunConfig, BenchmarkScenarioResult, BenchmarkSummary,
+        BenchmarkTargetMetadata, BenchmarkTargetResult,
     };
 
     #[test]
@@ -1113,6 +2023,11 @@ mod tests {
     fn summarizes_across_scenarios() {
         let metadata = BenchmarkTargetMetadata {
             endpoint: "http://127.0.0.1:4566".to_string(),
+            runtime: "docker".to_string(),
+            image: Some("ghcr.io/jessekoldewijn/openstack:latest".to_string()),
+            cpu_limit: Some("2".to_string()),
+            memory_limit: Some("4g".to_string()),
+            network_mode: Some("bridge".to_string()),
             localstack_image: Some("localstack/localstack:3.7.2".to_string()),
             localstack_version: Some("3.7.2".to_string()),
         };
@@ -1125,6 +2040,10 @@ mod tests {
         let results = vec![BenchmarkScenarioResult {
             scenario_id: "x".to_string(),
             service: "s3".to_string(),
+            scenario_class: BenchmarkScenarioClass::Performance,
+            load_tier: BenchmarkLoadTier::Low,
+            skipped: false,
+            skip_reason: None,
             run_config,
             openstack: BenchmarkTargetResult {
                 metadata: metadata.clone(),
@@ -1174,9 +2093,163 @@ mod tests {
 
         let summary = summarize_results(&results);
         assert_eq!(summary.total_scenarios, 1);
+        assert_eq!(summary.performance_scenarios, 1);
+        assert_eq!(summary.coverage_scenarios, 0);
+        assert_eq!(summary.skipped_scenarios, 0);
         assert_eq!(summary.openstack_error_count, 1);
         assert_eq!(summary.localstack_error_count, 2);
         assert_eq!(summary.avg_latency_p50_ratio, Some(1.25));
+        assert!(summary.avg_latency_p99_ratio.is_some());
+        let s3 = summary
+            .per_service
+            .get("s3")
+            .expect("s3 service summary should exist");
+        assert_eq!(s3.total_scenarios, 1);
+        assert_eq!(s3.avg_latency_p95_ratio, Some(1.11));
+    }
+
+    #[test]
+    fn summary_excludes_coverage_and_skipped_from_ratio_rollups() {
+        let metadata = BenchmarkTargetMetadata {
+            endpoint: "http://127.0.0.1:4566".to_string(),
+            runtime: "docker".to_string(),
+            image: None,
+            cpu_limit: None,
+            memory_limit: None,
+            network_mode: Some("bridge".to_string()),
+            localstack_image: Some("localstack/localstack:3.7.2".to_string()),
+            localstack_version: Some("3.7.2".to_string()),
+        };
+
+        let metrics = BenchmarkMetrics {
+            latency_p50_ms: 10.0,
+            latency_p95_ms: 20.0,
+            latency_p99_ms: 30.0,
+            latency_min_ms: 5.0,
+            latency_max_ms: 31.0,
+            latency_stddev_ms: 2.0,
+            throughput_ops_per_sec: 50.0,
+            operation_count: 100,
+            error_count: 0,
+            success_rate: 1.0,
+            timeout_count: 0,
+            retry_count: 0,
+            total_duration_ms: 1000.0,
+        };
+
+        let perf = BenchmarkScenarioResult {
+            scenario_id: "perf".to_string(),
+            service: "s3".to_string(),
+            scenario_class: BenchmarkScenarioClass::Performance,
+            load_tier: BenchmarkLoadTier::High,
+            skipped: false,
+            skip_reason: None,
+            run_config: BenchmarkRunConfig {
+                warmup_iterations: 1,
+                measured_iterations: 2,
+                operations_per_iteration: 3,
+                concurrency: 1,
+            },
+            openstack: BenchmarkTargetResult {
+                metadata: metadata.clone(),
+                metrics: metrics.clone(),
+            },
+            localstack: BenchmarkTargetResult {
+                metadata: metadata.clone(),
+                metrics: BenchmarkMetrics {
+                    throughput_ops_per_sec: 25.0,
+                    latency_p50_ms: 5.0,
+                    latency_p95_ms: 10.0,
+                    ..metrics.clone()
+                },
+            },
+            comparison: BenchmarkComparison {
+                latency_p50_ratio: Some(2.0),
+                latency_p95_ratio: Some(2.0),
+                throughput_ratio: Some(2.0),
+                latency_p50_delta_ms: 5.0,
+                latency_p95_delta_ms: 10.0,
+                throughput_delta_ops_per_sec: 25.0,
+            },
+        };
+
+        let mut coverage = perf.clone();
+        coverage.scenario_id = "coverage".to_string();
+        coverage.scenario_class = BenchmarkScenarioClass::Coverage;
+        coverage.comparison.latency_p50_ratio = Some(100.0);
+        coverage.comparison.latency_p95_ratio = Some(100.0);
+        coverage.comparison.throughput_ratio = Some(100.0);
+
+        let mut skipped = perf.clone();
+        skipped.scenario_id = "skipped".to_string();
+        skipped.skipped = true;
+        skipped.skip_reason = Some("fixture missing".to_string());
+        skipped.comparison.latency_p50_ratio = Some(100.0);
+        skipped.comparison.latency_p95_ratio = Some(100.0);
+        skipped.comparison.throughput_ratio = Some(100.0);
+
+        let summary: BenchmarkSummary = summarize_results(&[perf, coverage, skipped]);
+        assert_eq!(summary.total_scenarios, 3);
+        assert_eq!(summary.performance_scenarios, 2);
+        assert_eq!(summary.coverage_scenarios, 1);
+        assert_eq!(summary.skipped_scenarios, 1);
+        assert_eq!(summary.avg_latency_p50_ratio, Some(2.0));
+        assert_eq!(summary.avg_latency_p95_ratio, Some(2.0));
+        assert_eq!(summary.avg_latency_p99_ratio, Some(1.0));
+        assert_eq!(summary.avg_throughput_ratio, Some(2.0));
+        assert_eq!(summary.per_service.len(), 1);
+        let s3 = summary
+            .per_service
+            .get("s3")
+            .expect("s3 service summary should exist");
+        assert_eq!(s3.total_scenarios, 3);
+        assert_eq!(s3.skipped_scenarios, 1);
+    }
+
+    #[test]
+    fn parses_heavy_s3_size_ids() {
+        assert_eq!(
+            parse_heavy_s3_size_bytes("s3-heavy-1gb"),
+            Some(1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            parse_heavy_s3_size_bytes("s3-heavy-5gb"),
+            Some(5 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            parse_heavy_s3_size_bytes("s3-heavy-10gb"),
+            Some(10 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(parse_heavy_s3_size_bytes("s3-put-small-object"), None);
+    }
+
+    #[test]
+    fn fair_extreme_profile_defines_1gb_5gb_10gb_scenarios() {
+        let scenarios = load_profile_scenarios("fair-extreme", "test-run");
+        let ids = scenarios
+            .iter()
+            .map(|scenario| scenario.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(ids.contains("s3-heavy-1gb"));
+        assert!(ids.contains("s3-heavy-5gb"));
+        assert!(ids.contains("s3-heavy-10gb"));
+    }
+
+    #[test]
+    fn all_services_have_default_performance_scenarios() {
+        let scenarios = default_benchmark_scenarios("seed");
+        let services_in_scenarios = scenarios
+            .iter()
+            .map(|scenario| scenario.service.as_str())
+            .collect::<std::collections::HashSet<_>>();
+
+        for service in all_service_names() {
+            assert!(
+                services_in_scenarios.contains(service.as_str()),
+                "missing performance scenario for service {service}"
+            );
+        }
     }
 
     #[test]

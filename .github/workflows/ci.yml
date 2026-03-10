@@ -14,6 +14,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+  PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
+  PARITY_BENCHMARK_RUNTIME_MODE: symmetric-docker
+  PARITY_BENCHMARK_EXECUTION_ORDER: alternating
+  PARITY_DOCKER_CPU_LIMIT: "2"
+  PARITY_DOCKER_MEMORY_LIMIT: 4g
+  PARITY_DOCKER_NETWORK_MODE: bridge
 
 permissions:
   contents: read
@@ -442,21 +448,46 @@ jobs:
           command -v aws
           aws --version
           docker --version
+          docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark smoke full profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile all-services-smoke
+      - name: Run benchmark fairness medium profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium
+      - name: Enforce benchmark regression gate (main lane)
+        run: |
+          python3 scripts/benchmark_regression_gate.py \
+            --lane fair-medium \
+            --current-glob "target/benchmark-reports/fair-medium-*.json" \
+            --repo "${{ github.repository }}" \
+            --workflow-file "ci.yml" \
+            --artifact-name "benchmark-smoke-full-report" \
+            --run-id "${{ github.run_id }}" \
+            --strict-missing-baseline \
+            --p95-limit 8 \
+            --p99-limit 12 \
+            --throughput-limit 8 \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-json "target/benchmark-reports/benchmark-gate-fair-medium-${{ github.run_id }}.json" \
+            --output-markdown "benchmark_gate_full_summary.md"
       - name: Add benchmark full table to workflow summary
         if: always()
         run: |
           python3 scripts/benchmark_report_tables.py \
-            --current-glob "target/benchmark-reports/all-services-smoke-*.json" \
-            --title "Benchmark All Services (Full)" \
+            --current-glob "target/benchmark-reports/fair-medium-*.json" \
+            --title "Benchmark Fairness (Medium)" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-full-report" \
             --run-id "${{ github.run_id }}" \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-path "benchmark_full_summary.md"
+      - name: Add consolidated benchmark summary to workflow summary
+        if: always()
+        run: |
+          python3 scripts/benchmark_report_consolidated.py \
+            --report-dir "target/benchmark-reports" \
+            --include-gate \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_consolidated_summary.md"
       - name: Upload benchmark full report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -506,21 +537,46 @@ jobs:
           command -v aws
           aws --version
           docker --version
+          docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark smoke fast profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile all-services-smoke-fast
+      - name: Run benchmark fairness low profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low
+      - name: Enforce benchmark regression gate (non-main lane)
+        run: |
+          python3 scripts/benchmark_regression_gate.py \
+            --lane fair-low \
+            --current-glob "target/benchmark-reports/fair-low-*.json" \
+            --repo "${{ github.repository }}" \
+            --workflow-file "ci.yml" \
+            --artifact-name "benchmark-smoke-fast-report" \
+            --run-id "${{ github.run_id }}" \
+            --strict-missing-baseline \
+            --p95-limit 8 \
+            --p99-limit 12 \
+            --throughput-limit 8 \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-json "target/benchmark-reports/benchmark-gate-fair-low-${{ github.run_id }}.json" \
+            --output-markdown "benchmark_gate_fast_summary.md"
       - name: Add benchmark fast table to workflow summary
         if: always()
         run: |
           python3 scripts/benchmark_report_tables.py \
-            --current-glob "target/benchmark-reports/all-services-smoke-fast-*.json" \
-            --title "Benchmark All Services (Fast)" \
+            --current-glob "target/benchmark-reports/fair-low-*.json" \
+            --title "Benchmark Fairness (Low)" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-fast-report" \
             --run-id "${{ github.run_id }}" \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-path "benchmark_fast_summary.md"
+      - name: Add consolidated benchmark summary to workflow summary
+        if: always()
+        run: |
+          python3 scripts/benchmark_report_consolidated.py \
+            --report-dir "target/benchmark-reports" \
+            --include-gate \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_consolidated_summary.md"
       - name: Upload benchmark fast report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -624,9 +680,22 @@ jobs:
           command -v aws
           aws --version
           docker --version
+          docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark smoke profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile all-services-smoke
+      - name: Run benchmark fairness medium profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium
+      - name: Add benchmark push summary
+        if: always()
+        run: |
+          python3 scripts/benchmark_report_tables.py \
+            --current-glob "target/benchmark-reports/fair-medium-*.json" \
+            --title "Benchmark Fairness (Push Medium)" \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_push_summary.md"
+          python3 scripts/benchmark_report_consolidated.py \
+            --report-dir "target/benchmark-reports" \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_push_consolidated_summary.md"
       - name: Upload benchmark push report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -634,6 +703,24 @@ jobs:
           name: benchmark-smoke-push-report
           path: target/benchmark-reports/*.json
           retention-days: 7
+
+  benchmark-gate-main:
+    name: Benchmark Gate (main lane)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    needs: [benchmark-smoke-full]
+    steps:
+      - name: Main benchmark gate passed
+        run: echo "Benchmark gate for main lane passed."
+
+  benchmark-gate-non-main:
+    name: Benchmark Gate (non-main lane)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.base_ref != 'main'
+    needs: [benchmark-smoke-fast]
+    steps:
+      - name: Non-main benchmark gate passed
+        run: echo "Benchmark gate for non-main lane passed."
 
   required-checks-main:
     name: Required checks (main target)
@@ -648,7 +735,8 @@ jobs:
         validate-harness-coverage,
         parity-core,
         parity-all-services-full,
-        benchmark-smoke-full
+        benchmark-smoke-full,
+        benchmark-gate-main
       ]
     steps:
       - name: All required checks passed
@@ -667,7 +755,8 @@ jobs:
         validate-harness-coverage,
         parity-core,
         parity-all-services-fast,
-        benchmark-smoke-fast
+        benchmark-smoke-fast,
+        benchmark-gate-non-main
       ]
     steps:
       - name: All required checks passed
@@ -688,7 +777,9 @@ jobs:
         parity-all-services-full,
         parity-all-services-fast,
         benchmark-smoke-full,
-        benchmark-smoke-fast
+        benchmark-smoke-fast,
+        benchmark-gate-main,
+        benchmark-gate-non-main
       ]
     steps:
       - uses: actions/checkout@v4
@@ -708,8 +799,8 @@ jobs:
         if: always()
         run: |
           python3 scripts/benchmark_report_tables.py \
-            --current-glob "artifacts/benchmark/all-services-smoke-*.json" \
-            --title "Benchmark All Services (Full)" \
+            --current-glob "artifacts/benchmark/fair-medium-*.json" \
+            --title "Benchmark Fairness (Medium)" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-full-report" \
@@ -719,13 +810,20 @@ jobs:
         if: always()
         run: |
           python3 scripts/benchmark_report_tables.py \
-            --current-glob "artifacts/benchmark/all-services-smoke-fast-*.json" \
-            --title "Benchmark All Services (Fast)" \
+            --current-glob "artifacts/benchmark/fair-low-*.json" \
+            --title "Benchmark Fairness (Low)" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-fast-report" \
             --run-id "${{ github.run_id }}" \
             --output-path "benchmark_fast_comment.md"
+      - name: Build consolidated benchmark markdown
+        if: always()
+        run: |
+          python3 scripts/benchmark_report_consolidated.py \
+            --report-dir "artifacts/benchmark" \
+            --include-gate \
+            --output-path "benchmark_consolidated_comment.md"
       - name: Build PR markdown summary
         id: build_comment
         run: |
@@ -767,9 +865,13 @@ jobs:
 
           full_benchmark_md = Path("benchmark_full_comment.md")
           fast_benchmark_md = Path("benchmark_fast_comment.md")
-          if full_benchmark_md.exists() or fast_benchmark_md.exists():
+          consolidated_benchmark_md = Path("benchmark_consolidated_comment.md")
+          if full_benchmark_md.exists() or fast_benchmark_md.exists() or consolidated_benchmark_md.exists():
               lines.append("### Benchmark")
               lines.append("")
+              if consolidated_benchmark_md.exists():
+                  lines.append(consolidated_benchmark_md.read_text(encoding="utf-8").strip())
+                  lines.append("")
               if full_benchmark_md.exists():
                   lines.append(full_benchmark_md.read_text(encoding="utf-8").strip())
                   lines.append("")

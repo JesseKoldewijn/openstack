@@ -3,6 +3,8 @@
     "id": "s3-put-large-object",
     "profile": "hot-path-deep",
     "service": "s3",
+    "scenario_class": "performance",
+    "load_tier": "high",
     "protocol": "rest-xml",
     "setup": [
       {
@@ -47,6 +49,8 @@
     "id": "sqs-send-burst",
     "profile": "hot-path-deep",
     "service": "sqs",
+    "scenario_class": "performance",
+    "load_tier": "high",
     "protocol": "query-xml",
     "setup": [
       {
@@ -94,6 +98,8 @@
     "id": "ddb-read-hot-key",
     "profile": "hot-path-deep",
     "service": "dynamodb",
+    "scenario_class": "performance",
+    "load_tier": "high",
     "protocol": "json",
     "setup": [
       {
@@ -161,6 +167,8 @@
     "id": "lambda-list-functions-deep",
     "profile": "hot-path-deep",
     "service": "lambda",
+    "scenario_class": "performance",
+    "load_tier": "high",
     "protocol": "rest-json",
     "setup": [],
     "operation": {
@@ -180,6 +188,8 @@
     "id": "kinesis-list-streams-deep",
     "profile": "hot-path-deep",
     "service": "kinesis",
+    "scenario_class": "performance",
+    "load_tier": "high",
     "protocol": "json",
     "setup": [],
     "operation": {
@@ -199,6 +209,8 @@
     "id": "opensearch-list-domains-deep",
     "profile": "hot-path-deep",
     "service": "opensearch",
+    "scenario_class": "performance",
+    "load_tier": "high",
     "protocol": "rest-json",
     "setup": [],
     "operation": {
@@ -218,6 +230,8 @@
     "id": "cloudwatch-list-metrics-deep",
     "profile": "hot-path-deep",
     "service": "cloudwatch",
+    "scenario_class": "performance",
+    "load_tier": "high",
     "protocol": "json",
     "setup": [],
     "operation": {
