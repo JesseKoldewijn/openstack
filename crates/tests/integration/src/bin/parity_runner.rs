@@ -1,10 +1,28 @@
 use openstack_integration_tests::parity::{ParityConfig, run_profile};
 
+fn parse_args() -> String {
+    let mut profile = "core".to_string();
+    let mut args = std::env::args().skip(1);
+
+    while let Some(arg) = args.next() {
+        if arg == "--profile" {
+            if let Some(value) = args.next() {
+                profile = value;
+            }
+            continue;
+        }
+
+        if !arg.starts_with('-') {
+            profile = arg;
+        }
+    }
+
+    profile
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let profile = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "core".to_string());
+    let profile = parse_args();
     let config = ParityConfig::default();
     let report = run_profile(&config, &profile).await?;
 

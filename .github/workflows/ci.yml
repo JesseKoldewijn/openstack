@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: ["main", "develop"]
   pull_request:
-    branches: ["main", "master"]
+    branches: ["**"]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,6 +13,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   fmt:
@@ -25,6 +30,16 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Add rustfmt table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Rustfmt"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \\`${{ job.status }}\\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   clippy:
     name: Clippy
@@ -40,6 +55,16 @@ jobs:
           key: clippy-${{ hashFiles('**/Cargo.lock') }}
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Add clippy table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Clippy"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \\`${{ job.status }}\\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   test:
     name: Test (${{ matrix.os }})
@@ -61,8 +86,18 @@ jobs:
       - name: Run integration tests
         run: cargo test --workspace --tests
         env:
-          # Docker may not be available on all runners; skip Lambda tests
           SKIP_DOCKER_TESTS: "1"
+      - name: Add tests table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Tests"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \\`${{ job.status }}\\` |"
+            echo "| OS | \\`${{ matrix.os }}\\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     name: Build (release)
@@ -99,12 +134,38 @@ jobs:
           chmod +x ./artifacts/openstack
           timeout 10s ./artifacts/openstack --help > /dev/null
           timeout 10s ./artifacts/openstack --version > /dev/null
+      - name: Add build artifact table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Build Artifact"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \\`${{ job.status }}\\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  validate-harness-coverage:
+    name: Validate Harness Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate service matrix coverage
+        run: python3 scripts/validate_harness_coverage.py
+      - name: Add coverage validation table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Harness Coverage"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \\`${{ job.status }}\\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   parity-core:
     name: Parity (core)
     runs-on: ubuntu-latest
-    env:
-      PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -144,46 +205,37 @@ jobs:
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity core profile
-        run: cargo run -p openstack-integration-tests --bin parity_runner -- core
-      - name: Summarize parity core failures
-        if: always() && env.ACT != 'true'
+        run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile core
+      - name: Add parity core table to workflow summary
+        if: always()
         run: |
           python3 - <<'PY'
           import glob
           import json
           import os
-          import sys
 
-          reports = sorted(glob.glob("target/parity-reports/core-*.json"), key=os.path.getmtime)
-          if not reports:
-              print("No parity core report found.")
-              sys.exit(0)
+          files = sorted(glob.glob("target/parity-reports/core-*.json"), key=os.path.getmtime)
+          if not files:
+              print("No parity core report found")
+              raise SystemExit(0)
 
-          latest = reports[-1]
-          print(f"Parity core report: {latest}")
-          with open(latest, "r", encoding="utf-8") as f:
-              report = json.load(f)
+          with open(files[-1], "r", encoding="utf-8") as handle:
+              report = json.load(handle)
 
-          failed = [r for r in report.get("results", []) if not r.get("passed", False)]
-          if not failed:
-              print("No failed scenarios in parity core report.")
-              sys.exit(0)
-
-          print(f"Failed scenarios: {len(failed)}")
-          for scenario in failed:
-              mismatches = scenario.get("mismatches", [])
-              kinds = sorted({m.get("kind", "unknown") for m in mismatches})
-              first = mismatches[0] if mismatches else {}
-              print("---")
-              print(f"Scenario: {scenario.get('scenario_id', '<unknown>')}")
-              print(f"Service: {scenario.get('service', '<unknown>')}")
-              print(f"Mismatches: {len(mismatches)}")
-              print(f"Kinds: {', '.join(kinds) if kinds else 'none'}")
-              if first:
-                  print(
-                      "Example: "
-                      f"{first.get('step_id', '<step>')} / {first.get('path', '<path>')}"
-                  )
+          summary = report.get("summary", {})
+          lines = [
+              "## Parity Core",
+              "",
+              "| Metric | Value |",
+              "|---|---:|",
+              f"| Profile | `{report.get('profile', 'core')}` |",
+              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
+              f"| Passed | {summary.get('passed', 0)} |",
+              f"| Failed | {summary.get('failed', 0)} |",
+              f"| Accepted Differences | {summary.get('accepted_differences', 0)} |",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
           PY
       - name: Upload parity report artifacts
         if: always() && env.ACT != 'true'
@@ -193,20 +245,17 @@ jobs:
           path: target/parity-reports/*.json
           retention-days: 7
 
-  parity-extended:
-    name: Parity (extended, non-required)
+  parity-all-services-full:
+    name: Parity (all-services-smoke full)
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    continue-on-error: true
-    env:
-      PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-parity-extended
-          key: parity-extended-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: ci-parity-all-services-full
+          key: parity-all-services-full-${{ hashFiles('**/Cargo.lock') }}
       - name: Ensure AWS CLI is installed
         run: |
           set -euo pipefail
@@ -238,60 +287,577 @@ jobs:
           aws --version
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run parity extended profile
-        run: cargo run -p openstack-integration-tests --bin parity_runner -- extended
-      - name: Summarize parity extended failures
-        if: always() && env.ACT != 'true'
+      - name: Run parity all-services smoke full profile
+        run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
+      - name: Add parity full table to workflow summary
+        if: always()
         run: |
           python3 - <<'PY'
           import glob
           import json
           import os
-          import sys
 
-          reports = sorted(glob.glob("target/parity-reports/extended-*.json"), key=os.path.getmtime)
-          if not reports:
-              print("No parity extended report found.")
-              sys.exit(0)
-
-          latest = reports[-1]
-          print(f"Parity extended report: {latest}")
-          with open(latest, "r", encoding="utf-8") as f:
-              report = json.load(f)
-
-          failed = [r for r in report.get("results", []) if not r.get("passed", False)]
-          if not failed:
-              print("No failed scenarios in parity extended report.")
-              sys.exit(0)
-
-          print(f"Failed scenarios: {len(failed)}")
-          for scenario in failed:
-              mismatches = scenario.get("mismatches", [])
-              kinds = sorted({m.get("kind", "unknown") for m in mismatches})
-              first = mismatches[0] if mismatches else {}
-              print("---")
-              print(f"Scenario: {scenario.get('scenario_id', '<unknown>')}")
-              print(f"Service: {scenario.get('service', '<unknown>')}")
-              print(f"Mismatches: {len(mismatches)}")
-              print(f"Kinds: {', '.join(kinds) if kinds else 'none'}")
-              if first:
-                  print(
-                      "Example: "
-                      f"{first.get('step_id', '<step>')} / {first.get('path', '<path>')}"
-                  )
+          files = sorted(glob.glob("target/parity-reports/all-services-smoke-*.json"), key=os.path.getmtime)
+          if not files:
+              raise SystemExit(0)
+          with open(files[-1], "r", encoding="utf-8") as handle:
+              report = json.load(handle)
+          summary = report.get("summary", {})
+          lines = [
+              "## Parity All Services (Full)",
+              "",
+              "| Metric | Value |",
+              "|---|---:|",
+              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
+              f"| Passed | {summary.get('passed', 0)} |",
+              f"| Failed | {summary.get('failed', 0)} |",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
           PY
-      - name: Upload parity extended report artifacts
+      - name: Upload parity full report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: parity-extended-report
+          name: parity-all-services-full-report
           path: target/parity-reports/*.json
           retention-days: 7
 
-  required-checks:
-    name: Required checks
+  parity-all-services-fast:
+    name: Parity (all-services-smoke fast)
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, test, verify-build-artifact, parity-core]
+    if: github.event_name == 'pull_request' && github.base_ref != 'main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-parity-all-services-fast
+          key: parity-all-services-fast-${{ hashFiles('**/Cargo.lock') }}
+      - name: Ensure AWS CLI is installed
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          if command -v pipx >/dev/null 2>&1; then
+            pipx install awscli || pipx upgrade awscli
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          if ! command -v aws >/dev/null 2>&1; then
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            if command -v sudo >/dev/null 2>&1; then
+              sudo ./aws/install --update
+            else
+              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
+              export PATH="$HOME/.local/bin:$PATH"
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+          fi
+          aws --version
+      - name: Preflight parity environment
+        run: |
+          set -euo pipefail
+          command -v aws
+          aws --version
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+      - name: Run parity all-services smoke fast profile
+        run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke-fast
+      - name: Add parity fast table to workflow summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          files = sorted(glob.glob("target/parity-reports/all-services-smoke-fast-*.json"), key=os.path.getmtime)
+          if not files:
+              raise SystemExit(0)
+          with open(files[-1], "r", encoding="utf-8") as handle:
+              report = json.load(handle)
+          summary = report.get("summary", {})
+          lines = [
+              "## Parity All Services (Fast)",
+              "",
+              "| Metric | Value |",
+              "|---|---:|",
+              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
+              f"| Passed | {summary.get('passed', 0)} |",
+              f"| Failed | {summary.get('failed', 0)} |",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
+          PY
+      - name: Upload parity fast report artifacts
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-all-services-fast-report
+          path: target/parity-reports/*.json
+          retention-days: 7
+
+  benchmark-smoke-full:
+    name: Benchmark (all-services-smoke full)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-benchmark-smoke-full
+          key: benchmark-smoke-full-${{ hashFiles('**/Cargo.lock') }}
+      - name: Ensure AWS CLI is installed
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          if command -v pipx >/dev/null 2>&1; then
+            pipx install awscli || pipx upgrade awscli
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          if ! command -v aws >/dev/null 2>&1; then
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            if command -v sudo >/dev/null 2>&1; then
+              sudo ./aws/install --update
+            else
+              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
+              export PATH="$HOME/.local/bin:$PATH"
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+          fi
+          aws --version
+      - name: Preflight benchmark environment
+        run: |
+          set -euo pipefail
+          command -v aws
+          aws --version
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+      - name: Run benchmark smoke full profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile all-services-smoke
+      - name: Add benchmark full table to workflow summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          files = sorted(glob.glob("target/benchmark-reports/all-services-smoke-*.json"), key=os.path.getmtime)
+          if not files:
+              raise SystemExit(0)
+          with open(files[-1], "r", encoding="utf-8") as handle:
+              report = json.load(handle)
+          summary = report.get("summary", {})
+          lines = [
+              "## Benchmark All Services (Full)",
+              "",
+              "| Metric | Value |",
+              "|---|---:|",
+              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
+              f"| Openstack Errors | {summary.get('openstack_error_count', 0)} |",
+              f"| LocalStack Errors | {summary.get('localstack_error_count', 0)} |",
+              f"| Avg p50 Ratio | {summary.get('avg_latency_p50_ratio')} |",
+              f"| Avg p95 Ratio | {summary.get('avg_latency_p95_ratio')} |",
+              f"| Avg Throughput Ratio | {summary.get('avg_throughput_ratio')} |",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
+          PY
+      - name: Upload benchmark full report artifacts
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-smoke-full-report
+          path: target/benchmark-reports/*.json
+          retention-days: 7
+
+  benchmark-smoke-fast:
+    name: Benchmark (all-services-smoke fast)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.base_ref != 'main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-benchmark-smoke-fast
+          key: benchmark-smoke-fast-${{ hashFiles('**/Cargo.lock') }}
+      - name: Ensure AWS CLI is installed
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          if command -v pipx >/dev/null 2>&1; then
+            pipx install awscli || pipx upgrade awscli
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          if ! command -v aws >/dev/null 2>&1; then
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            if command -v sudo >/dev/null 2>&1; then
+              sudo ./aws/install --update
+            else
+              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
+              export PATH="$HOME/.local/bin:$PATH"
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+          fi
+          aws --version
+      - name: Preflight benchmark environment
+        run: |
+          set -euo pipefail
+          command -v aws
+          aws --version
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+      - name: Run benchmark smoke fast profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile all-services-smoke-fast
+      - name: Add benchmark fast table to workflow summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          files = sorted(glob.glob("target/benchmark-reports/all-services-smoke-fast-*.json"), key=os.path.getmtime)
+          if not files:
+              raise SystemExit(0)
+          with open(files[-1], "r", encoding="utf-8") as handle:
+              report = json.load(handle)
+          summary = report.get("summary", {})
+          lines = [
+              "## Benchmark All Services (Fast)",
+              "",
+              "| Metric | Value |",
+              "|---|---:|",
+              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
+              f"| Openstack Errors | {summary.get('openstack_error_count', 0)} |",
+              f"| LocalStack Errors | {summary.get('localstack_error_count', 0)} |",
+              f"| Avg p50 Ratio | {summary.get('avg_latency_p50_ratio')} |",
+              f"| Avg p95 Ratio | {summary.get('avg_latency_p95_ratio')} |",
+              f"| Avg Throughput Ratio | {summary.get('avg_throughput_ratio')} |",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
+          PY
+      - name: Upload benchmark fast report artifacts
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-smoke-fast-report
+          path: target/benchmark-reports/*.json
+          retention-days: 7
+
+  parity-all-services-push:
+    name: Parity (all-services-smoke push)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-parity-all-services-push
+          key: parity-all-services-push-${{ hashFiles('**/Cargo.lock') }}
+      - name: Ensure AWS CLI is installed
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          if command -v pipx >/dev/null 2>&1; then
+            pipx install awscli || pipx upgrade awscli
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          if ! command -v aws >/dev/null 2>&1; then
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            if command -v sudo >/dev/null 2>&1; then
+              sudo ./aws/install --update
+            else
+              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
+              export PATH="$HOME/.local/bin:$PATH"
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+          fi
+          aws --version
+      - name: Preflight parity environment
+        run: |
+          set -euo pipefail
+          command -v aws
+          aws --version
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+      - name: Run parity all-services smoke profile
+        run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
+      - name: Upload parity push report artifacts
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-all-services-push-report
+          path: target/parity-reports/*.json
+          retention-days: 7
+
+  benchmark-smoke-push:
+    name: Benchmark (all-services-smoke push)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-benchmark-smoke-push
+          key: benchmark-smoke-push-${{ hashFiles('**/Cargo.lock') }}
+      - name: Ensure AWS CLI is installed
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          if command -v pipx >/dev/null 2>&1; then
+            pipx install awscli || pipx upgrade awscli
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          if ! command -v aws >/dev/null 2>&1; then
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            if command -v sudo >/dev/null 2>&1; then
+              sudo ./aws/install --update
+            else
+              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
+              export PATH="$HOME/.local/bin:$PATH"
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+          fi
+          aws --version
+      - name: Preflight benchmark environment
+        run: |
+          set -euo pipefail
+          command -v aws
+          aws --version
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+      - name: Run benchmark smoke profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile all-services-smoke
+      - name: Upload benchmark push report artifacts
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-smoke-push-report
+          path: target/benchmark-reports/*.json
+          retention-days: 7
+
+  required-checks-main:
+    name: Required checks (main target)
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    needs:
+      [
+        fmt,
+        clippy,
+        test,
+        verify-build-artifact,
+        validate-harness-coverage,
+        parity-core,
+        parity-all-services-full,
+        benchmark-smoke-full
+      ]
     steps:
       - name: All required checks passed
-        run: echo "All required CI checks passed."
+        run: echo "All required checks for main passed."
+
+  required-checks-non-main:
+    name: Required checks (non-main target)
+    if: github.event_name == 'pull_request' && github.base_ref != 'main'
+    runs-on: ubuntu-latest
+    needs:
+      [
+        fmt,
+        clippy,
+        test,
+        verify-build-artifact,
+        validate-harness-coverage,
+        parity-core,
+        parity-all-services-fast,
+        benchmark-smoke-fast
+      ]
+    steps:
+      - name: All required checks passed
+        run: echo "All required checks for non-main branches passed."
+
+  pr-results-comment:
+    name: PR Results Comment
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs:
+      [
+        fmt,
+        clippy,
+        test,
+        verify-build-artifact,
+        validate-harness-coverage,
+        parity-core,
+        parity-all-services-full,
+        parity-all-services-fast,
+        benchmark-smoke-full,
+        benchmark-smoke-fast
+      ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download parity artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: parity-*-report
+          merge-multiple: true
+          path: artifacts/parity
+      - name: Download benchmark artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-*-report
+          merge-multiple: true
+          path: artifacts/benchmark
+      - name: Build PR markdown summary
+        id: build_comment
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+          from pathlib import Path
+
+          def latest(pattern):
+              files = sorted(glob.glob(pattern), key=os.path.getmtime)
+              return files[-1] if files else None
+
+          lines = ["<!-- openstack-ci-results -->", "## CI Results", ""]
+          lines.extend([
+              "### Checks",
+              "",
+              "| Check | Result |",
+              "|---|---|",
+              f"| Rustfmt | `{os.environ.get('FMT_RESULT', 'unknown')}` |",
+              f"| Clippy | `{os.environ.get('CLIPPY_RESULT', 'unknown')}` |",
+              f"| Tests | `{os.environ.get('TEST_RESULT', 'unknown')}` |",
+              f"| Build Artifact | `{os.environ.get('BUILD_RESULT', 'unknown')}` |",
+              f"| Coverage Validation | `{os.environ.get('COVERAGE_RESULT', 'unknown')}` |",
+              "",
+          ])
+
+          parity_reports = sorted(glob.glob("artifacts/parity/*.json"), key=os.path.getmtime)
+          if parity_reports:
+              lines.extend(["### Parity", "", "| Profile | Scenarios | Passed | Failed | Accepted |", "|---|---:|---:|---:|---:|"])
+              for path in parity_reports:
+                  with open(path, "r", encoding="utf-8") as handle:
+                      parity = json.load(handle)
+                  ps = parity.get("summary", {})
+                  lines.append(
+                      f"| `{parity.get('profile', 'n/a')}` | {ps.get('total_scenarios', 0)} | {ps.get('passed', 0)} | {ps.get('failed', 0)} | {ps.get('accepted_differences', 0)} |"
+                  )
+              lines.append("")
+
+          benchmark_reports = sorted(glob.glob("artifacts/benchmark/*.json"), key=os.path.getmtime)
+          if benchmark_reports:
+              lines.extend([
+                  "### Benchmark",
+                  "",
+                  "| Profile | Scenarios | OS Errors | LS Errors | Avg p50 | Avg p95 | Avg Throughput |",
+                  "|---|---:|---:|---:|---:|---:|---:|",
+              ])
+              for path in benchmark_reports:
+                  with open(path, "r", encoding="utf-8") as handle:
+                      benchmark = json.load(handle)
+                  bs = benchmark.get("summary", {})
+                  lines.append(
+                      f"| `{benchmark.get('profile', 'n/a')}` | {bs.get('total_scenarios', 0)} | {bs.get('openstack_error_count', 0)} | {bs.get('localstack_error_count', 0)} | {bs.get('avg_latency_p50_ratio')} | {bs.get('avg_latency_p95_ratio')} | {bs.get('avg_throughput_ratio')} |"
+                  )
+              lines.append("")
+
+          content = "\n".join(lines).strip() + "\n"
+          Path("pr_results_comment.md").write_text(content, encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write(content + "\n")
+          PY
+        env:
+          FMT_RESULT: ${{ needs.fmt.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.verify-build-artifact.result }}
+          COVERAGE_RESULT: ${{ needs.validate-harness-coverage.result }}
+      - name: Upsert PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          marker = "<!-- openstack-ci-results -->"
+          body = Path("pr_results_comment.md").read_text(encoding="utf-8")
+
+          existing_raw = subprocess.check_output(
+              [
+                  "gh",
+                  "api",
+                  f"repos/{os.environ['REPO']}/issues/{os.environ['PR_NUMBER']}/comments",
+                  "--paginate",
+              ],
+              text=True,
+          )
+          comments = json.loads(existing_raw)
+          match = None
+          for comment in comments:
+              if marker in comment.get("body", ""):
+                  match = comment
+                  break
+
+          if match:
+              subprocess.check_call(
+                  [
+                      "gh",
+                      "api",
+                      f"repos/{os.environ['REPO']}/issues/comments/{match['id']}",
+                      "--method",
+                      "PATCH",
+                      "-f",
+                      f"body={body}",
+                  ]
+              )
+          else:
+              subprocess.check_call(
+                  [
+                      "gh",
+                      "api",
+                      f"repos/{os.environ['REPO']}/issues/{os.environ['PR_NUMBER']}/comments",
+                      "--method",
+                      "POST",
+                      "-f",
+                      f"body={body}",
+                  ]
+              )
+          PY

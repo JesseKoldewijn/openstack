@@ -1,0 +1,28 @@
+{
+  "services": [
+    {"name": "acm", "deep_candidate": false},
+    {"name": "apigateway", "deep_candidate": false},
+    {"name": "cloudformation", "deep_candidate": false},
+    {"name": "cloudwatch", "deep_candidate": true},
+    {"name": "dynamodb", "deep_candidate": true},
+    {"name": "ec2", "deep_candidate": false},
+    {"name": "ecr", "deep_candidate": false},
+    {"name": "events", "deep_candidate": false},
+    {"name": "firehose", "deep_candidate": false},
+    {"name": "iam", "deep_candidate": false},
+    {"name": "kinesis", "deep_candidate": true},
+    {"name": "kms", "deep_candidate": false},
+    {"name": "lambda", "deep_candidate": true},
+    {"name": "opensearch", "deep_candidate": true},
+    {"name": "redshift", "deep_candidate": false},
+    {"name": "route53", "deep_candidate": false},
+    {"name": "s3", "deep_candidate": true},
+    {"name": "secretsmanager", "deep_candidate": false},
+    {"name": "ses", "deep_candidate": false},
+    {"name": "sns", "deep_candidate": false},
+    {"name": "sqs", "deep_candidate": true},
+    {"name": "ssm", "deep_candidate": false},
+    {"name": "states", "deep_candidate": false},
+    {"name": "sts", "deep_candidate": false}
+  ]
+}

@@ -29,6 +29,7 @@ pub struct ParityConfig {
     pub profiles: HashMap<String, ProfileConfig>,
     pub openstack_endpoint: Option<String>,
     pub localstack_endpoint: Option<String>,
+    pub target_services: Option<Vec<String>>,
 }
 
 impl Default for ParityConfig {
@@ -60,6 +61,29 @@ impl Default for ParityConfig {
                 ],
             },
         );
+        profiles.insert(
+            "all-services-smoke".to_string(),
+            ProfileConfig {
+                name: "all-services-smoke".to_string(),
+                services: all_service_names(),
+            },
+        );
+        profiles.insert(
+            "all-services-smoke-fast".to_string(),
+            ProfileConfig {
+                name: "all-services-smoke-fast".to_string(),
+                services: vec![
+                    "s3".into(),
+                    "sqs".into(),
+                    "sns".into(),
+                    "dynamodb".into(),
+                    "kms".into(),
+                    "ssm".into(),
+                    "kinesis".into(),
+                    "sts".into(),
+                ],
+            },
+        );
 
         Self {
             localstack_image: std::env::var("PARITY_LOCALSTACK_IMAGE")
@@ -71,8 +95,41 @@ impl Default for ParityConfig {
             profiles,
             openstack_endpoint: std::env::var("PARITY_OPENSTACK_ENDPOINT").ok(),
             localstack_endpoint: std::env::var("PARITY_LOCALSTACK_ENDPOINT").ok(),
+            target_services: None,
         }
     }
+}
+
+fn all_service_names() -> Vec<String> {
+    vec![
+        "s3",
+        "sqs",
+        "sns",
+        "dynamodb",
+        "iam",
+        "sts",
+        "kms",
+        "secretsmanager",
+        "ssm",
+        "acm",
+        "kinesis",
+        "firehose",
+        "cloudwatch",
+        "events",
+        "states",
+        "apigateway",
+        "ec2",
+        "route53",
+        "ses",
+        "ecr",
+        "opensearch",
+        "redshift",
+        "cloudformation",
+        "lambda",
+    ]
+    .into_iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,11 +270,21 @@ pub async fn run_profile(
     let known_differences = load_known_differences(&config.known_differences_path)?;
     validate_known_differences(&known_differences)?;
 
-    let mut manager = TargetManager::start(config).await?;
+    let mut run_config = config.clone();
+    run_config.target_services = Some(
+        profile
+            .services
+            .iter()
+            .filter(|service| service.as_str() != "compatibility")
+            .cloned()
+            .collect(),
+    );
+
+    let mut manager = TargetManager::start(&run_config).await?;
     let mut results = Vec::new();
 
     for scenario in scenarios {
-        let result = run_scenario(&mut manager, &scenario, &known_differences, config).await;
+        let result = run_scenario(&mut manager, &scenario, &known_differences, &run_config).await;
         results.push(result);
     }
 
@@ -266,6 +333,11 @@ fn load_profile_scenarios(profile_name: &str, run_id: &str) -> Vec<Scenario> {
 fn profile_matches(selected: &str, scenario_profile: &str) -> bool {
     if selected == "extended" {
         return scenario_profile == "extended" || scenario_profile == "core";
+    }
+
+    if selected == "all-services-smoke-fast" {
+        return scenario_profile == "all-services-smoke"
+            || scenario_profile == "all-services-smoke-fast";
     }
 
     selected == scenario_profile
@@ -977,6 +1049,12 @@ pub struct ManagedTarget {
 
 impl TargetManager {
     pub async fn start(config: &ParityConfig) -> anyhow::Result<Self> {
+        let target_services = config
+            .target_services
+            .clone()
+            .unwrap_or_else(|| vec!["s3".into(), "sqs".into(), "dynamodb".into(), "sts".into()]);
+        let services = target_services.join(",");
+
         let (openstack, openstack_harness) = if let Some(endpoint) = &config.openstack_endpoint {
             (
                 ManagedTarget {
@@ -985,7 +1063,7 @@ impl TargetManager {
                 None,
             )
         } else {
-            let harness = TestHarness::start_services("s3,sqs,dynamodb,sts").await;
+            let harness = TestHarness::start_services(&services).await;
             let endpoint = harness.base_url.clone();
             (ManagedTarget { endpoint }, Some(harness))
         };
@@ -1000,7 +1078,11 @@ impl TargetManager {
         } else {
             let port = free_port()?;
             let endpoint = format!("http://127.0.0.1:{port}");
-            let services = "s3,sqs,dynamodb,sts";
+            let localstack_services = target_services
+                .iter()
+                .map(|service| map_service_for_localstack(service))
+                .collect::<Vec<_>>()
+                .join(",");
             let output = Command::new("docker")
                 .args([
                     "run",
@@ -1009,7 +1091,7 @@ impl TargetManager {
                     "-p",
                     &format!("127.0.0.1:{port}:4566"),
                     "-e",
-                    &format!("SERVICES={services}"),
+                    &format!("SERVICES={}", localstack_services),
                     "-e",
                     "DEBUG=1",
                     &config.localstack_image,
@@ -1046,6 +1128,14 @@ impl TargetManager {
         if let Some(harness) = self.openstack_harness.take() {
             harness.shutdown();
         }
+    }
+}
+
+fn map_service_for_localstack(service: &str) -> String {
+    match service {
+        "events" => "eventbridge".to_string(),
+        "states" => "stepfunctions".to_string(),
+        _ => service.to_string(),
     }
 }
 
