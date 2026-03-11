@@ -117,6 +117,16 @@ def select_baseline_report_path(candidates: list[str], lane: str) -> Optional[st
 
 def lane_metrics(report: Dict[str, Any]) -> Dict[str, Optional[float]]:
     summary = report.get("summary", {})
+    runtime = report.get("runtime", {})
+    execution_driver = runtime.get("execution_driver")
+
+    if execution_driver and execution_driver != "direct-http":
+        return {
+            "p95": None,
+            "p99": None,
+            "throughput": None,
+        }
+
     return {
         "p95": summary.get("avg_latency_p95_ratio"),
         "p99": summary.get("avg_latency_p99_ratio"),
@@ -145,6 +155,7 @@ def evaluate_gate(
 ) -> Dict[str, Any]:
     summary = current_report.get("summary", {})
     runtime = current_report.get("runtime", {})
+    execution_driver = runtime.get("execution_driver")
     perf_scenarios = int(summary.get("performance_scenarios", 0))
     valid_perf_scenarios = int(summary.get("valid_performance_scenarios", perf_scenarios))
     invalid_perf_scenarios = int(summary.get("invalid_performance_scenarios", 0))
@@ -173,6 +184,12 @@ def evaluate_gate(
     if runtime_mode_equivalent is False:
         failures.append(f"lane {lane}: benchmark run uses non-equivalent persistence modes")
         failure_category = failure_category or "mode_mismatch"
+
+    if execution_driver != "direct-http":
+        failures.append(
+            f"lane {lane}: benchmark run must use execution_driver=direct-http for isolated backend comparison"
+        )
+        failure_category = failure_category or "execution_driver_mismatch"
 
     service_class_failures = []
     missing_class_failures = 0
@@ -309,6 +326,7 @@ def evaluate_gate(
         "service_class_failures": service_class_failures,
         "service_diagnostics": service_diagnostics,
         "runtime_mode_equivalent": runtime_mode_equivalent,
+        "execution_driver": execution_driver,
         "current": current,
         "baseline": previous,
         "checks": checks,
@@ -392,6 +410,7 @@ def format_markdown(result: Dict[str, Any], baseline_run_id: Optional[str]) -> s
 
     remediation = {
         "mode_mismatch": "align PARITY_OPENSTACK_PERSISTENCE_MODE and PARITY_LOCALSTACK_PERSISTENCE_MODE for the lane",
+        "execution_driver_mismatch": "set PARITY_BENCHMARK_EXECUTION_DRIVER=direct-http for required benchmark lanes",
         "class_envelope_breach": "reduce latency/memory or increase throughput for breached services, then re-run required lane",
         "persistence_quality_failure": "fix persistence lifecycle behavior (save/load/recovery) for failing scenarios and re-run parity + benchmark lanes",
         "missing_service_class": "define service class for unclassified service in benchmark classification map",
@@ -535,6 +554,9 @@ def main() -> int:
 class BenchmarkRegressionGateTests(unittest.TestCase):
     def _report(self, p95: float, p99: float, throughput: float, perf: int = 5, skipped: int = 0) -> Dict[str, Any]:
         return {
+            "runtime": {
+                "execution_driver": "direct-http",
+            },
             "summary": {
                 "performance_scenarios": perf,
                 "valid_performance_scenarios": perf,
@@ -703,6 +725,24 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["failure_category"], "class_envelope_breach")
+
+    def test_execution_driver_mismatch_fails(self) -> None:
+        current = self._report(1.00, 1.00, 1.00)
+        current["runtime"]["execution_driver"] = "aws-cli"
+        baseline = self._report(1.00, 1.00, 1.00)
+
+        result = evaluate_gate("fair-low-core", current, baseline, 8.0, 12.0, 8.0, True)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["failure_category"], "execution_driver_mismatch")
+
+    def test_lane_metrics_omit_non_isolated_driver(self) -> None:
+        report = self._report(1.10, 1.20, 0.90)
+        report["runtime"]["execution_driver"] = "aws-cli"
+        metrics = lane_metrics(report)
+        self.assertEqual(metrics["p95"], None)
+        self.assertEqual(metrics["p99"], None)
+        self.assertEqual(metrics["throughput"], None)
 
 
 def run_tests() -> int:

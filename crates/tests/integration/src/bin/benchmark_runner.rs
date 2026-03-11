@@ -44,8 +44,9 @@ async fn main() -> anyhow::Result<()> {
         report.summary.localstack_error_count
     );
     println!(
-        "lane mode: {:?}; persistence modes: openstack={:?}, localstack={:?}, equivalent={}",
+        "lane mode: {:?}; execution driver: {:?}; persistence modes: openstack={:?}, localstack={:?}, equivalent={}",
         report.runtime.benchmark_lane_mode,
+        report.runtime.execution_driver,
         report.runtime.openstack_persistence_mode,
         report.runtime.localstack_persistence_mode,
         report.runtime.persistence_mode_equivalent

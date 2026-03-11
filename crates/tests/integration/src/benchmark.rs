@@ -70,6 +70,7 @@ pub struct DockerRuntimeConstraints {
 pub struct BenchmarkRuntimeMetadata {
     pub mode: BenchmarkRuntimeMode,
     pub execution_order_policy: ExecutionOrderPolicy,
+    pub execution_driver: BenchmarkExecutionDriver,
     pub benchmark_lane_mode: BenchmarkLaneMode,
     pub openstack_persistence_mode: PersistenceMode,
     pub localstack_persistence_mode: PersistenceMode,
@@ -82,6 +83,13 @@ pub struct BenchmarkRuntimeMetadata {
 pub enum BenchmarkLaneMode {
     HarnessInfluenced,
     LowOverhead,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BenchmarkExecutionDriver {
+    AwsCli,
+    DirectHttp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +108,7 @@ pub struct BenchmarkConfig {
     pub docker_startup_timeout_secs: u64,
     pub heavy_object_enabled: bool,
     pub lane_mode: BenchmarkLaneMode,
+    pub execution_driver: BenchmarkExecutionDriver,
     pub openstack_persistence_mode: PersistenceMode,
     pub localstack_persistence_mode: PersistenceMode,
 }
@@ -255,6 +264,7 @@ impl Default for BenchmarkConfig {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             lane_mode: benchmark_lane_mode_from_env(),
+            execution_driver: benchmark_execution_driver_from_env(),
             openstack_persistence_mode: std::env::var("PARITY_OPENSTACK_PERSISTENCE_MODE")
                 .ok()
                 .and_then(|v| parse_persistence_mode(&v))
@@ -790,6 +800,7 @@ pub async fn run_profile(
     let runtime = BenchmarkRuntimeMetadata {
         mode: config.runtime_mode,
         execution_order_policy: config.execution_order_policy,
+        execution_driver: config.execution_driver,
         benchmark_lane_mode: config.lane_mode,
         openstack_persistence_mode: config.openstack_persistence_mode,
         localstack_persistence_mode: config.localstack_persistence_mode,
@@ -840,6 +851,7 @@ pub async fn run_profile(
                 &scenario,
                 &scenario_run,
                 config.lane_mode,
+                config.execution_driver,
                 config.execution_order_policy,
                 idx,
             )
@@ -967,6 +979,7 @@ async fn execute_in_order(
     scenario: &BenchmarkScenario,
     scenario_run: &BenchmarkRunConfig,
     lane_mode: BenchmarkLaneMode,
+    execution_driver: BenchmarkExecutionDriver,
     policy: ExecutionOrderPolicy,
     scenario_idx: usize,
 ) -> (BenchmarkMetrics, BenchmarkMetrics) {
@@ -982,6 +995,7 @@ async fn execute_in_order(
             scenario,
             scenario_run,
             lane_mode,
+            execution_driver,
         )
         .await;
         let localstack_metrics = execute_scenario(
@@ -989,6 +1003,7 @@ async fn execute_in_order(
             scenario,
             scenario_run,
             lane_mode,
+            execution_driver,
         )
         .await;
         (openstack_metrics, localstack_metrics)
@@ -998,6 +1013,7 @@ async fn execute_in_order(
             scenario,
             scenario_run,
             lane_mode,
+            execution_driver,
         )
         .await;
         let openstack_metrics = execute_scenario(
@@ -1005,6 +1021,7 @@ async fn execute_in_order(
             scenario,
             scenario_run,
             lane_mode,
+            execution_driver,
         )
         .await;
         (openstack_metrics, localstack_metrics)
@@ -1132,6 +1149,15 @@ fn benchmark_lane_mode_from_env() -> BenchmarkLaneMode {
     match std::env::var("PARITY_BENCHMARK_LANE_MODE") {
         Ok(mode) if mode.eq_ignore_ascii_case("low-overhead") => BenchmarkLaneMode::LowOverhead,
         _ => BenchmarkLaneMode::HarnessInfluenced,
+    }
+}
+
+fn benchmark_execution_driver_from_env() -> BenchmarkExecutionDriver {
+    match std::env::var("PARITY_BENCHMARK_EXECUTION_DRIVER") {
+        Ok(mode) if mode.eq_ignore_ascii_case("direct-http") => {
+            BenchmarkExecutionDriver::DirectHttp
+        }
+        _ => BenchmarkExecutionDriver::AwsCli,
     }
 }
 
@@ -1404,6 +1430,7 @@ async fn execute_scenario(
     scenario: &BenchmarkScenario,
     run_config: &BenchmarkRunConfig,
     lane_mode: BenchmarkLaneMode,
+    execution_driver: BenchmarkExecutionDriver,
 ) -> BenchmarkMetrics {
     let mut context = HashMap::new();
 
@@ -1412,7 +1439,15 @@ async fn execute_scenario(
     }
 
     for _ in 0..run_config.warmup_iterations {
-        let _ = run_iteration(endpoint, scenario, run_config, &context, lane_mode).await;
+        let _ = run_iteration(
+            endpoint,
+            scenario,
+            run_config,
+            &context,
+            lane_mode,
+            execution_driver,
+        )
+        .await;
     }
 
     let mut latencies = Vec::new();
@@ -1421,7 +1456,15 @@ async fn execute_scenario(
     let started = Instant::now();
 
     for _ in 0..run_config.measured_iterations {
-        let iter = run_iteration(endpoint, scenario, run_config, &context, lane_mode).await;
+        let iter = run_iteration(
+            endpoint,
+            scenario,
+            run_config,
+            &context,
+            lane_mode,
+            execution_driver,
+        )
+        .await;
         latencies.extend(iter.latencies_ms);
         operation_count += iter.operation_count;
         error_count += iter.error_count;
@@ -1466,6 +1509,7 @@ async fn run_iteration(
     run_config: &BenchmarkRunConfig,
     context: &HashMap<String, String>,
     lane_mode: BenchmarkLaneMode,
+    execution_driver: BenchmarkExecutionDriver,
 ) -> IterationResult {
     let mut remaining = run_config.operations_per_iteration;
     let mut latencies_ms = Vec::with_capacity(run_config.operations_per_iteration);
@@ -1481,7 +1525,14 @@ async fn run_iteration(
             let step = scenario.operation.clone();
             let context_owned = context.clone();
             tasks.spawn(async move {
-                execute_operation_step(&endpoint_owned, &step, &context_owned, lane_mode).await
+                execute_operation_step(
+                    &endpoint_owned,
+                    &step,
+                    &context_owned,
+                    lane_mode,
+                    execution_driver,
+                )
+                .await
             });
         }
 
@@ -1545,20 +1596,112 @@ async fn execute_operation_step(
     step: &ScenarioStep,
     context: &HashMap<String, String>,
     lane_mode: BenchmarkLaneMode,
+    execution_driver: BenchmarkExecutionDriver,
 ) -> StepExecution {
     let command = render_command(&step.command, context);
-    let (elapsed_ms, output) = execute_aws_command(endpoint, command, lane_mode).await;
-
-    match output {
-        Ok(out) => StepExecution {
-            elapsed_ms,
-            success: out.status.success() == step.expect_success,
-        },
-        Err(_) => StepExecution {
-            elapsed_ms,
-            success: false,
-        },
+    match execution_driver {
+        BenchmarkExecutionDriver::AwsCli => {
+            let (elapsed_ms, output) = execute_aws_command(endpoint, command, lane_mode).await;
+            match output {
+                Ok(out) => StepExecution {
+                    elapsed_ms,
+                    success: out.status.success() == step.expect_success,
+                },
+                Err(_) => StepExecution {
+                    elapsed_ms,
+                    success: false,
+                },
+            }
+        }
+        BenchmarkExecutionDriver::DirectHttp => {
+            let (elapsed_ms, success) = execute_direct_http_command(endpoint, &command).await;
+            StepExecution {
+                elapsed_ms,
+                success: success == step.expect_success,
+            }
+        }
     }
+}
+
+async fn execute_direct_http_command(endpoint: &str, command: &[String]) -> (f64, bool) {
+    let started = Instant::now();
+    let client = reqwest::Client::new();
+
+    let response = match command {
+        [svc, op] if svc == "dynamodb" && op == "list-tables" => {
+            client
+                .post(endpoint)
+                .header("x-amz-target", "DynamoDB_20120810.ListTables")
+                .header("content-type", "application/x-amz-json-1.0")
+                .body("{}")
+                .send()
+                .await
+        }
+        [svc, op] if svc == "firehose" && op == "list-delivery-streams" => {
+            client
+                .post(endpoint)
+                .header("x-amz-target", "Firehose_20150804.ListDeliveryStreams")
+                .header("content-type", "application/x-amz-json-1.1")
+                .body("{}")
+                .send()
+                .await
+        }
+        [svc, op] if svc == "kinesis" && op == "list-streams" => {
+            client
+                .post(endpoint)
+                .header("x-amz-target", "Kinesis_20131202.ListStreams")
+                .header("content-type", "application/x-amz-json-1.1")
+                .body("{}")
+                .send()
+                .await
+        }
+        [svc, op] if svc == "secretsmanager" && op == "list-secrets" => {
+            client
+                .post(endpoint)
+                .header("x-amz-target", "secretsmanager.ListSecrets")
+                .header("content-type", "application/x-amz-json-1.1")
+                .body("{}")
+                .send()
+                .await
+        }
+        [svc, op] if svc == "iam" && op == "list-users" => {
+            client
+                .post(endpoint)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body("Action=ListUsers&Version=2010-05-08")
+                .send()
+                .await
+        }
+        [svc, op] if svc == "sns" && op == "list-topics" => {
+            client
+                .post(endpoint)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body("Action=ListTopics&Version=2010-03-31")
+                .send()
+                .await
+        }
+        [svc, op] if svc == "sts" && op == "get-caller-identity" => {
+            client
+                .post(endpoint)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body("Action=GetCallerIdentity&Version=2011-06-15")
+                .send()
+                .await
+        }
+        [svc, op] if svc == "s3api" && op == "list-buckets" => {
+            client.get(format!("{endpoint}/")).send().await
+        }
+        _ => {
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            return (elapsed_ms, false);
+        }
+    };
+
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let success = response
+        .map(|resp| resp.status().is_success())
+        .unwrap_or(false);
+    (elapsed_ms, success)
 }
 
 async fn execute_aws_command(

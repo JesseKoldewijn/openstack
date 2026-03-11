@@ -57,6 +57,7 @@ Optional overrides:
 - `PARITY_BENCHMARK_RUNTIME_MODE=symmetric-docker`
 - `PARITY_BENCHMARK_EXECUTION_ORDER=alternating`
 - `PARITY_BENCHMARK_LANE_MODE=harness-influenced|low-overhead`
+- `PARITY_BENCHMARK_EXECUTION_DRIVER=aws-cli|direct-http`
 - `PARITY_DOCKER_CPU_LIMIT=2`
 - `PARITY_DOCKER_MEMORY_LIMIT=4g`
 - `PARITY_DOCKER_NETWORK_MODE=bridge`
@@ -207,6 +208,8 @@ cargo build --release --bin openstack
 - Use the same profile and environment settings when comparing runs.
 - Warmup iterations are excluded from measured metrics by design.
 - Shared CI runners introduce noise; trend comparisons should prefer repeated runs or scheduled baselines.
+- `PARITY_BENCHMARK_EXECUTION_DRIVER=aws-cli` includes client process overhead in every operation.
+- `PARITY_BENCHMARK_EXECUTION_DRIVER=direct-http` removes AWS CLI process overhead and better isolates openstack-vs-localstack backend behavior for core list/call scenarios.
 
 ## Lane Modes
 

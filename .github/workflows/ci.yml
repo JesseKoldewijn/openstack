@@ -649,9 +649,10 @@ jobs:
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
       - name: Validate benchmark latest report exists
         run: test -f target/benchmark-reports/fair-medium-core-latest.json
-      - name: Run benchmark fairness medium core low-overhead profile
+      - name: Run benchmark fairness medium core isolated direct-http profile
         env:
           PARITY_BENCHMARK_LANE_MODE: low-overhead
+          PARITY_BENCHMARK_EXECUTION_DRIVER: direct-http
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
       - name: Enforce memory budget (main core lane)
         run: |
@@ -811,9 +812,10 @@ jobs:
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low-core
       - name: Validate benchmark latest report exists
         run: test -f target/benchmark-reports/fair-low-core-latest.json
-      - name: Run benchmark fairness low core low-overhead profile
+      - name: Run benchmark fairness low core isolated direct-http profile
         env:
           PARITY_BENCHMARK_LANE_MODE: low-overhead
+          PARITY_BENCHMARK_EXECUTION_DRIVER: direct-http
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low-core
       - name: Enforce memory budget (non-main core lane)
         run: |
@@ -1053,6 +1055,8 @@ jobs:
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run benchmark fairness medium core profile
+        env:
+          PARITY_BENCHMARK_EXECUTION_DRIVER: direct-http
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
       - name: Add benchmark push summary
         if: always()
