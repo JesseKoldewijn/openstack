@@ -144,6 +144,7 @@ def evaluate_gate(
 
     failures: list[str] = []
     checks: list[Dict[str, Any]] = []
+    skipped_checks: list[Dict[str, str]] = []
     failure_category = None
 
     if perf_scenarios == 0:
@@ -173,9 +174,17 @@ def evaluate_gate(
         for metric, threshold in latency_checks:
             c = current.get(metric)
             p = previous.get(metric)
-            if c is None or p is None:
-                failures.append(f"lane {lane}: missing metric '{metric}' in current or baseline")
+            if c is None:
+                failures.append(f"lane {lane}: missing metric '{metric}' in current report")
                 failure_category = failure_category or "data_quality_missing_metric"
+                continue
+            if p is None:
+                skipped_checks.append(
+                    {
+                        "metric": metric,
+                        "reason": "baseline_missing_metric",
+                    }
+                )
                 continue
             limit = float(p) * (1.0 + (threshold / 100.0))
             ok = float(c) <= limit
@@ -197,9 +206,16 @@ def evaluate_gate(
 
         c = current.get("throughput")
         p = previous.get("throughput")
-        if c is None or p is None:
-            failures.append(f"lane {lane}: missing metric 'throughput' in current or baseline")
+        if c is None:
+            failures.append(f"lane {lane}: missing metric 'throughput' in current report")
             failure_category = failure_category or "data_quality_missing_metric"
+        elif p is None:
+            skipped_checks.append(
+                {
+                    "metric": "throughput",
+                    "reason": "baseline_missing_metric",
+                }
+            )
         else:
             limit = float(p) * (1.0 - (throughput_regression_limit_pct / 100.0))
             ok = float(c) >= limit
@@ -232,6 +248,10 @@ def evaluate_gate(
         "current": current,
         "baseline": previous,
         "checks": checks,
+        "skipped_checks": skipped_checks,
+        "baseline_incompatible_metrics": sorted(
+            {entry["metric"] for entry in skipped_checks if entry.get("reason") == "baseline_missing_metric"}
+        ),
         "failures": failures,
         "thresholds": {
             "p95_regression_limit_pct": p95_regression_limit_pct,
@@ -278,6 +298,18 @@ def format_markdown(result: Dict[str, Any], baseline_run_id: Optional[str]) -> s
         lines.extend(["", "Failures:"])
         for failure in result["failures"]:
             lines.append(f"- {failure}")
+    skipped_checks = result.get("skipped_checks", [])
+    if skipped_checks:
+        lines.extend(["", "Skipped checks:"])
+        for skipped in skipped_checks:
+            metric = skipped.get("metric", "unknown")
+            reason = skipped.get("reason", "n/a")
+            if reason == "baseline_missing_metric":
+                lines.append(
+                    f"- lane {lane}: skipped metric '{metric}' check because baseline report is missing this metric"
+                )
+            else:
+                lines.append(f"- lane {lane}: skipped metric '{metric}' check ({reason})")
     if result.get("failure_category"):
         lines.extend(["", f"Failure category: `{result['failure_category']}`"])
 
@@ -455,6 +487,31 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
         result = evaluate_gate("fair-low", current, baseline, 8.0, 12.0, 8.0, True)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["failure_category"], "data_quality_no_valid_performance")
+
+    def test_baseline_missing_metric_skips_check(self) -> None:
+        current = self._report(1.02, 1.03, 1.01)
+        baseline = self._report(1.00, 1.00, 1.00)
+        baseline["summary"].pop("avg_latency_p99_ratio", None)
+
+        result = evaluate_gate("fair-low-core", current, baseline, 8.0, 12.0, 8.0, True)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("p99", result.get("baseline_incompatible_metrics", []))
+        self.assertEqual(
+            [check["metric"] for check in result.get("checks", [])],
+            ["p95", "throughput"],
+        )
+
+    def test_current_missing_metric_fails(self) -> None:
+        current = self._report(1.02, 1.03, 1.01)
+        baseline = self._report(1.00, 1.00, 1.00)
+        current["summary"].pop("avg_latency_p99_ratio", None)
+
+        result = evaluate_gate("fair-low-core", current, baseline, 8.0, 12.0, 8.0, True)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["failure_category"], "data_quality_missing_metric")
+        self.assertIn("missing metric 'p99' in current report", "\n".join(result["failures"]))
 
     def test_missing_gh_token_diagnostic(self) -> None:
         previous_token = os.environ.pop("GH_TOKEN", None)
