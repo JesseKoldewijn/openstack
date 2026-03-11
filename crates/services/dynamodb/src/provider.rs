@@ -528,10 +528,11 @@ impl ServiceProvider for DynamoDbProvider {
     }
 
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        let op_start = std::time::Instant::now();
         let op = ctx.operation.as_str();
         let body = &ctx.request_body;
 
-        match op {
+        let response = match op {
             // ---------------------------------------------------------------
             // Table operations
             // ---------------------------------------------------------------
@@ -1662,6 +1663,17 @@ impl ServiceProvider for DynamoDbProvider {
                     501,
                 ))
             }
+        };
+
+        if response.is_ok() {
+            tracing::debug!(
+                service = "dynamodb",
+                operation = %op,
+                op_latency_us = op_start.elapsed().as_micros(),
+                "DynamoDB operation complete"
+            );
         }
+
+        response
     }
 }
