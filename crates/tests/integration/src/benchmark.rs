@@ -1368,6 +1368,7 @@ fn resolve_aws_cli_binary() -> String {
         .get_or_init(|| {
             if let Ok(path) = std::env::var("AWS_CLI_PATH")
                 && !path.trim().is_empty()
+                && Command::new(&path).arg("--version").output().is_ok()
             {
                 return path;
             }
