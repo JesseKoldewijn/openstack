@@ -8,7 +8,7 @@ mod internal_api_tests {
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use openstack_config::{Config, Directories};
-    use openstack_internal_api::{ApiState, internal_api_router};
+    use openstack_internal_api::{internal_api_router, ApiState};
     use openstack_service_framework::ServicePluginManager;
     use serde_json::Value;
     use tokio::sync::broadcast;
@@ -208,6 +208,11 @@ mod internal_api_tests {
         let (status, body) = get_json(&router, "/_localstack/plugins").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["plugins"].is_array());
+        if let Some(first) = body["plugins"].as_array().and_then(|a| a.first()) {
+            assert!(first.get("startup_attempts").is_some());
+            assert!(first.get("startup_wait_count").is_some());
+            assert!(first.get("last_startup_duration_ms").is_some());
+        }
     }
 
     // ── 7.8  GET /_localstack/diagnose ────────────────────────────────────────

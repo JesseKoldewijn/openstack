@@ -124,6 +124,16 @@ def lane_metrics(report: Dict[str, Any]) -> Dict[str, Optional[float]]:
     }
 
 
+def classify_breach(kind: str) -> Optional[str]:
+    if kind == "missing_service_class":
+        return "missing_service_class"
+    if kind == "mode_mismatch":
+        return "mode_mismatch"
+    if kind.startswith("class-envelope-"):
+        return "class_envelope_breach"
+    return None
+
+
 def evaluate_gate(
     lane: str,
     current_report: Dict[str, Any],
@@ -134,6 +144,7 @@ def evaluate_gate(
     strict_missing_baseline: bool,
 ) -> Dict[str, Any]:
     summary = current_report.get("summary", {})
+    runtime = current_report.get("runtime", {})
     perf_scenarios = int(summary.get("performance_scenarios", 0))
     valid_perf_scenarios = int(summary.get("valid_performance_scenarios", perf_scenarios))
     invalid_perf_scenarios = int(summary.get("invalid_performance_scenarios", 0))
@@ -141,6 +152,7 @@ def evaluate_gate(
     openstack_error_count = int(summary.get("openstack_error_count", 0))
     localstack_error_count = int(summary.get("localstack_error_count", 0))
     invalid_reasons = [str(reason) for reason in summary.get("invalid_reasons", []) if reason]
+    per_service = summary.get("per_service", {})
 
     failures: list[str] = []
     checks: list[Dict[str, Any]] = []
@@ -156,6 +168,55 @@ def evaluate_gate(
     if perf_scenarios > 0 and skipped_scenarios >= perf_scenarios:
         failures.append(f"lane {lane}: all performance scenarios are skipped")
         failure_category = failure_category or "data_quality_all_skipped"
+
+    runtime_mode_equivalent = runtime.get("persistence_mode_equivalent")
+    if runtime_mode_equivalent is False:
+        failures.append(f"lane {lane}: benchmark run uses non-equivalent persistence modes")
+        failure_category = failure_category or "mode_mismatch"
+
+    service_class_failures = []
+    missing_class_failures = 0
+    envelope_breach_failures = 0
+    service_diagnostics = []
+    for service, service_summary in per_service.items():
+        service_class = service_summary.get("service_execution_class")
+        service_durability = service_summary.get("service_durability_class")
+        breaches = service_summary.get("class_envelope_breaches", [])
+        service_diagnostics.append(
+            {
+                "service": service,
+                "service_execution_class": service_class,
+                "service_durability_class": service_durability,
+                "class_envelope_breaches": breaches,
+            }
+        )
+        if not service_class:
+            service_class_failures.append(f"lane {lane}: service '{service}' missing service class")
+            missing_class_failures += 1
+        for breach in breaches:
+            service_class_failures.append(
+                f"lane {lane}: service '{service}' class envelope breach ({breach})"
+            )
+            envelope_breach_failures += 1
+    if service_class_failures:
+        failures.extend(service_class_failures)
+        if missing_class_failures > 0 and envelope_breach_failures == 0:
+            failure_category = failure_category or "missing_service_class"
+        else:
+            failure_category = failure_category or "class_envelope_breach"
+
+    mismatch_found = any(classify_breach(reason.split(":", 1)[1] if ":" in reason else reason) == "mode_mismatch" for reason in invalid_reasons)
+    if mismatch_found:
+        failures.append(f"lane {lane}: mode mismatch detected in benchmark validity reasons")
+        failure_category = failure_category or "mode_mismatch"
+
+    persistence_quality_found = any(
+        "persistence_" in reason or "recovery" in reason or "durability" in reason
+        for reason in invalid_reasons
+    )
+    if persistence_quality_found:
+        failures.append(f"lane {lane}: persistence-quality failure detected in scenario validity")
+        failure_category = failure_category or "persistence_quality_failure"
 
     current = lane_metrics(current_report)
     previous = lane_metrics(previous_report) if previous_report else None
@@ -245,6 +306,9 @@ def evaluate_gate(
         "openstack_error_count": openstack_error_count,
         "localstack_error_count": localstack_error_count,
         "invalid_reasons": invalid_reasons,
+        "service_class_failures": service_class_failures,
+        "service_diagnostics": service_diagnostics,
+        "runtime_mode_equivalent": runtime_mode_equivalent,
         "current": current,
         "baseline": previous,
         "checks": checks,
@@ -298,6 +362,19 @@ def format_markdown(result: Dict[str, Any], baseline_run_id: Optional[str]) -> s
         lines.extend(["", "Failures:"])
         for failure in result["failures"]:
             lines.append(f"- {failure}")
+
+    service_diagnostics = result.get("service_diagnostics", [])
+    if service_diagnostics:
+        lines.extend(["", "Service diagnostics:"])
+        for entry in sorted(service_diagnostics, key=lambda e: e.get("service", "")):
+            lines.append(
+                "- {service}: class={clazz}, durability={durability}, envelope_breaches={breaches}".format(
+                    service=entry.get("service", "unknown"),
+                    clazz=entry.get("service_execution_class", "n/a"),
+                    durability=entry.get("service_durability_class", "n/a"),
+                    breaches=len(entry.get("class_envelope_breaches", []) or []),
+                )
+            )
     skipped_checks = result.get("skipped_checks", [])
     if skipped_checks:
         lines.extend(["", "Skipped checks:"])
@@ -312,6 +389,17 @@ def format_markdown(result: Dict[str, Any], baseline_run_id: Optional[str]) -> s
                 lines.append(f"- lane {lane}: skipped metric '{metric}' check ({reason})")
     if result.get("failure_category"):
         lines.extend(["", f"Failure category: `{result['failure_category']}`"])
+
+    remediation = {
+        "mode_mismatch": "align PARITY_OPENSTACK_PERSISTENCE_MODE and PARITY_LOCALSTACK_PERSISTENCE_MODE for the lane",
+        "class_envelope_breach": "reduce latency/memory or increase throughput for breached services, then re-run required lane",
+        "persistence_quality_failure": "fix persistence lifecycle behavior (save/load/recovery) for failing scenarios and re-run parity + benchmark lanes",
+        "missing_service_class": "define service class for unclassified service in benchmark classification map",
+        "baseline_missing": "seed a successful baseline run for this lane",
+    }
+    category = result.get("failure_category")
+    if category in remediation:
+        lines.extend(["", f"Remediation: {remediation[category]}"])
 
     if result.get("failure_category") == "data_quality_no_valid_performance":
         lines.extend(
@@ -368,6 +456,7 @@ def main() -> int:
     parser.add_argument("--output-json")
     parser.add_argument("--output-markdown")
     parser.add_argument("--summary-path")
+    parser.add_argument("--warning-mode", action="store_true")
     parser.add_argument("--run-tests", action="store_true")
     args = parser.parse_args()
 
@@ -425,6 +514,10 @@ def main() -> int:
     if diagnostics.get("failure_reason") == "missing_gh_token" and result["failure_category"] == "baseline_missing":
         result["failure_category"] = "token_missing"
 
+    if args.warning_mode and result["status"] == "fail":
+        result["status"] = "warning"
+        result["warning_mode"] = True
+
     markdown = format_markdown(result, baseline_run_id)
 
     if args.output_json:
@@ -436,7 +529,7 @@ def main() -> int:
             handle.write(markdown + "\n")
 
     print(markdown)
-    return 0 if result["status"] == "pass" else 1
+    return 0 if result["status"] in ("pass", "warning") else 1
 
 
 class BenchmarkRegressionGateTests(unittest.TestCase):
@@ -468,6 +561,15 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
         result = evaluate_gate("fair-low", current, baseline, 8.0, 12.0, 8.0, True)
         self.assertEqual(result["status"], "fail")
         self.assertGreaterEqual(len(result["failures"]), 1)
+
+    def test_warning_mode_can_downgrade_fail_status(self) -> None:
+        current = self._report(1.20, 1.20, 0.70)
+        baseline = self._report(1.00, 1.00, 1.00)
+        result = evaluate_gate("fair-low", current, baseline, 8.0, 12.0, 8.0, True)
+        self.assertEqual(result["status"], "fail")
+
+        result["status"] = "warning"
+        self.assertEqual(result["status"], "warning")
 
     def test_missing_baseline_fails_when_strict(self) -> None:
         current = self._report(1.00, 1.00, 1.00)
@@ -559,6 +661,48 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
         self.assertIn("- invalid_performance_scenarios: 2", markdown)
         self.assertIn("- openstack_error_count: 24", markdown)
         self.assertIn("sample_invalid_reasons", markdown)
+
+    def test_mode_mismatch_fails_fast(self) -> None:
+        current = self._report(1.00, 1.00, 1.00)
+        current["runtime"] = {"persistence_mode_equivalent": False}
+        baseline = self._report(1.00, 1.00, 1.00)
+
+        result = evaluate_gate("fair-low-core", current, baseline, 8.0, 12.0, 8.0, True)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["failure_category"], "mode_mismatch")
+
+    def test_missing_service_class_sets_failure_category(self) -> None:
+        current = self._report(1.00, 1.00, 1.00)
+        current["summary"]["per_service"] = {
+            "s3": {
+                "service_execution_class": None,
+                "service_durability_class": "durable",
+                "class_envelope_breaches": [],
+            }
+        }
+        baseline = self._report(1.00, 1.00, 1.00)
+
+        result = evaluate_gate("fair-low-core", current, baseline, 8.0, 12.0, 8.0, True)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["failure_category"], "missing_service_class")
+
+    def test_class_envelope_breach_sets_failure_category(self) -> None:
+        current = self._report(1.00, 1.00, 1.00)
+        current["summary"]["per_service"] = {
+            "s3": {
+                "service_execution_class": "in-proc-stateful",
+                "service_durability_class": "durable",
+                "class_envelope_breaches": ["s3-put:class-envelope-latency-p95-breach:1.23"],
+            }
+        }
+        baseline = self._report(1.00, 1.00, 1.00)
+
+        result = evaluate_gate("fair-low-core", current, baseline, 8.0, 12.0, 8.0, True)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["failure_category"], "class_envelope_breach")
 
 
 def run_tests() -> int:

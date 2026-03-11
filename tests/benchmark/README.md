@@ -56,11 +56,14 @@ Optional overrides:
 - `PARITY_OPENSTACK_IMAGE=ghcr.io/jessekoldewijn/openstack:latest`
 - `PARITY_BENCHMARK_RUNTIME_MODE=symmetric-docker`
 - `PARITY_BENCHMARK_EXECUTION_ORDER=alternating`
+- `PARITY_BENCHMARK_LANE_MODE=harness-influenced|low-overhead`
 - `PARITY_DOCKER_CPU_LIMIT=2`
 - `PARITY_DOCKER_MEMORY_LIMIT=4g`
 - `PARITY_DOCKER_NETWORK_MODE=bridge`
 - `BENCHMARK_HEAVY_OBJECTS=1`
 - `BENCHMARK_LARGE_FILES_DIR=tests/benchmark/fixtures`
+- `PARITY_OPENSTACK_PERSISTENCE_MODE=durable|non-durable`
+- `PARITY_LOCALSTACK_PERSISTENCE_MODE=durable|non-durable`
 
 Optional explicit output path:
 
@@ -68,7 +71,7 @@ Optional explicit output path:
 cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core --output target/benchmark-reports/manual.json
 ```
 
-Reports are written to `target/benchmark-reports/*.json`.
+Reports are written to `target/benchmark-reports/*.json` plus per-profile latest snapshots (`<profile>-latest.json`).
 
 ## Regression Gate
 
@@ -155,7 +158,8 @@ See also: `docs/act-benchmark-validation.md` for the full local workflow simulat
 - `results[*].comparison` includes openstack-vs-localstack deltas and ratios for latency and throughput.
 - `summary` provides aggregate error totals, scenario class counts, skipped count, and average ratios across performance (non-skipped) scenarios only.
 - `summary.valid_performance_scenarios`, `summary.invalid_performance_scenarios`, `summary.lane_interpretable`, and `summary.invalid_reasons` provide benchmark signal-quality diagnostics.
-- `summary.per_service` provides per-service scenario counts, skipped counts, and average p95/p99/throughput ratios for openstack-vs-localstack comparison.
+- `summary.per_service` provides per-service execution class, durability class, scenario counts, skipped counts, average p95/p99/throughput ratios, and class-envelope breach diagnostics.
+- `runtime.openstack_persistence_mode`, `runtime.localstack_persistence_mode`, and `runtime.persistence_mode_equivalent` capture mode-equivalence metadata.
 - `scripts/benchmark_report_consolidated.py` can generate a single consolidated markdown report across fairness lanes, including optional gate verdicts (`--include-gate`).
 
 ## Binary Size Budget
@@ -178,3 +182,8 @@ cargo build --release --bin openstack
 - Use the same profile and environment settings when comparing runs.
 - Warmup iterations are excluded from measured metrics by design.
 - Shared CI runners introduce noise; trend comparisons should prefer repeated runs or scheduled baselines.
+
+## Lane Modes
+
+- `harness-influenced` (default): parity-friendly lane using existing harness behavior.
+- `low-overhead`: lower benchmark-driver overhead lane for signal attribution; compare this lane against equivalent persistence/runtime settings only.

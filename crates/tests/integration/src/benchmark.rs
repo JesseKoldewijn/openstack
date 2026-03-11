@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::classification::{
+    PersistenceMode, ServiceDurabilityClass, ServiceExecutionClass, class_envelope,
+    parse_persistence_mode, service_durability_class, service_execution_class,
+};
 use crate::harness::TestHarness;
 use crate::parity::{ProtocolFamily, ScenarioStep};
 
@@ -66,7 +70,18 @@ pub struct DockerRuntimeConstraints {
 pub struct BenchmarkRuntimeMetadata {
     pub mode: BenchmarkRuntimeMode,
     pub execution_order_policy: ExecutionOrderPolicy,
+    pub benchmark_lane_mode: BenchmarkLaneMode,
+    pub openstack_persistence_mode: PersistenceMode,
+    pub localstack_persistence_mode: PersistenceMode,
+    pub persistence_mode_equivalent: bool,
     pub docker_constraints: Option<DockerRuntimeConstraints>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BenchmarkLaneMode {
+    HarnessInfluenced,
+    LowOverhead,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +99,9 @@ pub struct BenchmarkConfig {
     pub docker_network_mode: String,
     pub docker_startup_timeout_secs: u64,
     pub heavy_object_enabled: bool,
+    pub lane_mode: BenchmarkLaneMode,
+    pub openstack_persistence_mode: PersistenceMode,
+    pub localstack_persistence_mode: PersistenceMode,
 }
 
 impl Default for BenchmarkConfig {
@@ -236,6 +254,15 @@ impl Default for BenchmarkConfig {
             heavy_object_enabled: std::env::var("BENCHMARK_HEAVY_OBJECTS")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            lane_mode: benchmark_lane_mode_from_env(),
+            openstack_persistence_mode: std::env::var("PARITY_OPENSTACK_PERSISTENCE_MODE")
+                .ok()
+                .and_then(|v| parse_persistence_mode(&v))
+                .unwrap_or(PersistenceMode::NonDurable),
+            localstack_persistence_mode: std::env::var("PARITY_LOCALSTACK_PERSISTENCE_MODE")
+                .ok()
+                .and_then(|v| parse_persistence_mode(&v))
+                .unwrap_or(PersistenceMode::NonDurable),
         }
     }
 }
@@ -326,6 +353,8 @@ pub struct BenchmarkComparison {
 pub struct BenchmarkScenarioResult {
     pub scenario_id: String,
     pub service: String,
+    pub service_execution_class: Option<ServiceExecutionClass>,
+    pub service_durability_class: Option<ServiceDurabilityClass>,
     pub scenario_class: BenchmarkScenarioClass,
     pub load_tier: BenchmarkLoadTier,
     pub skipped: bool,
@@ -359,6 +388,8 @@ pub struct BenchmarkSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkServiceSummary {
+    pub service_execution_class: Option<ServiceExecutionClass>,
+    pub service_durability_class: Option<ServiceDurabilityClass>,
     pub total_scenarios: usize,
     pub skipped_scenarios: usize,
     pub openstack_error_count: usize,
@@ -367,6 +398,7 @@ pub struct BenchmarkServiceSummary {
     pub avg_latency_p95_ratio: Option<f64>,
     pub avg_latency_p99_ratio: Option<f64>,
     pub avg_throughput_ratio: Option<f64>,
+    pub class_envelope_breaches: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -758,6 +790,11 @@ pub async fn run_profile(
     let runtime = BenchmarkRuntimeMetadata {
         mode: config.runtime_mode,
         execution_order_policy: config.execution_order_policy,
+        benchmark_lane_mode: config.lane_mode,
+        openstack_persistence_mode: config.openstack_persistence_mode,
+        localstack_persistence_mode: config.localstack_persistence_mode,
+        persistence_mode_equivalent: config.openstack_persistence_mode
+            == config.localstack_persistence_mode,
         docker_constraints: (config.runtime_mode == BenchmarkRuntimeMode::SymmetricDocker).then(
             || DockerRuntimeConstraints {
                 cpu_limit: config.docker_cpu_limit.clone(),
@@ -802,6 +839,7 @@ pub async fn run_profile(
                 &manager,
                 &scenario,
                 &scenario_run,
+                config.lane_mode,
                 config.execution_order_policy,
                 idx,
             )
@@ -809,12 +847,16 @@ pub async fn run_profile(
         };
 
         let comparison = compare_metrics(&openstack_metrics, &localstack_metrics);
+        let service_execution_class = service_execution_class(&scenario.service);
+        let service_durability_class = service_durability_class(&scenario.service);
         let invalid_reason = performance_invalid_reason(
             scenario.scenario_class,
             skipped,
             skip_reason.as_deref(),
             &openstack_metrics,
             &localstack_metrics,
+            service_execution_class,
+            config,
         );
         let valid_for_performance = scenario.scenario_class == BenchmarkScenarioClass::Performance
             && invalid_reason.is_none();
@@ -822,6 +864,8 @@ pub async fn run_profile(
         results.push(BenchmarkScenarioResult {
             scenario_id: scenario.id.clone(),
             service: scenario.service.clone(),
+            service_execution_class,
+            service_durability_class,
             scenario_class: scenario.scenario_class,
             load_tier: scenario.load_tier,
             skipped,
@@ -858,7 +902,10 @@ pub async fn run_profile(
     let output_path =
         output_override.unwrap_or_else(|| config.report_dir.join(format!("{run_id}.json")));
     let report_json = serde_json::to_string_pretty(&report)?;
-    std::fs::write(output_path, report_json)?;
+    std::fs::write(&output_path, report_json)?;
+    let profile_latest_path = config.report_dir.join(format!("{}-latest.json", profile_name));
+    let profile_latest_json = serde_json::to_string_pretty(&report)?;
+    std::fs::write(profile_latest_path, profile_latest_json)?;
 
     manager.stop().await;
     Ok(report)
@@ -917,6 +964,7 @@ async fn execute_in_order(
     manager: &BenchmarkTargetManager,
     scenario: &BenchmarkScenario,
     scenario_run: &BenchmarkRunConfig,
+    lane_mode: BenchmarkLaneMode,
     policy: ExecutionOrderPolicy,
     scenario_idx: usize,
 ) -> (BenchmarkMetrics, BenchmarkMetrics) {
@@ -928,15 +976,15 @@ async fn execute_in_order(
 
     if openstack_first {
         let openstack_metrics =
-            execute_scenario(&manager.openstack.endpoint, scenario, scenario_run).await;
+            execute_scenario(&manager.openstack.endpoint, scenario, scenario_run, lane_mode).await;
         let localstack_metrics =
-            execute_scenario(&manager.localstack.endpoint, scenario, scenario_run).await;
+            execute_scenario(&manager.localstack.endpoint, scenario, scenario_run, lane_mode).await;
         (openstack_metrics, localstack_metrics)
     } else {
         let localstack_metrics =
-            execute_scenario(&manager.localstack.endpoint, scenario, scenario_run).await;
+            execute_scenario(&manager.localstack.endpoint, scenario, scenario_run, lane_mode).await;
         let openstack_metrics =
-            execute_scenario(&manager.openstack.endpoint, scenario, scenario_run).await;
+            execute_scenario(&manager.openstack.endpoint, scenario, scenario_run, lane_mode).await;
         (openstack_metrics, localstack_metrics)
     }
 }
@@ -979,9 +1027,17 @@ fn performance_invalid_reason(
     skip_reason: Option<&str>,
     openstack: &BenchmarkMetrics,
     localstack: &BenchmarkMetrics,
+    service_class: Option<ServiceExecutionClass>,
+    config: &BenchmarkConfig,
 ) -> Option<String> {
     if scenario_class != BenchmarkScenarioClass::Performance {
         return None;
+    }
+    if config.openstack_persistence_mode != config.localstack_persistence_mode {
+        return Some("mode_mismatch".to_string());
+    }
+    if service_class.is_none() {
+        return Some("missing_service_class".to_string());
     }
     if skipped {
         return Some(skip_reason.unwrap_or("scenario skipped").to_string());
@@ -1005,6 +1061,27 @@ fn performance_invalid_reason(
     {
         return Some("all operations failed".to_string());
     }
+
+    let class = service_class.expect("checked above");
+    let envelope = class_envelope(class, "performance");
+    if let Some(p95) = safe_ratio(openstack.latency_p95_ms, localstack.latency_p95_ms)
+        && p95 > envelope.max_latency_p95_ratio
+    {
+        return Some(format!("class-envelope-latency-p95-breach:{p95:.3}"));
+    }
+    if let Some(p99) = safe_ratio(openstack.latency_p99_ms, localstack.latency_p99_ms)
+        && p99 > envelope.max_latency_p99_ratio
+    {
+        return Some(format!("class-envelope-latency-p99-breach:{p99:.3}"));
+    }
+    if let Some(tp) = safe_ratio(
+        openstack.throughput_ops_per_sec,
+        localstack.throughput_ops_per_sec,
+    ) && tp < envelope.min_throughput_ratio
+    {
+        return Some(format!("class-envelope-throughput-breach:{tp:.3}"));
+    }
+
     None
 }
 
@@ -1026,6 +1103,13 @@ fn execution_order_policy_from_env() -> ExecutionOrderPolicy {
             ExecutionOrderPolicy::Alternating
         }
         _ => ExecutionOrderPolicy::OpenstackFirst,
+    }
+}
+
+fn benchmark_lane_mode_from_env() -> BenchmarkLaneMode {
+    match std::env::var("PARITY_BENCHMARK_LANE_MODE") {
+        Ok(mode) if mode.eq_ignore_ascii_case("low-overhead") => BenchmarkLaneMode::LowOverhead,
+        _ => BenchmarkLaneMode::HarnessInfluenced,
     }
 }
 
@@ -1183,6 +1267,7 @@ async fn execute_scenario(
     endpoint: &str,
     scenario: &BenchmarkScenario,
     run_config: &BenchmarkRunConfig,
+    lane_mode: BenchmarkLaneMode,
 ) -> BenchmarkMetrics {
     let mut context = HashMap::new();
 
@@ -1191,7 +1276,7 @@ async fn execute_scenario(
     }
 
     for _ in 0..run_config.warmup_iterations {
-        let _ = run_iteration(endpoint, scenario, run_config, &context).await;
+        let _ = run_iteration(endpoint, scenario, run_config, &context, lane_mode).await;
     }
 
     let mut latencies = Vec::new();
@@ -1200,7 +1285,7 @@ async fn execute_scenario(
     let started = Instant::now();
 
     for _ in 0..run_config.measured_iterations {
-        let iter = run_iteration(endpoint, scenario, run_config, &context).await;
+        let iter = run_iteration(endpoint, scenario, run_config, &context, lane_mode).await;
         latencies.extend(iter.latencies_ms);
         operation_count += iter.operation_count;
         error_count += iter.error_count;
@@ -1244,6 +1329,7 @@ async fn run_iteration(
     scenario: &BenchmarkScenario,
     run_config: &BenchmarkRunConfig,
     context: &HashMap<String, String>,
+    lane_mode: BenchmarkLaneMode,
 ) -> IterationResult {
     let mut remaining = run_config.operations_per_iteration;
     let mut latencies_ms = Vec::with_capacity(run_config.operations_per_iteration);
@@ -1259,7 +1345,7 @@ async fn run_iteration(
             let step = scenario.operation.clone();
             let context_owned = context.clone();
             tasks.spawn(async move {
-                execute_operation_step(&endpoint_owned, &step, &context_owned).await
+                execute_operation_step(&endpoint_owned, &step, &context_owned, lane_mode).await
             });
         }
 
@@ -1297,7 +1383,8 @@ async fn execute_step(
     context: &mut HashMap<String, String>,
 ) -> StepExecution {
     let rendered = render_command(&step.command, context);
-    let (elapsed_ms, output) = execute_aws_command(endpoint, rendered).await;
+    let (elapsed_ms, output) =
+        execute_aws_command(endpoint, rendered, BenchmarkLaneMode::HarnessInfluenced).await;
 
     match output {
         Ok(out) => {
@@ -1321,9 +1408,10 @@ async fn execute_operation_step(
     endpoint: &str,
     step: &ScenarioStep,
     context: &HashMap<String, String>,
+    lane_mode: BenchmarkLaneMode,
 ) -> StepExecution {
     let command = render_command(&step.command, context);
-    let (elapsed_ms, output) = execute_aws_command(endpoint, command).await;
+    let (elapsed_ms, output) = execute_aws_command(endpoint, command, lane_mode).await;
 
     match output {
         Ok(out) => StepExecution {
@@ -1340,6 +1428,7 @@ async fn execute_operation_step(
 async fn execute_aws_command(
     endpoint: &str,
     command: Vec<String>,
+    lane_mode: BenchmarkLaneMode,
 ) -> (f64, std::io::Result<std::process::Output>) {
     let mut full = vec![
         "--endpoint-url".to_string(),
@@ -1349,6 +1438,12 @@ async fn execute_aws_command(
         "--no-sign-request".to_string(),
     ];
     full.extend(command);
+    if lane_mode == BenchmarkLaneMode::LowOverhead {
+        full.push("--cli-read-timeout".to_string());
+        full.push("2".to_string());
+        full.push("--cli-connect-timeout".to_string());
+        full.push("2".to_string());
+    }
 
     let started = Instant::now();
     let aws_bin = resolve_aws_cli_binary();
@@ -1510,6 +1605,13 @@ fn summarize_results(results: &[BenchmarkScenarioResult]) -> BenchmarkSummary {
         let mut service_skipped = 0usize;
         let mut service_openstack_errors = 0usize;
         let mut service_localstack_errors = 0usize;
+        let service_class = service_results
+            .iter()
+            .find_map(|result| result.service_execution_class);
+        let service_durability = service_results
+            .iter()
+            .find_map(|result| result.service_durability_class);
+        let mut class_envelope_breaches = Vec::new();
 
         for result in &service_results {
             if result.skipped {
@@ -1536,11 +1638,19 @@ fn summarize_results(results: &[BenchmarkScenarioResult]) -> BenchmarkSummary {
                     service_tp.push(v);
                 }
             }
+
+            if let Some(reason) = &result.invalid_reason
+                && reason.starts_with("class-envelope-")
+            {
+                class_envelope_breaches.push(format!("{}:{}", result.scenario_id, reason));
+            }
         }
 
         per_service_summary.insert(
             service,
             BenchmarkServiceSummary {
+                service_execution_class: service_class,
+                service_durability_class: service_durability,
                 total_scenarios: service_results.len(),
                 skipped_scenarios: service_skipped,
                 openstack_error_count: service_openstack_errors,
@@ -1549,6 +1659,7 @@ fn summarize_results(results: &[BenchmarkScenarioResult]) -> BenchmarkSummary {
                 avg_latency_p95_ratio: average(&service_p95),
                 avg_latency_p99_ratio: average(&service_p99),
                 avg_throughput_ratio: average(&service_tp),
+                class_envelope_breaches,
             },
         );
     }
@@ -2229,9 +2340,10 @@ mod tests {
         parse_docker_mem_value_to_bytes, parse_heavy_s3_size_bytes, percentile,
         performance_invalid_reason, summarize_results,
     };
+    use crate::classification::{PersistenceMode, ServiceExecutionClass};
     use crate::benchmark::{
-        BenchmarkComparison, BenchmarkRunConfig, BenchmarkScenarioResult, BenchmarkSummary,
-        BenchmarkTargetMetadata, BenchmarkTargetResult,
+        BenchmarkComparison, BenchmarkConfig, BenchmarkRunConfig, BenchmarkScenarioResult,
+        BenchmarkSummary, BenchmarkTargetMetadata, BenchmarkTargetResult,
     };
 
     #[test]
@@ -2302,6 +2414,8 @@ mod tests {
         let results = vec![BenchmarkScenarioResult {
             scenario_id: "x".to_string(),
             service: "s3".to_string(),
+            service_execution_class: None,
+            service_durability_class: None,
             scenario_class: BenchmarkScenarioClass::Performance,
             load_tier: BenchmarkLoadTier::Low,
             skipped: false,
@@ -2407,6 +2521,8 @@ mod tests {
         let perf = BenchmarkScenarioResult {
             scenario_id: "perf".to_string(),
             service: "s3".to_string(),
+            service_execution_class: None,
+            service_durability_class: None,
             scenario_class: BenchmarkScenarioClass::Performance,
             load_tier: BenchmarkLoadTier::High,
             skipped: false,
@@ -2503,6 +2619,8 @@ mod tests {
         let valid = BenchmarkScenarioResult {
             scenario_id: "valid".to_string(),
             service: "s3".to_string(),
+            service_execution_class: None,
+            service_durability_class: None,
             scenario_class: BenchmarkScenarioClass::Performance,
             load_tier: BenchmarkLoadTier::Low,
             skipped: false,
@@ -2634,6 +2752,8 @@ mod tests {
         let result = BenchmarkScenarioResult {
             scenario_id: "x".to_string(),
             service: "s3".to_string(),
+            service_execution_class: None,
+            service_durability_class: None,
             scenario_class: BenchmarkScenarioClass::Performance,
             load_tier: BenchmarkLoadTier::Low,
             skipped: true,
@@ -2686,12 +2806,71 @@ mod tests {
                 error_count: 0,
                 ..BenchmarkMetrics::default()
             },
+            Some(ServiceExecutionClass::InProcStateful),
+            &BenchmarkConfig::default(),
         );
 
         assert_eq!(
             reason.as_deref(),
             Some("insufficient cross-target successful operations")
         );
+    }
+
+    #[test]
+    fn invalid_on_mode_mismatch() {
+        let mut cfg = BenchmarkConfig::default();
+        cfg.openstack_persistence_mode = PersistenceMode::Durable;
+        cfg.localstack_persistence_mode = PersistenceMode::NonDurable;
+
+        let reason = performance_invalid_reason(
+            BenchmarkScenarioClass::Performance,
+            false,
+            None,
+            &BenchmarkMetrics {
+                operation_count: 8,
+                error_count: 0,
+                latency_p95_ms: 10.0,
+                latency_p99_ms: 15.0,
+                throughput_ops_per_sec: 100.0,
+                ..BenchmarkMetrics::default()
+            },
+            &BenchmarkMetrics {
+                operation_count: 8,
+                error_count: 0,
+                latency_p95_ms: 10.0,
+                latency_p99_ms: 15.0,
+                throughput_ops_per_sec: 100.0,
+                ..BenchmarkMetrics::default()
+            },
+            Some(ServiceExecutionClass::InProcStateful),
+            &cfg,
+        );
+
+        assert_eq!(reason.as_deref(), Some("mode_mismatch"));
+    }
+
+    #[test]
+    fn invalid_on_missing_service_class() {
+        let cfg = BenchmarkConfig::default();
+        let reason = performance_invalid_reason(
+            BenchmarkScenarioClass::Performance,
+            false,
+            None,
+            &BenchmarkMetrics {
+                operation_count: 8,
+                error_count: 0,
+                ..BenchmarkMetrics::default()
+            },
+            &BenchmarkMetrics {
+                operation_count: 8,
+                error_count: 0,
+                ..BenchmarkMetrics::default()
+            },
+            None,
+            &cfg,
+        );
+
+        assert_eq!(reason.as_deref(), Some("missing_service_class"));
     }
 
     #[test]

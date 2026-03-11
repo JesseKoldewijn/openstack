@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use openstack_integration_tests::benchmark::{BenchmarkConfig, run_profile};
+use openstack_integration_tests::benchmark::{run_profile, BenchmarkConfig};
 
 fn parse_args() -> (String, Option<PathBuf>) {
     let mut profile = "all-services-smoke".to_string();
@@ -42,6 +42,13 @@ async fn main() -> anyhow::Result<()> {
         report.summary.total_scenarios,
         report.summary.openstack_error_count,
         report.summary.localstack_error_count
+    );
+    println!(
+        "lane mode: {:?}; persistence modes: openstack={:?}, localstack={:?}, equivalent={}",
+        report.runtime.benchmark_lane_mode,
+        report.runtime.openstack_persistence_mode,
+        report.runtime.localstack_persistence_mode,
+        report.runtime.persistence_mode_equivalent
     );
 
     if let Some(v) = report.summary.avg_latency_p95_ratio {
@@ -86,9 +93,21 @@ async fn main() -> anyhow::Result<()> {
             .map(|v| format!("{v:.3}"))
             .unwrap_or_else(|| "n/a".to_string());
         println!(
-            "  - {service}: scenarios={}, skipped={}, p95_ratio={}, p99_ratio={}, throughput_ratio={}",
-            summary.total_scenarios, summary.skipped_scenarios, p95, p99, throughput
+            "  - {service}: class={:?}, durability={:?}, scenarios={}, skipped={}, p95_ratio={}, p99_ratio={}, throughput_ratio={}",
+            summary.service_execution_class,
+            summary.service_durability_class,
+            summary.total_scenarios,
+            summary.skipped_scenarios,
+            p95,
+            p99,
+            throughput
         );
+        if !summary.class_envelope_breaches.is_empty() {
+            println!(
+                "    envelope breaches: {}",
+                summary.class_envelope_breaches.join(", ")
+            );
+        }
     }
 
     Ok(())

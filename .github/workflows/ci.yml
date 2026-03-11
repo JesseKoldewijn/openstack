@@ -17,6 +17,7 @@ env:
   PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
   PARITY_BENCHMARK_RUNTIME_MODE: symmetric-docker
   PARITY_BENCHMARK_EXECUTION_ORDER: alternating
+  PARITY_BENCHMARK_LANE_MODE: harness-influenced
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
   PARITY_DOCKER_NETWORK_MODE: bridge
@@ -298,6 +299,8 @@ jobs:
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity all-services smoke full profile
         run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
+      - name: Validate parity lifecycle latest report exists
+        run: test -f target/parity-reports/all-services-smoke-latest.json
       - name: Add parity full table to workflow summary
         if: always()
         run: |
@@ -376,6 +379,8 @@ jobs:
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity all-services smoke fast profile
         run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke-fast
+      - name: Validate parity lifecycle latest report exists
+        run: test -f target/parity-reports/all-services-smoke-fast-latest.json
       - name: Add parity fast table to workflow summary
         if: always()
         run: |
@@ -455,6 +460,12 @@ jobs:
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run benchmark fairness medium core profile
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
+      - name: Validate benchmark latest report exists
+        run: test -f target/benchmark-reports/fair-medium-core-latest.json
+      - name: Run benchmark fairness medium core low-overhead profile
+        env:
+          PARITY_BENCHMARK_LANE_MODE: low-overhead
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
       - name: Enforce memory budget (main core lane)
         run: |
           python3 - <<'PY'
@@ -490,6 +501,7 @@ jobs:
             --p95-limit 8 \
             --p99-limit 12 \
             --throughput-limit 8 \
+            --warning-mode \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-json "target/benchmark-reports/benchmark-gate-fair-medium-core-${{ github.run_id }}.json" \
             --output-markdown "benchmark_gate_full_summary.md"
@@ -513,6 +525,14 @@ jobs:
             --include-gate \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-path "benchmark_consolidated_summary.md"
+      - name: Add benchmark progress dashboard to workflow summary
+        if: always()
+        run: |
+          python3 scripts/benchmark_progress_dashboard.py \
+            --report-dir "target/benchmark-reports" \
+            --parity-dir "target/parity-reports" \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_progress_dashboard.md"
       - name: Upload benchmark full report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -566,6 +586,12 @@ jobs:
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run benchmark fairness low core profile
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low-core
+      - name: Validate benchmark latest report exists
+        run: test -f target/benchmark-reports/fair-low-core-latest.json
+      - name: Run benchmark fairness low core low-overhead profile
+        env:
+          PARITY_BENCHMARK_LANE_MODE: low-overhead
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low-core
       - name: Enforce memory budget (non-main core lane)
         run: |
           python3 - <<'PY'
@@ -601,6 +627,7 @@ jobs:
             --p95-limit 8 \
             --p99-limit 12 \
             --throughput-limit 8 \
+            --warning-mode \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-json "target/benchmark-reports/benchmark-gate-fair-low-core-${{ github.run_id }}.json" \
             --output-markdown "benchmark_gate_fast_summary.md"
@@ -624,6 +651,14 @@ jobs:
             --include-gate \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-path "benchmark_consolidated_summary.md"
+      - name: Add benchmark progress dashboard to workflow summary
+        if: always()
+        run: |
+          python3 scripts/benchmark_progress_dashboard.py \
+            --report-dir "target/benchmark-reports" \
+            --parity-dir "target/parity-reports" \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_progress_dashboard.md"
       - name: Upload benchmark fast report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4

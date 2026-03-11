@@ -45,8 +45,12 @@ Optional overrides:
 - `PARITY_OPENSTACK_ENDPOINT=http://127.0.0.1:4566`
 - `PARITY_LOCALSTACK_ENDPOINT=http://127.0.0.1:4666`
 - `PARITY_LOCALSTACK_IMAGE=localstack/localstack:3.7.2`
+- `PARITY_OPENSTACK_PERSISTENCE_MODE=durable|non-durable`
+- `PARITY_LOCALSTACK_PERSISTENCE_MODE=durable|non-durable`
 
-Reports are written to `target/parity-reports/*.json`.
+Reports are written to `target/parity-reports/*.json` plus per-profile latest snapshots (`<profile>-latest.json`).
+
+Parity reports now include persistence mode metadata (`openstack_persistence_mode`, `localstack_persistence_mode`, `persistence_mode_equivalent`) and persistence failure-class rollups under `summary.persistence_failure_classes`.
 
 ## Triage Workflow
 
@@ -68,5 +72,6 @@ Malformed or expired known-difference entries fail parity runs by design.
 - Base built-in scenarios are defined in `crates/tests/integration/src/parity.rs`.
 - Optional profile-specific scenarios can be added in `tests/parity/scenarios/<profile>.json`.
 - External scenarios support placeholders: `{{run_id}}`, `{{bucket}}`, `{{queue}}`, `{{table}}`.
+- External scenarios may set `requires_restart: true` to include persistence lifecycle validation.
 - If an external scenario reuses a built-in `id`, it replaces the built-in scenario to avoid duplicate execution.
 - `extended` includes all `core` scenarios plus any `profile: "extended"` scenarios.

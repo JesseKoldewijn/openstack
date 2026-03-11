@@ -12,6 +12,7 @@ env:
   PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
   PARITY_BENCHMARK_RUNTIME_MODE: symmetric-docker
   PARITY_BENCHMARK_EXECUTION_ORDER: alternating
+  PARITY_BENCHMARK_LANE_MODE: harness-influenced
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
   PARITY_DOCKER_NETWORK_MODE: bridge

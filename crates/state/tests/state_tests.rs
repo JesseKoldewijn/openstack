@@ -4,13 +4,14 @@
 mod state_tests {
     use std::path::Path;
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     use openstack_config::{Config, Directories, SnapshotLoadStrategy, SnapshotSaveStrategy};
     use openstack_state::{
-        AccountBundle, AccountRegionBundle, PersistableStore, StateHooks, StateManager,
+        AccountBundle, AccountRegionBundle, PersistableStore, StateFailureDiagnostic, StateHooks,
+        StateManager,
     };
     use serde::{Deserialize, Serialize};
     use tempfile::TempDir;
@@ -289,6 +290,8 @@ mod state_tests {
         load_after: Arc<AtomicUsize>,
         reset_before: Arc<AtomicUsize>,
         reset_after: Arc<AtomicUsize>,
+        save_errors: Arc<AtomicUsize>,
+        load_errors: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
@@ -311,6 +314,12 @@ mod state_tests {
         async fn on_after_state_reset(&self) {
             self.reset_after.fetch_add(1, Ordering::Relaxed);
         }
+        async fn on_state_save_error(&self, _diagnostic: &StateFailureDiagnostic) {
+            self.save_errors.fetch_add(1, Ordering::Relaxed);
+        }
+        async fn on_state_load_error(&self, _diagnostic: &StateFailureDiagnostic) {
+            self.load_errors.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     #[tokio::test]
@@ -325,6 +334,8 @@ mod state_tests {
             load_after: Arc::new(AtomicUsize::new(0)),
             reset_before: Arc::new(AtomicUsize::new(0)),
             reset_after: Arc::new(AtomicUsize::new(0)),
+            save_errors: Arc::new(AtomicUsize::new(0)),
+            load_errors: Arc::new(AtomicUsize::new(0)),
         });
 
         let save_before = Arc::clone(&hooks.save_before);
@@ -333,6 +344,8 @@ mod state_tests {
         let load_after = Arc::clone(&hooks.load_after);
         let reset_before = Arc::clone(&hooks.reset_before);
         let reset_after = Arc::clone(&hooks.reset_after);
+        let save_errors = Arc::clone(&hooks.save_errors);
+        let load_errors = Arc::clone(&hooks.load_errors);
 
         let store = Arc::new(CounterStore::new());
         let mgr = StateManager::with_hooks(cfg, hooks as Arc<dyn StateHooks>);
@@ -350,5 +363,55 @@ mod state_tests {
         mgr.reset_all().await;
         assert_eq!(reset_before.load(Ordering::Relaxed), 1);
         assert_eq!(reset_after.load(Ordering::Relaxed), 1);
+        assert_eq!(save_errors.load(Ordering::Relaxed), 0);
+        assert_eq!(load_errors.load(Ordering::Relaxed), 0);
+    }
+
+    struct FailingLoadStore;
+
+    #[async_trait::async_trait]
+    impl PersistableStore for FailingLoadStore {
+        fn service_name(&self) -> &str {
+            "failing-load"
+        }
+
+        async fn save(&self, _data_dir: &Path) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+
+        async fn load(&self, _data_dir: &Path) -> Result<(), anyhow::Error> {
+            Err(anyhow::anyhow!("boom"))
+        }
+
+        fn reset(&self) {}
+    }
+
+    #[tokio::test]
+    async fn startup_load_fails_fast_for_unrecoverable_state() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = persistence_config(tmp.path());
+
+        let hooks = Arc::new(CountingHooks {
+            save_before: Arc::new(AtomicUsize::new(0)),
+            save_after: Arc::new(AtomicUsize::new(0)),
+            load_before: Arc::new(AtomicUsize::new(0)),
+            load_after: Arc::new(AtomicUsize::new(0)),
+            reset_before: Arc::new(AtomicUsize::new(0)),
+            reset_after: Arc::new(AtomicUsize::new(0)),
+            save_errors: Arc::new(AtomicUsize::new(0)),
+            load_errors: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let load_errors = Arc::clone(&hooks.load_errors);
+        let mgr = StateManager::with_hooks(cfg, hooks as Arc<dyn StateHooks>);
+        mgr.register_store(Arc::new(FailingLoadStore) as Arc<dyn PersistableStore>)
+            .await;
+
+        let err = mgr.load_on_startup().await.expect_err("must fail fast");
+        assert!(
+            err.to_string().contains("startup_state_load_failed"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(load_errors.load(Ordering::Relaxed), 1);
     }
 }
