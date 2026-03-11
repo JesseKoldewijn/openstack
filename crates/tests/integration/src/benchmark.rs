@@ -1517,7 +1517,7 @@ fn summarize_results(results: &[BenchmarkScenarioResult]) -> BenchmarkSummary {
             service_openstack_errors += result.openstack.metrics.error_count;
             service_localstack_errors += result.localstack.metrics.error_count;
 
-            if !result.skipped && result.scenario_class == BenchmarkScenarioClass::Performance {
+            if result.valid_for_performance {
                 if let Some(v) = result.comparison.latency_p50_ratio {
                     service_p50.push(v);
                 }
@@ -2480,6 +2480,96 @@ mod tests {
             .expect("s3 service summary should exist");
         assert_eq!(s3.total_scenarios, 3);
         assert_eq!(s3.skipped_scenarios, 1);
+        assert_eq!(s3.avg_latency_p50_ratio, Some(2.0));
+        assert_eq!(s3.avg_latency_p95_ratio, Some(2.0));
+        assert_eq!(s3.avg_latency_p99_ratio, Some(1.0));
+        assert_eq!(s3.avg_throughput_ratio, Some(2.0));
+    }
+
+    #[test]
+    fn per_service_ratios_exclude_invalid_performance_scenarios() {
+        let metadata = BenchmarkTargetMetadata {
+            endpoint: "http://127.0.0.1:4566".to_string(),
+            runtime: "docker".to_string(),
+            image: None,
+            cpu_limit: None,
+            memory_limit: None,
+            network_mode: Some("bridge".to_string()),
+            localstack_image: Some("localstack/localstack:3.7.2".to_string()),
+            localstack_version: Some("3.7.2".to_string()),
+        };
+
+        let valid = BenchmarkScenarioResult {
+            scenario_id: "valid".to_string(),
+            service: "s3".to_string(),
+            scenario_class: BenchmarkScenarioClass::Performance,
+            load_tier: BenchmarkLoadTier::Low,
+            skipped: false,
+            skip_reason: None,
+            valid_for_performance: true,
+            invalid_reason: None,
+            run_config: BenchmarkRunConfig {
+                warmup_iterations: 1,
+                measured_iterations: 1,
+                operations_per_iteration: 2,
+                concurrency: 1,
+            },
+            openstack: BenchmarkTargetResult {
+                metadata: metadata.clone(),
+                metrics: BenchmarkMetrics {
+                    latency_p50_ms: 10.0,
+                    latency_p95_ms: 20.0,
+                    latency_p99_ms: 30.0,
+                    throughput_ops_per_sec: 50.0,
+                    operation_count: 4,
+                    error_count: 0,
+                    ..BenchmarkMetrics::default()
+                },
+            },
+            localstack: BenchmarkTargetResult {
+                metadata: metadata.clone(),
+                metrics: BenchmarkMetrics {
+                    latency_p50_ms: 5.0,
+                    latency_p95_ms: 10.0,
+                    latency_p99_ms: 15.0,
+                    throughput_ops_per_sec: 25.0,
+                    operation_count: 4,
+                    error_count: 0,
+                    ..BenchmarkMetrics::default()
+                },
+            },
+            comparison: BenchmarkComparison {
+                latency_p50_ratio: Some(2.0),
+                latency_p95_ratio: Some(2.0),
+                throughput_ratio: Some(2.0),
+                latency_p50_delta_ms: 5.0,
+                latency_p95_delta_ms: 10.0,
+                throughput_delta_ops_per_sec: 25.0,
+            },
+        };
+
+        let mut invalid = valid.clone();
+        invalid.scenario_id = "invalid".to_string();
+        invalid.valid_for_performance = false;
+        invalid.invalid_reason = Some("all operations failed".to_string());
+        invalid.comparison.latency_p50_ratio = Some(100.0);
+        invalid.comparison.latency_p95_ratio = Some(100.0);
+        invalid.comparison.throughput_ratio = Some(100.0);
+        invalid.openstack.metrics.latency_p99_ms = 3000.0;
+        invalid.localstack.metrics.latency_p99_ms = 1.0;
+
+        let summary = summarize_results(&[valid, invalid]);
+        let s3 = summary
+            .per_service
+            .get("s3")
+            .expect("s3 service summary should exist");
+
+        assert_eq!(summary.valid_performance_scenarios, 1);
+        assert_eq!(summary.invalid_performance_scenarios, 1);
+        assert_eq!(s3.avg_latency_p50_ratio, Some(2.0));
+        assert_eq!(s3.avg_latency_p95_ratio, Some(2.0));
+        assert_eq!(s3.avg_latency_p99_ratio, Some(2.0));
+        assert_eq!(s3.avg_throughput_ratio, Some(2.0));
     }
 
     #[test]

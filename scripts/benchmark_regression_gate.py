@@ -136,7 +136,11 @@ def evaluate_gate(
     summary = current_report.get("summary", {})
     perf_scenarios = int(summary.get("performance_scenarios", 0))
     valid_perf_scenarios = int(summary.get("valid_performance_scenarios", perf_scenarios))
+    invalid_perf_scenarios = int(summary.get("invalid_performance_scenarios", 0))
     skipped_scenarios = int(summary.get("skipped_scenarios", 0))
+    openstack_error_count = int(summary.get("openstack_error_count", 0))
+    localstack_error_count = int(summary.get("localstack_error_count", 0))
+    invalid_reasons = [str(reason) for reason in summary.get("invalid_reasons", []) if reason]
 
     failures: list[str] = []
     checks: list[Dict[str, Any]] = []
@@ -220,7 +224,11 @@ def evaluate_gate(
         "status": "pass" if not failures else "fail",
         "performance_scenarios": perf_scenarios,
         "valid_performance_scenarios": valid_perf_scenarios,
+        "invalid_performance_scenarios": invalid_perf_scenarios,
         "skipped_scenarios": skipped_scenarios,
+        "openstack_error_count": openstack_error_count,
+        "localstack_error_count": localstack_error_count,
+        "invalid_reasons": invalid_reasons,
         "current": current,
         "baseline": previous,
         "checks": checks,
@@ -272,6 +280,25 @@ def format_markdown(result: Dict[str, Any], baseline_run_id: Optional[str]) -> s
             lines.append(f"- {failure}")
     if result.get("failure_category"):
         lines.extend(["", f"Failure category: `{result['failure_category']}`"])
+
+    if result.get("failure_category") == "data_quality_no_valid_performance":
+        lines.extend(
+            [
+                "",
+                "Signal quality diagnostics:",
+                f"- performance_scenarios: {result.get('performance_scenarios', 0)}",
+                f"- valid_performance_scenarios: {result.get('valid_performance_scenarios', 0)}",
+                f"- invalid_performance_scenarios: {result.get('invalid_performance_scenarios', 0)}",
+                f"- skipped_scenarios: {result.get('skipped_scenarios', 0)}",
+                f"- openstack_error_count: {result.get('openstack_error_count', 0)}",
+                f"- localstack_error_count: {result.get('localstack_error_count', 0)}",
+            ]
+        )
+        invalid_reasons = result.get("invalid_reasons", [])
+        if invalid_reasons:
+            lines.append("- sample_invalid_reasons:")
+            for reason in invalid_reasons[:5]:
+                lines.append(f"- invalid_reason: {reason}")
 
     diagnostics = result.get("diagnostics")
     if diagnostics:
@@ -385,7 +412,12 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
         return {
             "summary": {
                 "performance_scenarios": perf,
+                "valid_performance_scenarios": perf,
+                "invalid_performance_scenarios": 0,
                 "skipped_scenarios": skipped,
+                "openstack_error_count": 0,
+                "localstack_error_count": 0,
+                "invalid_reasons": [],
                 "avg_latency_p95_ratio": p95,
                 "avg_latency_p99_ratio": p99,
                 "avg_throughput_ratio": throughput,
@@ -449,6 +481,27 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
                 [str(lane_report), str(gate_report), str(other_lane)], "fair-low-core"
             )
             self.assertEqual(selected, str(lane_report))
+
+    def test_data_quality_markdown_includes_signal_details(self) -> None:
+        current = self._report(1.00, 1.00, 1.00, perf=2, skipped=0)
+        current["summary"]["valid_performance_scenarios"] = 0
+        current["summary"]["invalid_performance_scenarios"] = 2
+        current["summary"]["openstack_error_count"] = 24
+        current["summary"]["localstack_error_count"] = 24
+        current["summary"]["invalid_reasons"] = [
+            "s3-core-list: insufficient cross-target successful operations",
+            "sns-core-list: all operations failed",
+        ]
+        baseline = self._report(1.00, 1.00, 1.00)
+
+        result = evaluate_gate("fair-low-core", current, baseline, 8.0, 12.0, 8.0, True)
+        markdown = format_markdown(result, "123")
+
+        self.assertIn("Signal quality diagnostics:", markdown)
+        self.assertIn("- valid_performance_scenarios: 0", markdown)
+        self.assertIn("- invalid_performance_scenarios: 2", markdown)
+        self.assertIn("- openstack_error_count: 24", markdown)
+        self.assertIn("sample_invalid_reasons", markdown)
 
 
 def run_tests() -> int:
