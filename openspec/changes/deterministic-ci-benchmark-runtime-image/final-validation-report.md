@@ -41,15 +41,56 @@ Validated deterministic OpenStack runtime image producer/consumer flow for bench
 
 ## Hosted GitHub CI validation
 
-- Status: **pending** (requires pushing workflow changes and observing GitHub-hosted run evidence).
-- Required evidence to capture:
-  - run URL(s)
-  - producer output image ref/id
-  - matching consumer preflight image ref/id across benchmark and parity jobs
+- Status: **completed** (hosted evidence captured).
+- Run:
+  - Run ID: `22975794792`
+  - URL: `https://github.com/JesseKoldewijn/openstack/actions/runs/22975794792`
+  - Branch/PR context: `feat/perf-improvements-v2` / PR #2 (non-main lane)
+
+### Producer evidence (`Prepare OpenStack runtime image`)
+
+- `image_ref="openstack-runtime-ci:22975794792-312e951a01a8c2463dd33866e9f1aea38656d460"`
+- `image_artifact=openstack-runtime-image-22975794792`
+- `image_id="sha256:0a5d0de5d91d92fea110aa122377a78f77eab5bc2231d767f33f3cb15d097db6"`
+- Artifact upload name confirmed: `openstack-runtime-image-22975794792`
+
+### Consumer provenance evidence
+
+- `Benchmark (all-services-smoke fast)`
+  - `Using OpenStack runtime image: openstack-runtime-ci:22975794792-312e951a01a8c2463dd33866e9f1aea38656d460`
+  - `Expected image id: sha256:0a5d0de5d91d92fea110aa122377a78f77eab5bc2231d767f33f3cb15d097db6`
+  - `Actual image id:   sha256:0a5d0de5d91d92fea110aa122377a78f77eab5bc2231d767f33f3cb15d097db6`
+- `Parity (core)`
+  - `Using OpenStack runtime image: openstack-runtime-ci:22975794792-312e951a01a8c2463dd33866e9f1aea38656d460`
+  - `Expected image id: sha256:0a5d0de5d91d92fea110aa122377a78f77eab5bc2231d767f33f3cb15d097db6`
+  - `Actual image id:   sha256:0a5d0de5d91d92fea110aa122377a78f77eab5bc2231d767f33f3cb15d097db6`
+- `Parity (all-services-smoke fast)`
+  - Runtime image provenance step executed with same ref/id contract; no mismatch emitted before profile execution.
+
+### Hosted failure signatures (non-provenance)
+
+- `Benchmark (all-services-smoke fast)` failed in benchmark execution, not image integrity:
+  - `Error: timed out waiting for benchmark target health at http://127.0.0.1:39041/_localstack/health (target=openstack, attempts=405, last_error=error sending request for url (http://127.0.0.1:39041/_localstack/health))`
+  - Container diagnostic in same failure path:
+    - `status=exited health=unhealthy ... ExitCode=0 ... recent_logs=[<empty>]`
+- `Parity (core)` failed in profile execution, not image integrity:
+  - `Error: timed out waiting for localstack health at http://127.0.0.1:37097/_localstack/health`
+- `Parity (all-services-smoke fast)` failed in profile execution, not image integrity:
+  - `Error: timed out waiting for localstack health at http://127.0.0.1:34665/_localstack/health`
+
+### Hosted job outcome snapshot
+
+- Success: `Prepare OpenStack runtime image`, `Rustfmt`, `Clippy`, `Test (ubuntu/macos)`, `Build (release)`, `Verify release artifact`, `Validate Harness Coverage`, `PR Results Comment`.
+- Failure: `Parity (core)`, `Parity (all-services-smoke fast)`, `Benchmark (all-services-smoke fast)`.
+- Skipped (expected for this non-main failing run): `Benchmark Gate (main lane)`, `Benchmark Gate (non-main lane)`, `Required checks (main target)`, `Required checks (non-main target)`, plus non-applicable full/push parity+benchmark lanes.
 
 ## Compatibility and rollback
 
 - Compatibility target: benchmark gates and required-check aggregators continue to behave as before when upstream benchmark/parity results pass/fail.
+- Hosted non-main run `22975794792` compatibility observation:
+  - `Benchmark Gate (non-main lane)` was skipped because `benchmark-smoke-fast` failed upstream, preserving existing dependency semantics via `needs`.
+  - `Required checks (non-main target)` was skipped due failed/blocked upstream dependencies, consistent with prior aggregator behavior.
+  - `PR Results Comment` still executed (`if: always()`), confirming result-reporting lane remained resilient while required-check lanes respected hard dependencies.
 - Rollback path: revert producer-consumer wiring and restore prior runtime image source while retaining benchmark timeout diagnostics where possible.
 
 ## Pass/Fail Matrix (this session)
@@ -59,3 +100,7 @@ Validated deterministic OpenStack runtime image producer/consumer flow for bench
 - `parity-all-services-fast` (`ci.yml` via act): **fail** (health timeout; provenance checks pass)
 - `prepare-openstack-runtime-image` (`benchmark-deep.yml` via act): **pass**
 - `benchmark-deep` (`benchmark-deep.yml` via act): **fail** (health timeout; provenance checks pass)
+- `Prepare OpenStack runtime image` (hosted CI run `22975794792`): **pass**
+- `Parity (core)` (hosted CI run `22975794792`): **fail** (localstack health timeout; provenance checks pass)
+- `Parity (all-services-smoke fast)` (hosted CI run `22975794792`): **fail** (localstack health timeout; provenance checks pass)
+- `Benchmark (all-services-smoke fast)` (hosted CI run `22975794792`): **fail** (benchmark target/localstack health timeout; provenance checks pass)

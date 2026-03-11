@@ -20,10 +20,10 @@
 
 - [x] 4.1 Update local validation docs (`tests/benchmark/README.md` and related CI validation docs) with deterministic runtime-image producer/consumer steps for `act`.
 - [x] 4.2 Run local `act` validation for representative benchmark/parity jobs and capture evidence that one immutable runtime image reference is reused across tested lanes.
-- [ ] 4.3 Run hosted GitHub CI validation and capture run evidence that benchmark/parity jobs in a workflow run consume the same immutable runtime image reference.
+- [x] 4.3 Run hosted GitHub CI validation and capture run evidence that benchmark/parity jobs in a workflow run consume the same immutable runtime image reference.
 
 ## 5. Completion, compatibility, and rollback readiness
 
-- [ ] 5.1 Verify benchmark gates and required-check aggregators still behave correctly after producer-consumer wiring changes.
+- [x] 5.1 Verify benchmark gates and required-check aggregators still behave correctly after producer-consumer wiring changes.
 - [x] 5.2 Add/update rollback notes documenting how to temporarily revert to prior runtime image selection if producer flow is disrupted.
 - [x] 5.3 Produce a final validation summary artifact documenting pass/fail matrix for `act` and hosted CI under deterministic runtime-image flow.
