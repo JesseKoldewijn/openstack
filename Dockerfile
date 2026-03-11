@@ -68,7 +68,8 @@ RUN cargo build --release --bin openstack
 # Now copy the real source and rebuild
 COPY . .
 
-RUN cargo build --release --bin openstack
+RUN find crates -type f -path "*/src/*" -exec touch {} + \
+    && cargo build --release --bin openstack
 
 # ─────────────────────────────────────────────
 # Stage 2: minimal runtime image

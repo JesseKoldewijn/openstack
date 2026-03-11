@@ -278,8 +278,10 @@ jobs:
             exit 1
           fi
           docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-          if ! timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version > /dev/null; then
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
             echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
             exit 1
           fi
       - name: Preflight parity environment
@@ -396,8 +398,10 @@ jobs:
             exit 1
           fi
           docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-          if ! timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version > /dev/null; then
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
             echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
             exit 1
           fi
       - name: Preflight parity environment
@@ -511,8 +515,10 @@ jobs:
             exit 1
           fi
           docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-          if ! timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version > /dev/null; then
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
             echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
             exit 1
           fi
       - name: Preflight parity environment
@@ -626,8 +632,10 @@ jobs:
             exit 1
           fi
           docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-          if ! timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version > /dev/null; then
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
             echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
             exit 1
           fi
       - name: Preflight benchmark environment
@@ -786,8 +794,10 @@ jobs:
             exit 1
           fi
           docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-          if ! timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version > /dev/null; then
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
             echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
             exit 1
           fi
       - name: Preflight benchmark environment
