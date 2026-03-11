@@ -22,7 +22,8 @@ def fetch_previous_report(
     workflow_file: str,
     artifact_name: str,
     current_run_id: str,
-) -> tuple[Optional[str], Optional[str], Dict[str, Any]]:
+    lane: str,
+) -> tuple[Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
     diagnostics: Dict[str, Any] = {
         "source": "github-actions-artifact",
         "workflow_file": workflow_file,
@@ -82,10 +83,11 @@ def fetch_previous_report(
                 ["gh", "run", "download", run_id, "-n", artifact_name, "-D", temp_dir]
             )
             reports = sorted(glob.glob(f"{temp_dir}/**/*.json", recursive=True), key=os.path.getmtime)
-            if reports:
+            selected_report = select_baseline_report_path(reports, lane)
+            if selected_report:
                 diagnostics["failure_reason"] = None
                 diagnostics["resolved_run_id"] = run_id
-                return reports[-1], run_id, diagnostics
+                return load_report(selected_report), run_id, diagnostics
         except Exception:
             pass
         finally:
@@ -98,6 +100,19 @@ def fetch_previous_report(
 def load_report(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def select_baseline_report_path(candidates: list[str], lane: str) -> Optional[str]:
+    non_gate_reports = [
+        path for path in candidates if not os.path.basename(path).startswith("benchmark-gate-")
+    ]
+    lane_reports = [
+        path for path in non_gate_reports if os.path.basename(path).startswith(f"{lane}-")
+    ]
+    pool = lane_reports or non_gate_reports
+    if not pool:
+        return None
+    return max(pool, key=os.path.getmtime)
 
 
 def lane_metrics(report: Dict[str, Any]) -> Dict[str, Optional[float]]:
@@ -326,11 +341,15 @@ def main() -> int:
     if args.previous:
         previous_report = load_report(args.previous)
     elif args.repo and args.artifact_name and args.run_id:
-        baseline_path, baseline_run_id, diagnostics = fetch_previous_report(
-            args.repo, args.workflow_file, args.artifact_name, args.run_id
+        baseline_report, baseline_run_id, diagnostics = fetch_previous_report(
+            args.repo,
+            args.workflow_file,
+            args.artifact_name,
+            args.run_id,
+            args.lane,
         )
-        if baseline_path:
-            previous_report = load_report(baseline_path)
+        if baseline_report is not None:
+            previous_report = baseline_report
 
     result = evaluate_gate(
         lane=args.lane,
@@ -409,13 +428,27 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
         previous_token = os.environ.pop("GH_TOKEN", None)
         try:
             _path, _run_id, diagnostics = fetch_previous_report(
-                "owner/repo", "ci.yml", "artifact", "123"
+                "owner/repo", "ci.yml", "artifact", "123", "fair-low-core"
             )
             self.assertEqual(diagnostics.get("failure_reason"), "missing_gh_token")
             self.assertFalse(diagnostics.get("gh_token_present"))
         finally:
             if previous_token is not None:
                 os.environ["GH_TOKEN"] = previous_token
+
+    def test_select_baseline_prefers_lane_report_over_gate_json(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bench-gate-select-") as temp_dir:
+            lane_report = Path(temp_dir, "fair-low-core-20260310164402.json")
+            gate_report = Path(temp_dir, "benchmark-gate-fair-low-core-123456.json")
+            other_lane = Path(temp_dir, "fair-medium-core-20260310164403.json")
+            lane_report.write_text("{}", encoding="utf-8")
+            gate_report.write_text("{}", encoding="utf-8")
+            other_lane.write_text("{}", encoding="utf-8")
+
+            selected = select_baseline_report_path(
+                [str(lane_report), str(gate_report), str(other_lane)], "fair-low-core"
+            )
+            self.assertEqual(selected, str(lane_report))
 
 
 def run_tests() -> int:

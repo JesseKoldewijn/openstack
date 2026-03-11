@@ -4,9 +4,11 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import unittest
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -86,12 +88,37 @@ def run_json(command: list[str]) -> Dict[str, Any]:
     return json.loads(output)
 
 
+def select_baseline_report_path(candidates: list[str], lane: str) -> Optional[str]:
+    non_gate_reports = [
+        path for path in candidates if not os.path.basename(path).startswith("benchmark-gate-")
+    ]
+    lane_reports = [
+        path for path in non_gate_reports if os.path.basename(path).startswith(f"{lane}-")
+    ]
+    pool = lane_reports or non_gate_reports
+    if not pool:
+        return None
+    return max(pool, key=os.path.getmtime)
+
+
+def infer_lane_from_report_path(path: str) -> str:
+    filename = Path(path).name
+    stem = Path(path).stem
+    match = re.match(r"^(?P<lane>.+)-\d{8,}$", stem)
+    if match:
+        return match.group("lane")
+    if filename.endswith(".json"):
+        return stem
+    return filename
+
+
 def fetch_previous_report(
     repo: str,
     workflow_file: str,
     artifact_name: str,
     current_run_id: str,
-) -> tuple[Optional[str], Optional[str]]:
+    lane: str,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     try:
         runs_data = run_json(
             [
@@ -143,8 +170,9 @@ def fetch_previous_report(
                 ]
             )
             reports = sorted(glob.glob(f"{temp_dir}/**/*.json", recursive=True), key=os.path.getmtime)
-            if reports:
-                return reports[-1], run_id
+            selected_report = select_baseline_report_path(reports, lane)
+            if selected_report:
+                return load_report(selected_report), run_id
         except Exception:
             pass
         finally:
@@ -284,14 +312,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate benchmark markdown tables")
     parser.add_argument("--current", help="Path to current benchmark report json")
     parser.add_argument("--current-glob", help="Glob pattern to locate latest current report")
-    parser.add_argument("--title", required=True, help="Markdown section title")
+    parser.add_argument("--title", help="Markdown section title")
     parser.add_argument("--repo", help="GitHub repo owner/name")
     parser.add_argument("--workflow-file", default="ci.yml", help="Workflow file name")
     parser.add_argument("--artifact-name", help="Artifact name for baseline lookup")
     parser.add_argument("--run-id", help="Current run id")
     parser.add_argument("--summary-path", help="Path to append markdown summary")
     parser.add_argument("--output-path", help="Path to write markdown")
+    parser.add_argument("--run-tests", action="store_true")
     args = parser.parse_args()
+
+    if args.run_tests:
+        return run_tests()
+
+    if not args.title:
+        raise SystemExit("--title is required unless --run-tests is set")
 
     if not args.current and not args.current_glob:
         raise SystemExit("Either --current or --current-glob is required")
@@ -308,14 +343,16 @@ def main() -> int:
     previous = None
     previous_run_id = None
     if args.repo and args.artifact_name and args.run_id:
-        baseline_path, previous_run_id = fetch_previous_report(
+        lane = infer_lane_from_report_path(current_path)
+        baseline_report, previous_run_id = fetch_previous_report(
             repo=args.repo,
             workflow_file=args.workflow_file,
             artifact_name=args.artifact_name,
             current_run_id=args.run_id,
+            lane=lane,
         )
-        if baseline_path:
-            previous = load_report(baseline_path)
+        if baseline_report is not None:
+            previous = baseline_report
 
     markdown = build_markdown(current, args.title, previous, previous_run_id)
 
@@ -327,6 +364,32 @@ def main() -> int:
     else:
         print(markdown)
     return 0
+
+
+class BenchmarkReportTablesTests(unittest.TestCase):
+    def test_select_baseline_prefers_lane_report_over_gate_json(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bench-table-select-") as temp_dir:
+            lane_report = Path(temp_dir, "fair-low-core-20260310164402.json")
+            gate_report = Path(temp_dir, "benchmark-gate-fair-low-core-123456.json")
+            other_lane = Path(temp_dir, "fair-medium-core-20260310164403.json")
+            lane_report.write_text("{}", encoding="utf-8")
+            gate_report.write_text("{}", encoding="utf-8")
+            other_lane.write_text("{}", encoding="utf-8")
+
+            selected = select_baseline_report_path(
+                [str(lane_report), str(gate_report), str(other_lane)], "fair-low-core"
+            )
+            self.assertEqual(selected, str(lane_report))
+
+    def test_infer_lane_from_timestamped_report(self) -> None:
+        lane = infer_lane_from_report_path("target/benchmark-reports/fair-medium-core-20260310164402.json")
+        self.assertEqual(lane, "fair-medium-core")
+
+
+def run_tests() -> int:
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(BenchmarkReportTablesTests)
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if result.wasSuccessful() else 1
 
 
 if __name__ == "__main__":
