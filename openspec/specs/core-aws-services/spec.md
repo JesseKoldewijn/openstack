@@ -1,7 +1,7 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: S3 object storage emulation
-The system SHALL emulate the Amazon S3 API including bucket operations (CreateBucket, DeleteBucket, ListBuckets, HeadBucket), object operations (PutObject, GetObject, DeleteObject, HeadObject, CopyObject, ListObjectsV2), multipart uploads (CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload), and bucket policies/ACLs.
+The system SHALL emulate the Amazon S3 API including bucket operations (CreateBucket, DeleteBucket, ListBuckets, HeadBucket), object operations (PutObject, GetObject, DeleteObject, HeadObject, CopyObject, ListObjectsV2), multipart uploads (CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload), and bucket policies/ACLs. S3 emulation SHALL meet required-lane performance and resource envelopes while preserving functional parity, and SHALL support parity-declared persistence behavior in durable modes.
 
 #### Scenario: Create and use a bucket
 - **WHEN** a client calls `CreateBucket` with bucket name `my-bucket`, then `PutObject` with key `test.txt` and body `hello`
@@ -19,8 +19,12 @@ The system SHALL emulate the Amazon S3 API including bucket operations (CreateBu
 - **WHEN** a client generates a pre-signed URL for `GetObject` and makes an HTTP GET to that URL
 - **THEN** the gateway SHALL serve the object without requiring an Authorization header
 
+#### Scenario: Durable mode survives restart
+- **WHEN** S3 state is created in a declared durable mode and the runtime restarts
+- **THEN** bucket and object visibility after restart SHALL remain parity-consistent with declared durability semantics
+
 ### Requirement: SQS message queue emulation
-The system SHALL emulate the Amazon SQS API including queue operations (CreateQueue, DeleteQueue, ListQueues, GetQueueUrl, GetQueueAttributes, SetQueueAttributes), message operations (SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, ChangeMessageVisibility), and dead-letter queue support.
+The system SHALL emulate the Amazon SQS API including queue operations (CreateQueue, DeleteQueue, ListQueues, GetQueueUrl, GetQueueAttributes, SetQueueAttributes), message operations (SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, ChangeMessageVisibility), and dead-letter queue support. SQS emulation SHALL satisfy required-lane latency/throughput/resource envelopes and persistence parity semantics in declared durable modes.
 
 #### Scenario: Send and receive a message
 - **WHEN** a client creates a queue, sends a message with body `test`, then calls `ReceiveMessage`
@@ -38,8 +42,12 @@ The system SHALL emulate the Amazon SQS API including queue operations (CreateQu
 - **WHEN** messages are sent to a FIFO queue (`.fifo` suffix) with the same message group ID
 - **THEN** `ReceiveMessage` SHALL return them in the order they were sent
 
+#### Scenario: Queue state survives durable restart
+- **WHEN** queue and message state exist in a declared durable mode and the runtime restarts
+- **THEN** queue existence and eligible message visibility SHALL remain parity-consistent after restart
+
 ### Requirement: SNS notification emulation
-The system SHALL emulate the Amazon SNS API including topic operations (CreateTopic, DeleteTopic, ListTopics), subscription operations (Subscribe, Unsubscribe, ListSubscriptions), and message publishing (Publish, PublishBatch). The system SHALL support SQS, HTTP/HTTPS, and Lambda subscription protocols.
+The system SHALL emulate the Amazon SNS API including topic operations (CreateTopic, DeleteTopic, ListTopics), subscription operations (Subscribe, Unsubscribe, ListSubscriptions), and message publishing (Publish, PublishBatch). The system SHALL support SQS, HTTP/HTTPS, and Lambda subscription protocols. SNS emulation SHALL maintain parity behavior while meeting class-specific performance/resource envelopes.
 
 #### Scenario: Publish to SQS subscriber
 - **WHEN** an SQS queue is subscribed to an SNS topic and a message is published to the topic
@@ -54,7 +62,7 @@ The system SHALL emulate the Amazon SNS API including topic operations (CreateTo
 - **THEN** the system SHALL POST the notification to the HTTP endpoint
 
 ### Requirement: DynamoDB table emulation
-The system SHALL emulate the Amazon DynamoDB API including table operations (CreateTable, DeleteTable, DescribeTable, ListTables, UpdateTable), item operations (PutItem, GetItem, DeleteItem, UpdateItem, Query, Scan, BatchGetItem, BatchWriteItem, TransactGetItems, TransactWriteItems), and secondary indexes (GSI, LSI).
+The system SHALL emulate the Amazon DynamoDB API including table operations (CreateTable, DeleteTable, DescribeTable, ListTables, UpdateTable), item operations (PutItem, GetItem, DeleteItem, UpdateItem, Query, Scan, BatchGetItem, BatchWriteItem, TransactGetItems, TransactWriteItems), and secondary indexes (GSI, LSI). DynamoDB emulation SHALL preserve parity semantics while satisfying class-specific performance/resource envelopes and declared persistence durability semantics.
 
 #### Scenario: CRUD operations
 - **WHEN** a table with partition key `pk` is created and an item `{pk: "1", data: "hello"}` is put
@@ -72,42 +80,6 @@ The system SHALL emulate the Amazon DynamoDB API including table operations (Cre
 - **WHEN** `PutItem` is called with a condition expression `attribute_not_exists(pk)` and the item already exists
 - **THEN** the operation SHALL fail with `ConditionalCheckFailedException`
 
-### Requirement: DynamoDB Streams emulation
-The system SHALL emulate DynamoDB Streams, providing a change data capture stream for DynamoDB table modifications. The system SHALL support `DescribeStream`, `GetRecords`, `GetShardIterator`, and `ListStreams` operations.
-
-#### Scenario: Stream captures insert
-- **WHEN** a table has streams enabled with `NEW_AND_OLD_IMAGES` and an item is inserted
-- **THEN** `GetRecords` SHALL return a record with `eventName=INSERT` and the new item image
-
-### Requirement: Lambda function emulation
-The system SHALL emulate the AWS Lambda API including function management (CreateFunction, DeleteFunction, UpdateFunctionCode, UpdateFunctionConfiguration, GetFunction, ListFunctions) and invocation (Invoke synchronous and asynchronous). Lambda functions SHALL execute in Docker containers using AWS-compatible runtime images.
-
-#### Scenario: Create and invoke a function
-- **WHEN** a Lambda function is created with a Python 3.12 runtime and a zip deployment package, then invoked with payload `{"key": "value"}`
-- **THEN** the function SHALL execute in a Docker container and return the function's response
-
-#### Scenario: Environment variables
-- **WHEN** a function is created with environment variables `{"FOO": "bar"}`
-- **THEN** the function's execution environment SHALL have `FOO=bar` available
-
-#### Scenario: Function timeout
-- **WHEN** a function is invoked and exceeds its configured timeout
-- **THEN** the invocation SHALL fail with a timeout error
-
-#### Scenario: Hot reload
-- **WHEN** a function's code package references the magic S3 bucket `hot-reload` (configurable via `BUCKET_MARKER_LOCAL`)
-- **THEN** the function SHALL use the local file path for code, reflecting changes without redeployment
-
-### Requirement: Kinesis data stream emulation
-The system SHALL emulate the Amazon Kinesis API including stream management (CreateStream, DeleteStream, DescribeStream, ListStreams), shard operations (SplitShard, MergeShard), and data operations (PutRecord, PutRecords, GetRecords, GetShardIterator).
-
-#### Scenario: Put and get records
-- **WHEN** records are put into a Kinesis stream and a shard iterator is obtained with type `TRIM_HORIZON`
-- **THEN** `GetRecords` SHALL return the records in the order they were put
-
-### Requirement: Kinesis Firehose emulation
-The system SHALL emulate the Amazon Kinesis Data Firehose API including delivery stream management (CreateDeliveryStream, DeleteDeliveryStream, DescribeDeliveryStream) and data ingestion (PutRecord, PutRecordBatch). The system SHALL support S3 as a destination.
-
-#### Scenario: Deliver records to S3
-- **WHEN** a Firehose delivery stream with S3 destination is created and records are put
-- **THEN** the records SHALL be buffered and delivered to the configured S3 bucket
+#### Scenario: Durable table state survives restart
+- **WHEN** table and item state are created in a declared durable mode and the runtime restarts
+- **THEN** table metadata and item visibility SHALL remain parity-consistent after restart
