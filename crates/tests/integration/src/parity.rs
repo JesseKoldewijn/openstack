@@ -25,6 +25,7 @@ pub enum ProtocolFamily {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParityConfig {
+    pub openstack_image: Option<String>,
     pub localstack_image: String,
     pub report_dir: PathBuf,
     pub known_differences_path: PathBuf,
@@ -92,6 +93,7 @@ impl Default for ParityConfig {
         );
 
         Self {
+            openstack_image: std::env::var("PARITY_OPENSTACK_IMAGE").ok(),
             localstack_image: std::env::var("PARITY_LOCALSTACK_IMAGE")
                 .unwrap_or_else(|_| "localstack/localstack:3.7.2".to_string()),
             report_dir: PathBuf::from("target/parity-reports"),
@@ -1145,6 +1147,7 @@ fn validate_known_differences(rules: &[KnownDifferenceRule]) -> anyhow::Result<(
 pub struct TargetManager {
     pub openstack: ManagedTarget,
     pub localstack: ManagedTarget,
+    openstack_container_id: Option<String>,
     localstack_container_id: Option<String>,
     openstack_harness: Option<TestHarness>,
 }
@@ -1161,18 +1164,47 @@ impl TargetManager {
             .unwrap_or_else(|| vec!["s3".into(), "sqs".into(), "dynamodb".into(), "sts".into()]);
         let services = target_services.join(",");
 
-        let (openstack, openstack_harness) = if let Some(endpoint) = &config.openstack_endpoint {
-            (
-                ManagedTarget {
-                    endpoint: endpoint.clone(),
-                },
-                None,
-            )
-        } else {
-            let harness = TestHarness::start_services(&services).await;
-            let endpoint = harness.base_url.clone();
-            (ManagedTarget { endpoint }, Some(harness))
-        };
+        let (openstack, openstack_harness, openstack_container_id) =
+            if let Some(endpoint) = &config.openstack_endpoint {
+                (
+                    ManagedTarget {
+                        endpoint: endpoint.clone(),
+                    },
+                    None,
+                    None,
+                )
+            } else if let Some(image) = &config.openstack_image {
+                let port = free_port()?;
+                let endpoint = format!("http://127.0.0.1:{port}");
+                let output = Command::new("docker")
+                    .args([
+                        "run",
+                        "-d",
+                        "-p",
+                        &format!("127.0.0.1:{port}:4566"),
+                        "-e",
+                        &format!("SERVICES={services}"),
+                        "-e",
+                        "DEBUG=1",
+                        image,
+                    ])
+                    .output()?;
+
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "failed to start openstack image target: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+
+                let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                wait_for_health(&endpoint, Duration::from_secs(60)).await?;
+                (ManagedTarget { endpoint }, None, Some(container_id))
+            } else {
+                let harness = TestHarness::start_services(&services).await;
+                let endpoint = harness.base_url.clone();
+                (ManagedTarget { endpoint }, Some(harness), None)
+            };
 
         let (localstack, container_id) = if let Some(endpoint) = &config.localstack_endpoint {
             (
@@ -1219,12 +1251,20 @@ impl TargetManager {
         Ok(Self {
             openstack,
             localstack,
+            openstack_container_id,
             localstack_container_id: container_id,
             openstack_harness,
         })
     }
 
     pub async fn stop(&mut self) {
+        if let Some(container_id) = &self.openstack_container_id {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", container_id])
+                .output();
+        }
+        self.openstack_container_id = None;
+
         if let Some(container_id) = &self.localstack_container_id {
             let _ = Command::new("docker")
                 .args(["rm", "-f", container_id])

@@ -143,7 +143,32 @@ act pull_request -W .github/workflows/ci.yml -j benchmark-smoke-fast \
 # Main PR benchmark lane (fair-medium)
 act pull_request -W .github/workflows/ci.yml -j benchmark-smoke-full \
   --env GH_TOKEN="$GH_TOKEN"
+
+# Non-main PR parity lane (all-services fast)
+act pull_request -W .github/workflows/ci.yml -j parity-all-services-fast \
+  --env GH_TOKEN="$GH_TOKEN"
 ```
+
+### Deterministic runtime-image contract
+
+Benchmark/parity CI jobs now consume a run-scoped OpenStack runtime image produced once per workflow run.
+
+Consumer contract fields:
+
+- `PARITY_OPENSTACK_IMAGE`: run-scoped image tag loaded into the job runtime.
+- `PARITY_OPENSTACK_IMAGE_ID`: immutable image ID expected by consumers.
+
+Workflow behavior:
+
+- A producer job builds OpenStack runtime image once and publishes a tar artifact for downstream jobs.
+- Consumer jobs load the artifact, validate image-id provenance, and fail fast on mismatch.
+- Floating `ghcr.io/...:latest` is no longer used in benchmark/parity execution lanes.
+
+Validation evidence to capture:
+
+- Producer output showing selected run-scoped image reference.
+- Consumer preflight logs showing expected/actual image ID and inspect metadata.
+- A representative benchmark lane and parity lane reusing the same image-id in one run.
 
 For intentional failure-path validation, run the gate script against synthetic degraded reports and confirm non-zero exit plus failure diagnostics in output JSON/markdown.
 
