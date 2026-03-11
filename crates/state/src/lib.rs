@@ -7,7 +7,7 @@ pub mod scoping;
 pub use bundle::{AccountBundle, AccountRegionBundle};
 pub use hooks::{NoopHooks, StateFailureClass, StateFailureDiagnostic, StateHooks};
 pub use manager::StateManager;
-pub use persistence::{load_store, save_store, state_path, PersistableStore};
+pub use persistence::{PersistableStore, load_store, save_store, state_path};
 pub use scoping::{
     AccountId, AccountRegionKey, CrossAccountAttribute, CrossRegionAttribute, LocalAttribute,
     Region,

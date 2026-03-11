@@ -1,4 +1,4 @@
-use openstack_integration_tests::parity::{run_profile, ParityConfig};
+use openstack_integration_tests::parity::{ParityConfig, run_profile};
 
 fn parse_args() -> String {
     let mut profile = "core".to_string();

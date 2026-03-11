@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
-use axum::Json;
 use openstack_service_framework::ServiceState;
 use serde_json::json;
 

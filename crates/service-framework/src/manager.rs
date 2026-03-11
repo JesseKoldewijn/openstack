@@ -37,16 +37,17 @@ impl ServicePluginManager {
         let name = service_name.to_lowercase();
 
         // Check for provider override
-        let provider: Arc<dyn ServiceProvider> =
-            if let Some(override_name) = self.config.services.get_override(&name) {
-                warn!(
+        let provider: Arc<dyn ServiceProvider> = if let Some(override_name) =
+            self.config.services.get_override(&name)
+        {
+            warn!(
                 "Provider override for '{}' requested: '{}' (not yet implemented, using default)",
                 name, override_name
             );
-                Arc::new(provider)
-            } else {
-                Arc::new(provider)
-            };
+            Arc::new(provider)
+        } else {
+            Arc::new(provider)
+        };
 
         let container = Arc::new(ServiceContainer::new(provider));
         self.containers.insert(name, container);

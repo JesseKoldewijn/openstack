@@ -327,7 +327,9 @@ pub async fn run_profile(
         results,
     };
 
-    let profile_path = config.report_dir.join(format!("{profile_name}-latest.json"));
+    let profile_path = config
+        .report_dir
+        .join(format!("{profile_name}-latest.json"));
     let profile_json = serde_json::to_string_pretty(&report)?;
     std::fs::write(profile_path, profile_json)?;
 
@@ -466,7 +468,10 @@ async fn run_scenario(
             .send()
             .await;
         let localstack_restart = reqwest::Client::new()
-            .post(format!("{}/_localstack/health", manager.localstack.endpoint))
+            .post(format!(
+                "{}/_localstack/health",
+                manager.localstack.endpoint
+            ))
             .send()
             .await;
 
@@ -1604,7 +1609,7 @@ pub fn default_scenarios(run_id: &str) -> Vec<Scenario> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_xml, summarize_results, Mismatch, ScenarioResult};
+    use super::{Mismatch, ScenarioResult, normalize_xml, summarize_results};
     use crate::classification::{ServiceDurabilityClass, ServiceExecutionClass};
 
     #[test]
@@ -1645,7 +1650,9 @@ mod tests {
         let summary = summarize_results(&[result]);
         assert_eq!(summary.failed, 1);
         assert_eq!(
-            summary.persistence_failure_classes.get("persistence_mode_mismatch"),
+            summary
+                .persistence_failure_classes
+                .get("persistence_mode_mismatch"),
             Some(&1)
         );
     }
