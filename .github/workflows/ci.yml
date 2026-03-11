@@ -20,6 +20,7 @@ env:
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
   PARITY_DOCKER_NETWORK_MODE: bridge
+  AWS_CLI_PATH: /home/runner/.local/bin/aws
 
 permissions:
   contents: read
@@ -117,6 +118,8 @@ jobs:
           key: build-release-${{ hashFiles('**/Cargo.lock') }}
       - name: Build release binary
         run: cargo build --release --bin openstack
+      - name: Enforce release binary size budget
+        run: ./scripts/check_release_binary_size.sh target/release/openstack 55
       - name: Upload binary artifact
         if: env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -450,13 +453,35 @@ jobs:
           docker --version
           docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark fairness medium profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium
+      - name: Run benchmark fairness medium core profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
+      - name: Enforce memory budget (main core lane)
+        run: |
+          python3 - <<'PY'
+          import glob, json, os, sys
+          files = sorted(glob.glob("target/benchmark-reports/fair-medium-core-*.json"), key=os.path.getmtime)
+          if not files:
+              print("No benchmark report found for fair-medium-core")
+              sys.exit(1)
+          report = json.load(open(files[-1], encoding="utf-8"))
+          mem = report.get("memory_summary") or {}
+          rss_ratio = mem.get("rss_ratio_openstack_over_localstack")
+          if rss_ratio is None:
+              print("Memory summary missing rss ratio")
+              sys.exit(1)
+          print(f"main core lane rss ratio os/ls = {rss_ratio:.3f}")
+          if rss_ratio > 0.20:
+              print("OpenStack RSS exceeds memory budget ratio 0.20")
+              sys.exit(1)
+          PY
       - name: Enforce benchmark regression gate (main lane)
+        if: env.ACT != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/benchmark_regression_gate.py \
-            --lane fair-medium \
-            --current-glob "target/benchmark-reports/fair-medium-*.json" \
+            --lane fair-medium-core \
+            --current-glob "target/benchmark-reports/fair-medium-core-*.json" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-full-report" \
@@ -466,14 +491,14 @@ jobs:
             --p99-limit 12 \
             --throughput-limit 8 \
             --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-json "target/benchmark-reports/benchmark-gate-fair-medium-${{ github.run_id }}.json" \
+            --output-json "target/benchmark-reports/benchmark-gate-fair-medium-core-${{ github.run_id }}.json" \
             --output-markdown "benchmark_gate_full_summary.md"
       - name: Add benchmark full table to workflow summary
         if: always()
         run: |
           python3 scripts/benchmark_report_tables.py \
-            --current-glob "target/benchmark-reports/fair-medium-*.json" \
-            --title "Benchmark Fairness (Medium)" \
+            --current-glob "target/benchmark-reports/fair-medium-core-*.json" \
+            --title "Benchmark Fairness (Medium Core)" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-full-report" \
@@ -539,13 +564,35 @@ jobs:
           docker --version
           docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark fairness low profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low
+      - name: Run benchmark fairness low core profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low-core
+      - name: Enforce memory budget (non-main core lane)
+        run: |
+          python3 - <<'PY'
+          import glob, json, os, sys
+          files = sorted(glob.glob("target/benchmark-reports/fair-low-core-*.json"), key=os.path.getmtime)
+          if not files:
+              print("No benchmark report found for fair-low-core")
+              sys.exit(1)
+          report = json.load(open(files[-1], encoding="utf-8"))
+          mem = report.get("memory_summary") or {}
+          rss_ratio = mem.get("rss_ratio_openstack_over_localstack")
+          if rss_ratio is None:
+              print("Memory summary missing rss ratio")
+              sys.exit(1)
+          print(f"non-main core lane rss ratio os/ls = {rss_ratio:.3f}")
+          if rss_ratio > 0.20:
+              print("OpenStack RSS exceeds memory budget ratio 0.20")
+              sys.exit(1)
+          PY
       - name: Enforce benchmark regression gate (non-main lane)
+        if: env.ACT != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/benchmark_regression_gate.py \
-            --lane fair-low \
-            --current-glob "target/benchmark-reports/fair-low-*.json" \
+            --lane fair-low-core \
+            --current-glob "target/benchmark-reports/fair-low-core-*.json" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-fast-report" \
@@ -555,14 +602,14 @@ jobs:
             --p99-limit 12 \
             --throughput-limit 8 \
             --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-json "target/benchmark-reports/benchmark-gate-fair-low-${{ github.run_id }}.json" \
+            --output-json "target/benchmark-reports/benchmark-gate-fair-low-core-${{ github.run_id }}.json" \
             --output-markdown "benchmark_gate_fast_summary.md"
       - name: Add benchmark fast table to workflow summary
         if: always()
         run: |
           python3 scripts/benchmark_report_tables.py \
-            --current-glob "target/benchmark-reports/fair-low-*.json" \
-            --title "Benchmark Fairness (Low)" \
+            --current-glob "target/benchmark-reports/fair-low-core-*.json" \
+            --title "Benchmark Fairness (Low Core)" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-fast-report" \
@@ -682,14 +729,14 @@ jobs:
           docker --version
           docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark fairness medium profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium
+      - name: Run benchmark fairness medium core profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
       - name: Add benchmark push summary
         if: always()
         run: |
           python3 scripts/benchmark_report_tables.py \
-            --current-glob "target/benchmark-reports/fair-medium-*.json" \
-            --title "Benchmark Fairness (Push Medium)" \
+            --current-glob "target/benchmark-reports/fair-medium-core-*.json" \
+            --title "Benchmark Fairness (Push Medium Core)" \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-path "benchmark_push_summary.md"
           python3 scripts/benchmark_report_consolidated.py \
@@ -799,8 +846,8 @@ jobs:
         if: always()
         run: |
           python3 scripts/benchmark_report_tables.py \
-            --current-glob "artifacts/benchmark/fair-medium-*.json" \
-            --title "Benchmark Fairness (Medium)" \
+            --current-glob "artifacts/benchmark/fair-medium-core-*.json" \
+            --title "Benchmark Fairness (Medium Core)" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-full-report" \
@@ -810,8 +857,8 @@ jobs:
         if: always()
         run: |
           python3 scripts/benchmark_report_tables.py \
-            --current-glob "artifacts/benchmark/fair-low-*.json" \
-            --title "Benchmark Fairness (Low)" \
+            --current-glob "artifacts/benchmark/fair-low-core-*.json" \
+            --title "Benchmark Fairness (Low Core)" \
             --repo "${{ github.repository }}" \
             --workflow-file "ci.yml" \
             --artifact-name "benchmark-smoke-fast-report" \

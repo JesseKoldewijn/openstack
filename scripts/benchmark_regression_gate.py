@@ -22,7 +22,21 @@ def fetch_previous_report(
     workflow_file: str,
     artifact_name: str,
     current_run_id: str,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[Optional[str], Optional[str], Dict[str, Any]]:
+    diagnostics: Dict[str, Any] = {
+        "source": "github-actions-artifact",
+        "workflow_file": workflow_file,
+        "artifact_name": artifact_name,
+        "current_run_id": current_run_id,
+        "checked_run_ids": [],
+        "failure_reason": None,
+        "gh_token_present": bool(os.environ.get("GH_TOKEN")),
+    }
+
+    if not os.environ.get("GH_TOKEN"):
+        diagnostics["failure_reason"] = "missing_gh_token"
+        return None, None, diagnostics
+
     try:
         runs_data = run_json(
             [
@@ -32,12 +46,14 @@ def fetch_previous_report(
             ]
         )
     except Exception:
-        return None, None
+        diagnostics["failure_reason"] = "github_api_query_failed"
+        return None, None, diagnostics
 
     for run in runs_data.get("workflow_runs", []):
         run_id = str(run.get("id"))
         if not run_id or run_id == current_run_id:
             continue
+        diagnostics["checked_run_ids"].append(run_id)
 
         try:
             artifacts_data = run_json(
@@ -67,13 +83,16 @@ def fetch_previous_report(
             )
             reports = sorted(glob.glob(f"{temp_dir}/**/*.json", recursive=True), key=os.path.getmtime)
             if reports:
-                return reports[-1], run_id
+                diagnostics["failure_reason"] = None
+                diagnostics["resolved_run_id"] = run_id
+                return reports[-1], run_id, diagnostics
         except Exception:
             pass
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    return None, None
+    diagnostics["failure_reason"] = "baseline_artifact_not_found"
+    return None, None, diagnostics
 
 
 def load_report(path: str) -> Dict[str, Any]:
@@ -101,15 +120,22 @@ def evaluate_gate(
 ) -> Dict[str, Any]:
     summary = current_report.get("summary", {})
     perf_scenarios = int(summary.get("performance_scenarios", 0))
+    valid_perf_scenarios = int(summary.get("valid_performance_scenarios", perf_scenarios))
     skipped_scenarios = int(summary.get("skipped_scenarios", 0))
 
     failures: list[str] = []
     checks: list[Dict[str, Any]] = []
+    failure_category = None
 
     if perf_scenarios == 0:
         failures.append(f"lane {lane}: no performance scenarios in current report")
+        failure_category = failure_category or "data_quality_missing_performance"
+    if valid_perf_scenarios == 0:
+        failures.append(f"lane {lane}: no valid performance scenarios in current report")
+        failure_category = failure_category or "data_quality_no_valid_performance"
     if perf_scenarios > 0 and skipped_scenarios >= perf_scenarios:
         failures.append(f"lane {lane}: all performance scenarios are skipped")
+        failure_category = failure_category or "data_quality_all_skipped"
 
     current = lane_metrics(current_report)
     previous = lane_metrics(previous_report) if previous_report else None
@@ -119,6 +145,7 @@ def evaluate_gate(
             failures.append(
                 f"lane {lane}: baseline missing for required lane (seed a successful baseline run first)"
             )
+            failure_category = failure_category or "baseline_missing"
     else:
         latency_checks = [
             ("p95", p95_regression_limit_pct),
@@ -129,6 +156,7 @@ def evaluate_gate(
             p = previous.get(metric)
             if c is None or p is None:
                 failures.append(f"lane {lane}: missing metric '{metric}' in current or baseline")
+                failure_category = failure_category or "data_quality_missing_metric"
                 continue
             limit = float(p) * (1.0 + (threshold / 100.0))
             ok = float(c) <= limit
@@ -146,11 +174,13 @@ def evaluate_gate(
                 failures.append(
                     f"lane {lane}: {metric} ratio regressed (current={c:.3f}, baseline={p:.3f}, allowed<={limit:.3f})"
                 )
+                failure_category = failure_category or "threshold_breach"
 
         c = current.get("throughput")
         p = previous.get("throughput")
         if c is None or p is None:
             failures.append(f"lane {lane}: missing metric 'throughput' in current or baseline")
+            failure_category = failure_category or "data_quality_missing_metric"
         else:
             limit = float(p) * (1.0 - (throughput_regression_limit_pct / 100.0))
             ok = float(c) >= limit
@@ -168,11 +198,13 @@ def evaluate_gate(
                 failures.append(
                     f"lane {lane}: throughput ratio regressed (current={c:.3f}, baseline={p:.3f}, allowed>={limit:.3f})"
                 )
+                failure_category = failure_category or "threshold_breach"
 
     return {
         "lane": lane,
         "status": "pass" if not failures else "fail",
         "performance_scenarios": perf_scenarios,
+        "valid_performance_scenarios": valid_perf_scenarios,
         "skipped_scenarios": skipped_scenarios,
         "current": current,
         "baseline": previous,
@@ -183,6 +215,7 @@ def evaluate_gate(
             "p99_regression_limit_pct": p99_regression_limit_pct,
             "throughput_regression_limit_pct": throughput_regression_limit_pct,
         },
+        "failure_category": failure_category,
     }
 
 
@@ -222,6 +255,24 @@ def format_markdown(result: Dict[str, Any], baseline_run_id: Optional[str]) -> s
         lines.extend(["", "Failures:"])
         for failure in result["failures"]:
             lines.append(f"- {failure}")
+    if result.get("failure_category"):
+        lines.extend(["", f"Failure category: `{result['failure_category']}`"])
+
+    diagnostics = result.get("diagnostics")
+    if diagnostics:
+        lines.extend(["", "Diagnostics:"])
+        lines.append(f"- source: {diagnostics.get('source', 'n/a')}")
+        lines.append(f"- gh_token_present: {diagnostics.get('gh_token_present', False)}")
+        if diagnostics.get("failure_reason"):
+            lines.append(f"- baseline_lookup_failure: {diagnostics.get('failure_reason')}")
+        checked = diagnostics.get("checked_run_ids", [])
+        if checked:
+            lines.append(f"- checked_run_ids: {', '.join(checked)}")
+        lines.extend(
+            [
+                "- remediation: set GH_TOKEN in workflow env, verify artifact name/workflow file, and seed a successful baseline run",
+            ]
+        )
 
     return "\n".join(lines).strip() + "\n"
 
@@ -266,10 +317,16 @@ def main() -> int:
 
     previous_report = None
     baseline_run_id = None
+    diagnostics: Dict[str, Any] = {
+        "source": "local_or_explicit_previous",
+        "gh_token_present": bool(os.environ.get("GH_TOKEN")),
+        "failure_reason": None,
+        "checked_run_ids": [],
+    }
     if args.previous:
         previous_report = load_report(args.previous)
     elif args.repo and args.artifact_name and args.run_id:
-        baseline_path, baseline_run_id = fetch_previous_report(
+        baseline_path, baseline_run_id, diagnostics = fetch_previous_report(
             args.repo, args.workflow_file, args.artifact_name, args.run_id
         )
         if baseline_path:
@@ -286,6 +343,9 @@ def main() -> int:
     )
     if baseline_run_id:
         result["baseline_run_id"] = baseline_run_id
+    result["diagnostics"] = diagnostics
+    if diagnostics.get("failure_reason") == "missing_gh_token" and result["failure_category"] == "baseline_missing":
+        result["failure_category"] = "token_missing"
 
     markdown = format_markdown(result, baseline_run_id)
 
@@ -336,6 +396,26 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
         baseline = self._report(1.00, 1.00, 1.00)
         result = evaluate_gate("fair-low", current, baseline, 8.0, 12.0, 8.0, True)
         self.assertEqual(result["status"], "fail")
+
+    def test_no_valid_performance_fails(self) -> None:
+        current = self._report(1.00, 1.00, 1.00, perf=3, skipped=0)
+        current["summary"]["valid_performance_scenarios"] = 0
+        baseline = self._report(1.00, 1.00, 1.00)
+        result = evaluate_gate("fair-low", current, baseline, 8.0, 12.0, 8.0, True)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["failure_category"], "data_quality_no_valid_performance")
+
+    def test_missing_gh_token_diagnostic(self) -> None:
+        previous_token = os.environ.pop("GH_TOKEN", None)
+        try:
+            _path, _run_id, diagnostics = fetch_previous_report(
+                "owner/repo", "ci.yml", "artifact", "123"
+            )
+            self.assertEqual(diagnostics.get("failure_reason"), "missing_gh_token")
+            self.assertFalse(diagnostics.get("gh_token_present"))
+        finally:
+            if previous_token is not None:
+                os.environ["GH_TOKEN"] = previous_token
 
 
 def run_tests() -> int:

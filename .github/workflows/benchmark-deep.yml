@@ -15,6 +15,7 @@ env:
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
   PARITY_DOCKER_NETWORK_MODE: bridge
+  AWS_CLI_PATH: /home/runner/.local/bin/aws
 
 jobs:
   benchmark-deep:

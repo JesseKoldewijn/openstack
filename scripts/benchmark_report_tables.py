@@ -164,10 +164,47 @@ def build_markdown(
     summary = current_report.get("summary", {})
     lines.extend(
         [
-            f"Scenarios: total={summary.get('total_scenarios', 'n/a')}, performance={summary.get('performance_scenarios', 'n/a')}, coverage={summary.get('coverage_scenarios', 'n/a')}, skipped={summary.get('skipped_scenarios', 'n/a')}",
+            f"Scenarios: total={summary.get('total_scenarios', 'n/a')}, performance={summary.get('performance_scenarios', 'n/a')}, valid-performance={summary.get('valid_performance_scenarios', 'n/a')}, invalid-performance={summary.get('invalid_performance_scenarios', 'n/a')}, coverage={summary.get('coverage_scenarios', 'n/a')}, skipped={summary.get('skipped_scenarios', 'n/a')}",
+            f"Lane interpretable: `{summary.get('lane_interpretable', False)}`",
             "",
         ]
     )
+
+    memory = current_report.get("memory_summary")
+    if memory:
+        os_bytes = memory.get("openstack_rss_bytes")
+        ls_bytes = memory.get("localstack_rss_bytes")
+        ratio = memory.get("rss_ratio_openstack_over_localstack")
+
+        def _to_mb(v: Optional[float]) -> str:
+            if v is None:
+                return "n/a"
+            return f"{(float(v)/(1024*1024)):.2f}"
+
+        lines.extend(
+            [
+                "Memory summary (container RSS):",
+                f"- OpenStack RSS (MB): {_to_mb(os_bytes)}",
+                f"- LocalStack RSS (MB): {_to_mb(ls_bytes)}",
+                f"- RSS ratio (OS/LS): {fmt_num(ratio)}",
+                "",
+            ]
+        )
+
+    if summary.get("lane_interpretable", False) is False:
+        lines.extend(
+            [
+                "⚠️ Performance lane is non-interpretable; trend/gate conclusions should not be treated as optimization signal.",
+                "",
+            ]
+        )
+
+    invalid_reasons = summary.get("invalid_reasons", [])
+    if invalid_reasons:
+        lines.extend(["Invalid scenario exclusions:"])
+        for reason in invalid_reasons:
+            lines.append(f"- {reason}")
+        lines.append("")
 
     lines.extend(
         [

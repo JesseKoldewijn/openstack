@@ -50,6 +50,26 @@ async fn main() -> anyhow::Result<()> {
     if let Some(v) = report.summary.avg_throughput_ratio {
         println!("average throughput ratio (OS/LS): {v:.3}");
     }
+    if let Some(memory) = &report.memory_summary {
+        let os_mb = memory
+            .openstack_rss_bytes
+            .map(|b| b as f64 / (1024.0 * 1024.0))
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let ls_mb = memory
+            .localstack_rss_bytes
+            .map(|b| b as f64 / (1024.0 * 1024.0))
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let ratio = memory
+            .rss_ratio_openstack_over_localstack
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        println!(
+            "memory rss (MB): openstack={}, localstack={}, os/ls ratio={}",
+            os_mb, ls_mb, ratio
+        );
+    }
 
     println!("per-service comparison:");
     for (service, summary) in &report.summary.per_service {

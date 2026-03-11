@@ -801,6 +801,7 @@ impl ServiceProvider for SqsProvider {
     }
 
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        let op_start = std::time::Instant::now();
         let mut params = parse_params(ctx);
         apply_transport_compat(ctx, &mut params);
         let query_mode_json = ctx
@@ -1012,6 +1013,13 @@ impl ServiceProvider for SqsProvider {
                 }
             }
         };
+
+        debug!(
+            service = "sqs",
+            action = %action,
+            op_latency_us = op_start.elapsed().as_micros(),
+            "SQS operation complete"
+        );
 
         Ok(response)
     }

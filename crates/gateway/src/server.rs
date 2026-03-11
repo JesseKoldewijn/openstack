@@ -125,6 +125,7 @@ async fn handle_request(
     headers: HeaderMap,
     req: axum::extract::Request,
 ) -> Response {
+    let request_start = std::time::Instant::now();
     let request_id = Uuid::new_v4().to_string();
 
     // Extract path and query string
@@ -181,6 +182,7 @@ async fn handle_request(
     }
 
     // Build request context
+    let context_start = std::time::Instant::now();
     let ctx = match build_request_context(
         &method,
         &path,
@@ -193,6 +195,7 @@ async fn handle_request(
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
+    let context_latency_us = context_start.elapsed().as_micros();
 
     let service = ctx.service.clone();
     let operation = ctx.operation.clone();
@@ -206,6 +209,7 @@ async fn handle_request(
         operation = %operation,
         region = %region,
         account_id = %account_id,
+        context_latency_us = context_latency_us,
         "Dispatching request"
     );
 
@@ -216,6 +220,7 @@ async fn handle_request(
     let start = std::time::Instant::now();
     let result = state.plugin_manager.dispatch(&svc_ctx).await;
     let latency_ms = start.elapsed().as_millis();
+    let total_latency_ms = request_start.elapsed().as_millis();
 
     let (status, body, content_type, extra_headers) = match result {
         Ok(response) => {
@@ -225,6 +230,7 @@ async fn handle_request(
                 operation = %operation,
                 status = response.status_code,
                 latency_ms = latency_ms,
+                total_latency_ms = total_latency_ms,
                 "Request completed"
             );
             (
@@ -262,6 +268,7 @@ async fn handle_request(
                 error = %e,
                 http_status = http_status,
                 latency_ms = latency_ms,
+                total_latency_ms = total_latency_ms,
                 "Request failed"
             );
 

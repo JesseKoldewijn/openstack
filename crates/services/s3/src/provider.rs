@@ -1245,6 +1245,7 @@ impl ServiceProvider for S3Provider {
     }
 
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        let op_start = std::time::Instant::now();
         debug!(
             service = "s3",
             operation = %ctx.operation,
@@ -1398,6 +1399,13 @@ impl ServiceProvider for S3Provider {
                 return Err(DispatchError::NotImplemented(op));
             }
         };
+
+        debug!(
+            service = "s3",
+            operation = %op,
+            op_latency_us = op_start.elapsed().as_micros(),
+            "S3 operation complete"
+        );
 
         Ok(response)
     }

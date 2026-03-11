@@ -11,8 +11,8 @@ from typing import Any, Dict, Optional
 
 
 LANES = [
-    ("fair-low", "Fair Low"),
-    ("fair-medium", "Fair Medium"),
+    ("fair-low-core", "Fair Low"),
+    ("fair-medium-core", "Fair Medium"),
     ("fair-high", "Fair High"),
     ("fair-extreme", "Fair Extreme"),
 ]
@@ -78,8 +78,8 @@ def build_markdown(report_dir: str, include_gate: bool) -> str:
 
     lines.extend(
         [
-            "| Lane | Scenarios | Performance | Skipped | Avg p95 ratio | Avg p99 ratio | Avg throughput ratio |",
-            "|---|---:|---:|---:|---:|---:|---:|",
+            "| Lane | Scenarios | Valid/Perf | Skipped | Avg p95 ratio | Avg p99 ratio | Avg throughput ratio | RSS OS/LS |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
 
@@ -87,21 +87,46 @@ def build_markdown(report_dir: str, include_gate: bool) -> str:
     for lane, label in LANES:
         report = load_latest_report(report_dir, lane)
         if report is None:
-            lines.append(f"| {label} | 0 | 0 | 0 | n/a | n/a | n/a |")
+            lines.append(f"| {label} | 0 | 0 | 0 | n/a | n/a | n/a | n/a |")
             continue
         summary = report.get("summary", {})
+        memory = report.get("memory_summary", {})
         lines.append(
-            "| {label} | {total} | {perf} | {skipped} | {p95} | {p99} | {tp} |".format(
+            "| {label} | {total} | {perf} | {skipped} | {p95} | {p99} | {tp} | {rss} |".format(
                 label=label,
                 total=summary.get("total_scenarios", 0),
-                perf=summary.get("performance_scenarios", 0),
+                perf="{}/{}".format(
+                    summary.get("valid_performance_scenarios", 0),
+                    summary.get("performance_scenarios", 0),
+                ),
                 skipped=summary.get("skipped_scenarios", 0),
                 p95=fmt(summary.get("avg_latency_p95_ratio")),
                 p99=fmt(summary.get("avg_latency_p99_ratio")),
                 tp=fmt(summary.get("avg_throughput_ratio")),
+                rss=fmt(memory.get("rss_ratio_openstack_over_localstack")),
             )
         )
         lane_reports.append((label, report))
+
+    lines.extend(["", "Lane quality diagnostics:", ""])
+    lines.extend([
+        "| Lane | Interpretable | Valid perf | Invalid perf |",
+        "|---|---|---:|---:|",
+    ])
+    for lane, label in LANES:
+        report = load_latest_report(report_dir, lane)
+        if report is None:
+            lines.append(f"| {label} | n/a | 0 | 0 |")
+            continue
+        summary = report.get("summary", {})
+        lines.append(
+            "| {label} | {interp} | {valid} | {invalid} |".format(
+                label=label,
+                interp=summary.get("lane_interpretable", False),
+                valid=summary.get("valid_performance_scenarios", 0),
+                invalid=summary.get("invalid_performance_scenarios", 0),
+            )
+        )
 
     for label, report in lane_reports:
         per_service = report.get("summary", {}).get("per_service", {})
@@ -162,6 +187,7 @@ class ConsolidatedReportTests(unittest.TestCase):
                 "summary": {
                     "total_scenarios": 2,
                     "performance_scenarios": 2,
+                    "valid_performance_scenarios": 2,
                     "skipped_scenarios": 0,
                     "avg_latency_p95_ratio": 1.0,
                     "avg_latency_p99_ratio": 1.1,
@@ -176,6 +202,7 @@ class ConsolidatedReportTests(unittest.TestCase):
                         }
                     },
                 }
+                ,"memory_summary": {"rss_ratio_openstack_over_localstack": 1.2}
             }
             gate = {
                 "status": "pass",
@@ -185,8 +212,8 @@ class ConsolidatedReportTests(unittest.TestCase):
                     "throughput_regression_limit_pct": 8.0,
                 },
             }
-            Path(temp_dir, "fair-low-123.json").write_text(json.dumps(report), encoding="utf-8")
-            Path(temp_dir, "benchmark-gate-fair-low-123.json").write_text(
+            Path(temp_dir, "fair-low-core-123.json").write_text(json.dumps(report), encoding="utf-8")
+            Path(temp_dir, "benchmark-gate-fair-low-core-123.json").write_text(
                 json.dumps(gate), encoding="utf-8"
             )
 
