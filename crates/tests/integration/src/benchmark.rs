@@ -250,7 +250,7 @@ impl Default for BenchmarkConfig {
             docker_startup_timeout_secs: std::env::var("PARITY_DOCKER_STARTUP_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(60),
+                .unwrap_or(120),
             heavy_object_enabled: std::env::var("BENCHMARK_HEAVY_OBJECTS")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
@@ -515,7 +515,6 @@ impl BenchmarkTargetManager {
                     .args([
                         "run",
                         "-d",
-                        "--rm",
                         "-p",
                         &format!("127.0.0.1:{port}:4566"),
                         "-e",
@@ -531,9 +530,12 @@ impl BenchmarkTargetManager {
                         String::from_utf8_lossy(&output.stderr)
                     ));
                 }
+                let container_id = container_id_from_output(&output);
                 wait_for_health(
                     &endpoint,
                     Duration::from_secs(config.docker_startup_timeout_secs),
+                    "localstack",
+                    Some(&container_id),
                 )
                 .await?;
                 (
@@ -545,7 +547,7 @@ impl BenchmarkTargetManager {
                         memory_limit: None,
                         network_mode: None,
                     },
-                    Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+                    Some(container_id),
                 )
             };
 
@@ -583,7 +585,6 @@ impl BenchmarkTargetManager {
         let mut openstack_args = vec![
             "run".to_string(),
             "-d".to_string(),
-            "--rm".to_string(),
             "--network".to_string(),
             config.docker_network_mode.clone(),
             "-p".to_string(),
@@ -617,7 +618,6 @@ impl BenchmarkTargetManager {
         let mut localstack_args = vec![
             "run".to_string(),
             "-d".to_string(),
-            "--rm".to_string(),
             "--network".to_string(),
             config.docker_network_mode.clone(),
             "-p".to_string(),
@@ -903,7 +903,9 @@ pub async fn run_profile(
         output_override.unwrap_or_else(|| config.report_dir.join(format!("{run_id}.json")));
     let report_json = serde_json::to_string_pretty(&report)?;
     std::fs::write(&output_path, report_json)?;
-    let profile_latest_path = config.report_dir.join(format!("{}-latest.json", profile_name));
+    let profile_latest_path = config
+        .report_dir
+        .join(format!("{}-latest.json", profile_name));
     let profile_latest_json = serde_json::to_string_pretty(&report)?;
     std::fs::write(profile_latest_path, profile_latest_json)?;
 
@@ -975,16 +977,36 @@ async fn execute_in_order(
     };
 
     if openstack_first {
-        let openstack_metrics =
-            execute_scenario(&manager.openstack.endpoint, scenario, scenario_run, lane_mode).await;
-        let localstack_metrics =
-            execute_scenario(&manager.localstack.endpoint, scenario, scenario_run, lane_mode).await;
+        let openstack_metrics = execute_scenario(
+            &manager.openstack.endpoint,
+            scenario,
+            scenario_run,
+            lane_mode,
+        )
+        .await;
+        let localstack_metrics = execute_scenario(
+            &manager.localstack.endpoint,
+            scenario,
+            scenario_run,
+            lane_mode,
+        )
+        .await;
         (openstack_metrics, localstack_metrics)
     } else {
-        let localstack_metrics =
-            execute_scenario(&manager.localstack.endpoint, scenario, scenario_run, lane_mode).await;
-        let openstack_metrics =
-            execute_scenario(&manager.openstack.endpoint, scenario, scenario_run, lane_mode).await;
+        let localstack_metrics = execute_scenario(
+            &manager.localstack.endpoint,
+            scenario,
+            scenario_run,
+            lane_mode,
+        )
+        .await;
+        let openstack_metrics = execute_scenario(
+            &manager.openstack.endpoint,
+            scenario,
+            scenario_run,
+            lane_mode,
+        )
+        .await;
         (openstack_metrics, localstack_metrics)
     }
 }
@@ -1129,8 +1151,20 @@ async fn preflight_symmetric_runtime(
     localstack_endpoint: &str,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    wait_for_health(openstack_endpoint, timeout).await?;
-    wait_for_health(localstack_endpoint, timeout).await?;
+    wait_for_health(
+        openstack_endpoint,
+        timeout,
+        "openstack",
+        Some(openstack_container_id),
+    )
+    .await?;
+    wait_for_health(
+        localstack_endpoint,
+        timeout,
+        "localstack",
+        Some(localstack_container_id),
+    )
+    .await?;
 
     let inspect = |id: &str| -> anyhow::Result<(Option<String>, Option<String>, Option<String>)> {
         let output = Command::new("docker")
@@ -1185,25 +1219,127 @@ async fn preflight_symmetric_runtime(
     Ok(())
 }
 
-async fn wait_for_health(endpoint: &str, timeout: Duration) -> anyhow::Result<()> {
+async fn wait_for_health(
+    endpoint: &str,
+    timeout: Duration,
+    target: &str,
+    container_id: Option<&str>,
+) -> anyhow::Result<()> {
     let health = format!("{endpoint}/_localstack/health");
     let deadline = Instant::now() + timeout;
+    let mut attempts = 0usize;
+    let mut last_error = String::new();
 
     loop {
+        attempts += 1;
         if Instant::now() > deadline {
+            let debug_context = container_id
+                .map(container_debug_context)
+                .unwrap_or_else(|| "container diagnostics unavailable".to_string());
             return Err(anyhow::anyhow!(
-                "timed out waiting for benchmark target health at {health}"
+                "timed out waiting for benchmark target health at {health} (target={target}, attempts={attempts}, last_error={last_error})\n{debug_context}"
             ));
         }
 
-        if let Ok(resp) = reqwest::get(&health).await
-            && resp.status().is_success()
-        {
-            return Ok(());
+        match reqwest::get(&health).await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(());
+                }
+
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<failed-to-read-body>".to_string());
+                let truncated = truncate_debug(&body, 400);
+                last_error = format!("http_status={status}; body={truncated}");
+            }
+            Err(err) => {
+                last_error = err.to_string();
+            }
         }
 
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+fn container_id_from_output(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn container_debug_context(container_id: &str) -> String {
+    let inspect = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}} started={{.State.StartedAt}}",
+            container_id,
+        ])
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "inspect unavailable".to_string());
+
+    let logs = Command::new("docker")
+        .args(["logs", "--tail", "120", container_id])
+        .output()
+        .ok()
+        .map(|out| {
+            let mut combined = String::new();
+            if !out.stdout.is_empty() {
+                combined.push_str(&String::from_utf8_lossy(&out.stdout));
+            }
+            if !out.stderr.is_empty() {
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            }
+            let trimmed = combined.trim();
+            if trimmed.is_empty() {
+                "<empty>".to_string()
+            } else {
+                truncate_debug(trimmed, 2000)
+            }
+        })
+        .unwrap_or_else(|| "logs unavailable".to_string());
+
+    let state_json = Command::new("docker")
+        .args(["inspect", "--format", "{{json .State}}", container_id])
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .map(|json| truncate_debug(&json, 2000))
+        .unwrap_or_else(|| "state unavailable".to_string());
+
+    format!(
+        "container_id={container_id}; inspect=[{inspect}]; state={state_json}; recent_logs=[{logs}]"
+    )
+}
+
+fn truncate_debug(input: &str, max_len: usize) -> String {
+    if input.len() <= max_len {
+        return input.to_string();
+    }
+
+    let mut end = max_len;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...<truncated>", &input[..end])
 }
 
 fn free_port() -> anyhow::Result<u16> {
@@ -2340,11 +2476,11 @@ mod tests {
         parse_docker_mem_value_to_bytes, parse_heavy_s3_size_bytes, percentile,
         performance_invalid_reason, summarize_results,
     };
-    use crate::classification::{PersistenceMode, ServiceExecutionClass};
     use crate::benchmark::{
         BenchmarkComparison, BenchmarkConfig, BenchmarkRunConfig, BenchmarkScenarioResult,
         BenchmarkSummary, BenchmarkTargetMetadata, BenchmarkTargetResult,
     };
+    use crate::classification::{PersistenceMode, ServiceExecutionClass};
 
     #[test]
     fn computes_percentiles() {
@@ -2818,9 +2954,11 @@ mod tests {
 
     #[test]
     fn invalid_on_mode_mismatch() {
-        let mut cfg = BenchmarkConfig::default();
-        cfg.openstack_persistence_mode = PersistenceMode::Durable;
-        cfg.localstack_persistence_mode = PersistenceMode::NonDurable;
+        let cfg = BenchmarkConfig {
+            openstack_persistence_mode: PersistenceMode::Durable,
+            localstack_persistence_mode: PersistenceMode::NonDurable,
+            ..BenchmarkConfig::default()
+        };
 
         let reason = performance_invalid_reason(
             BenchmarkScenarioClass::Performance,
