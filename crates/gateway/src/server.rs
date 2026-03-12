@@ -299,6 +299,7 @@ impl futures_core::Stream for BodyStreamAdapter {
 pub struct Gateway {
     config: Config,
     plugin_manager: ServicePluginManager,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 /// Shared application state passed to all axum handlers.
@@ -312,20 +313,21 @@ struct AppState {
 
 impl Gateway {
     pub fn new(config: Config, plugin_manager: ServicePluginManager) -> Self {
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             config,
             plugin_manager,
+            shutdown_tx,
         }
     }
 
     /// Build the axum Router for this gateway (useful for testing).
     fn build_app(&self) -> Router {
         let cors = Arc::new(CorsHandler::new(&self.config));
-        let shutdown_tx = tokio::sync::broadcast::channel::<()>(1).0;
         let internal_state = openstack_internal_api::ApiState::new(
             self.config.clone(),
             self.plugin_manager.clone(),
-            shutdown_tx,
+            self.shutdown_tx.clone(),
         );
         let internal_api_router = openstack_internal_api::internal_api_router(internal_state);
         let app_state = AppState {
@@ -357,10 +359,15 @@ impl Gateway {
             self.plugin_manager.start_all().await;
         }
         let app = self.build_app();
+        let mut api_shutdown = self.shutdown_tx.subscribe();
         tokio::select! {
             result = axum::serve(listener, app) => { result?; }
             _ = &mut shutdown => {
                 info!("Shutdown signal received");
+                self.plugin_manager.stop_all().await;
+            }
+            _ = api_shutdown.recv() => {
+                info!("Shutdown requested via internal API");
                 self.plugin_manager.stop_all().await;
             }
         }
@@ -377,6 +384,7 @@ impl Gateway {
         }
 
         let app = self.build_app();
+        let mut api_shutdown = self.shutdown_tx.subscribe();
 
         // Bind to all configured addresses
         let addrs = config.gateway_listen.clone();
@@ -393,8 +401,14 @@ impl Gateway {
         }
 
         // Wait for shutdown signal
-        tokio::signal::ctrl_c().await?;
-        info!("Shutdown signal received");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Shutdown signal received");
+            }
+            _ = api_shutdown.recv() => {
+                info!("Shutdown requested via internal API");
+            }
+        }
 
         // Save state on shutdown
         state_manager.save_on_shutdown().await?;

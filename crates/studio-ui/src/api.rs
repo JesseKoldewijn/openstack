@@ -52,6 +52,15 @@ pub async fn resolve_studio_url(
     daemon_health_url: Option<&str>,
     fallback_base_url: &str,
 ) -> StudioUrlResolution {
+    resolve_studio_url_with_timeout(explicit_url, daemon_health_url, fallback_base_url, 600).await
+}
+
+pub async fn resolve_studio_url_with_timeout(
+    explicit_url: Option<&str>,
+    daemon_health_url: Option<&str>,
+    fallback_base_url: &str,
+    timeout_ms: u64,
+) -> StudioUrlResolution {
     let (base_url, source) = if let Some(url) = explicit_url {
         (url.to_string(), "explicit")
     } else if let Some(url) = daemon_health_url {
@@ -62,7 +71,7 @@ pub async fn resolve_studio_url(
 
     let health_url = format!("{}/_localstack/health", base_url.trim_end_matches('/'));
     let daemon_ready = if let Ok(client) = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(600))
+        .timeout(std::time::Duration::from_millis(timeout_ms))
         .build()
     {
         client

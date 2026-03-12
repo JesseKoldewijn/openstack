@@ -105,6 +105,7 @@ pub struct BindingContext {
 }
 
 pub fn run_guided_flow(
+    service: &str,
     flow: &GuidedFlow,
     protocol: crate::guided_manifest::ProtocolClass,
     executor: &mut dyn GuidedExecutor,
@@ -113,6 +114,7 @@ pub fn run_guided_flow(
     retry_policy: RetryPolicy,
 ) -> GuidedExecutionReport {
     run_guided_flow_internal(
+        service,
         flow,
         protocol,
         executor,
@@ -124,6 +126,7 @@ pub fn run_guided_flow(
 }
 
 fn run_guided_flow_internal(
+    service: &str,
     flow: &GuidedFlow,
     protocol: crate::guided_manifest::ProtocolClass,
     executor: &mut dyn GuidedExecutor,
@@ -161,10 +164,10 @@ fn run_guided_flow_internal(
             let attempt_start = std::time::Instant::now();
             let response = match executor.execute(&resolved_operation) {
                 Ok(response) => response,
-                Err(_) => {
+                Err(err) => {
                     final_error = Some(AdapterError {
                         code: "execution_error".to_string(),
-                        message: "executor failed before response".to_string(),
+                        message: err.to_string(),
                         retryable: false,
                     });
                     break;
@@ -212,10 +215,10 @@ fn run_guided_flow_internal(
                         final_error = Some(assertion_error);
                     }
                 }
-                Err(_) => {
+                Err(err) => {
                     final_error = Some(AdapterError {
                         code: "adapter_error".to_string(),
-                        message: "protocol adapter failed".to_string(),
+                        message: err.to_string(),
                         retryable: false,
                     });
                 }
@@ -228,7 +231,7 @@ fn run_guided_flow_internal(
             history.push(InteractionEntry {
                 id: history.next_id(),
                 timestamp_unix_ms: 0,
-                service: "guided".to_string(),
+                service: service.to_string(),
                 status: response.status,
                 request: crate::api::RawRequest {
                     method: resolved_operation.method.clone(),
@@ -273,6 +276,7 @@ fn run_guided_flow_internal(
 }
 
 pub fn run_guided_flow_with_policy(
+    service: &str,
     flow: &GuidedFlow,
     protocol: crate::guided_manifest::ProtocolClass,
     executor: &mut dyn GuidedExecutor,
@@ -281,6 +285,7 @@ pub fn run_guided_flow_with_policy(
     policy: ExecutionPolicy,
 ) -> GuidedExecutionReport {
     run_guided_flow_internal(
+        service,
         flow,
         protocol,
         executor,
@@ -636,6 +641,7 @@ mod tests {
         ctx.inputs.insert("id".to_string(), "r-1".to_string());
 
         let report = run_guided_flow(
+            "svc",
             &simple_flow(),
             crate::guided_manifest::ProtocolClass::Query,
             &mut executor,
@@ -674,6 +680,7 @@ mod tests {
         ctx.inputs.insert("id".to_string(), "r-1".to_string());
 
         let report = run_guided_flow(
+            "svc",
             &simple_flow(),
             crate::guided_manifest::ProtocolClass::RestJson,
             &mut executor,

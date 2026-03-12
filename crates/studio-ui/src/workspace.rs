@@ -30,6 +30,7 @@ pub enum WorkspaceError {
     ServiceMismatch,
     FlowNotFound,
     MissingGuidedInputs(Vec<String>),
+    RawExecutionFailed(String),
 }
 
 impl ServiceWorkspaceState {
@@ -48,9 +49,10 @@ impl ServiceWorkspaceState {
     }
 
     pub fn select_flow(&mut self, manifest: &GuidedManifest, flow_id: Option<&str>) {
-        let target_flow = flow_id
-            .and_then(|id| manifest.flows.iter().find(|flow| flow.id == id))
-            .or_else(|| manifest.flows.first());
+        let target_flow = match flow_id {
+            Some(id) => manifest.flows.iter().find(|flow| flow.id == id),
+            None => manifest.flows.first(),
+        };
 
         self.selected_flow_id = target_flow.map(|flow| flow.id.clone());
         self.guided_required_fields = target_flow.map_or_else(Vec::new, required_inputs);
@@ -74,9 +76,14 @@ impl ServiceWorkspaceState {
         let flow = self
             .selected_flow_id
             .as_deref()
-            .and_then(|id| manifest.flows.iter().find(|item| item.id == id))
-            .or_else(|| manifest.flows.first())
-            .ok_or(WorkspaceError::FlowNotFound)?;
+            .map(|id| {
+                manifest
+                    .flows
+                    .iter()
+                    .find(|item| item.id == id)
+                    .ok_or(WorkspaceError::FlowNotFound)
+            })
+            .unwrap_or_else(|| manifest.flows.first().ok_or(WorkspaceError::FlowNotFound))?;
 
         let required = required_inputs(flow);
         if let Err(missing) = validate_guided_inputs(&required, &self.guided_inputs) {
@@ -93,6 +100,7 @@ impl ServiceWorkspaceState {
         };
 
         let report = run_guided_flow(
+            &self.service,
             flow,
             manifest.protocol.clone(),
             executor,
@@ -133,10 +141,10 @@ impl ServiceWorkspaceState {
         mut execute: F,
     ) -> Result<RawResponse, WorkspaceError>
     where
-        F: FnMut(&RawRequest) -> RawResponse,
+        F: FnMut(&RawRequest) -> Result<RawResponse, WorkspaceError>,
     {
         let request = self.raw_console.to_request();
-        let response = execute(&request);
+        let response = execute(&request)?;
 
         let next_id = history.next_id();
         history.push(crate::history::InteractionEntry {
@@ -368,10 +376,12 @@ mod tests {
 
         let mut history = InteractionHistory::new(10);
         let response = state
-            .execute_raw(&mut history, |_| RawResponse {
-                status: 200,
-                headers: HashMap::new(),
-                body: "ok".to_string(),
+            .execute_raw(&mut history, |_| {
+                Ok(RawResponse {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: "ok".to_string(),
+                })
             })
             .expect("raw execution should succeed");
 

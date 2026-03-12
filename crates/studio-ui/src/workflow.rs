@@ -56,7 +56,7 @@ impl GuidedWorkflow {
             ("QueueName", queue_name.to_string()),
             ("Version", "2012-11-05".to_string()),
         ])
-        .unwrap_or_default();
+        .expect("failed to serialize CreateQueue request body");
         let queue_url = format!("https://sqs.us-east-1.amazonaws.com/000000000000/{queue_name}");
         let send_message_body = serde_urlencoded::to_string([
             ("Action", "SendMessage".to_string()),
@@ -64,7 +64,7 @@ impl GuidedWorkflow {
             ("MessageBody", message.to_string()),
             ("Version", "2012-11-05".to_string()),
         ])
-        .unwrap_or_default();
+        .expect("failed to serialize SendMessage request body");
 
         let create_queue = WorkflowStep {
             title: "Create queue".to_string(),

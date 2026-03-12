@@ -422,7 +422,7 @@ pub(crate) fn validate_interpolation_expression(expr: &str) -> Result<(), String
 
     if expr.starts_with("inputs.") || expr.starts_with("context.") || expr.starts_with("captures.")
     {
-        if expr.split('.').all(is_valid_identifier_segment) {
+        if expr.split('.').skip(1).all(is_valid_identifier_segment) {
             return Ok(());
         }
         return Err(format!("invalid identifier path in expression '{expr}'"));
