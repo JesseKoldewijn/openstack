@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use axum::Router;
 use axum::body::Body;
@@ -8,12 +11,14 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::response::Response;
 use bytes::Bytes;
+use http_body_util::BodyStream;
 use openstack_aws_protocol::{
     AwsProtocol, ec2::parse_ec2_request, json::parse_json_request, query::parse_query_request,
     rest_json::parse_rest_json_request, rest_xml::parse_rest_xml_request,
 };
 use openstack_config::Config;
-use openstack_service_framework::ServicePluginManager;
+use openstack_service_framework::{ServicePluginManager, SpooledBody};
+use openstack_service_framework::traits::ResponseBody;
 use openstack_state::StateManager;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -23,6 +28,47 @@ use crate::cors::CorsHandler;
 use crate::sigv4::{
     DEFAULT_ACCESS_KEY, DEFAULT_REGION, access_key_to_account_id, is_valid_region, parse_sigv4_auth,
 };
+
+/// Adapter that converts `http_body_util::BodyStream<axum::body::Body>` into
+/// a `futures_core::Stream<Item = Result<Bytes, io::Error>>` suitable for
+/// `SpooledBody::write_from_stream()`.
+struct BodyStreamAdapter {
+    inner: BodyStream<Body>,
+}
+
+impl BodyStreamAdapter {
+    fn new(body: Body) -> Self {
+        Self {
+            inner: BodyStream::new(body),
+        }
+    }
+}
+
+impl futures_core::Stream for BodyStreamAdapter {
+    type Item = Result<Bytes, io::Error>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        loop {
+            match Pin::new(&mut self.inner).poll_next(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Ok(data) = frame.into_data() {
+                        return Poll::Ready(Some(Ok(data)));
+                    }
+                    // Skip non-data frames (trailers, etc.)
+                    continue;
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::Other, e))));
+                }
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
 
 /// The main HTTP gateway for openstack.
 pub struct Gateway {
@@ -148,11 +194,20 @@ async fn handle_request(
         }
     }
 
-    // Read the request body
-    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+    // Stream the request body into a SpooledBody
+    let threshold = state.config.body_spool_threshold_bytes;
+    let mut spooled = SpooledBody::new(threshold);
+    let stream = BodyStreamAdapter::new(req.into_body());
+    if let Err(e) = spooled.write_from_stream(stream).await {
+        error!("Failed to read request body: {}", e);
+        return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+    }
+
+    // Materialize raw_body as Bytes for protocol parsing
+    let body_bytes = match spooled.to_bytes() {
         Ok(b) => b,
         Err(e) => {
-            error!("Failed to read request body: {}", e);
+            error!("Failed to materialize request body: {}", e);
             return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
         }
     };
@@ -192,6 +247,7 @@ async fn handle_request(
         &body_bytes,
         &request_id,
         &state.config,
+        spooled,
     ) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
@@ -214,7 +270,7 @@ async fn handle_request(
         "Dispatching request"
     );
 
-    // Convert to service framework context
+    // Convert to service framework context (consumes ctx — SpooledBody is not Clone)
     let svc_ctx = ctx.to_service_request_context();
 
     // Dispatch to the service provider
@@ -223,7 +279,7 @@ async fn handle_request(
     let latency_ms = start.elapsed().as_millis();
     let total_latency_ms = request_start.elapsed().as_millis();
 
-    let (status, body, content_type, extra_headers) = match result {
+    let (status, resp_body, content_type, extra_headers) = match result {
         Ok(response) => {
             info!(
                 request_id = %request_id,
@@ -282,20 +338,37 @@ async fn handle_request(
             );
             (
                 StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                body,
+                ResponseBody::Buffered(body),
                 ct.to_string(),
                 Vec::new(),
             )
         }
     };
 
-    // Build the response
-    let mut response = Response::builder()
-        .status(status)
-        .header("content-type", &content_type)
-        .header("x-amzn-requestid", &request_id)
-        .body(Body::from(body))
-        .unwrap_or_default();
+    // Build the response based on body variant
+    let mut response = match resp_body {
+        ResponseBody::Buffered(bytes) => Response::builder()
+            .status(status)
+            .header("content-type", &content_type)
+            .header("x-amzn-requestid", &request_id)
+            .body(Body::from(bytes))
+            .unwrap_or_default(),
+        ResponseBody::Streaming {
+            stream,
+            content_length,
+        } => {
+            let mut builder = Response::builder()
+                .status(status)
+                .header("content-type", &content_type)
+                .header("x-amzn-requestid", &request_id);
+            if let Some(len) = content_length {
+                builder = builder.header("content-length", len.to_string());
+            }
+            builder
+                .body(Body::from_stream(stream))
+                .unwrap_or_default()
+        }
+    };
 
     // Add extra headers from the provider
     for (key, value) in extra_headers {
@@ -325,6 +398,7 @@ fn build_request_context(
     body: &Bytes,
     request_id: &str,
     config: &Config,
+    spooled_body: SpooledBody,
 ) -> Result<RequestContext, Response> {
     // Parse SigV4 Authorization or inject default
     let (access_key, region, service_from_auth) = if let Some(auth) = headers.get("authorization") {
@@ -393,6 +467,7 @@ fn build_request_context(
         method: method.to_string(),
         query_params: query_params.clone(),
         request_id: request_id.to_string(),
+        spooled_body: Some(spooled_body),
     })
 }
 

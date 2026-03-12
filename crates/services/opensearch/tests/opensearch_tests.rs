@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_opensearch::OpenSearchProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn make_ctx(operation: &str, body: Value, path: &str, method: &str) -> RequestContext {
     RequestContext {
@@ -17,11 +17,12 @@ fn make_ctx(operation: &str, body: Value, path: &str, method: &str) -> RequestCo
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
 fn body_json(resp: &openstack_service_framework::traits::DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("valid JSON")
 }
 
 // ---------------------------------------------------------------------------
@@ -81,12 +82,10 @@ async fn test_create_domain_duplicate_fails() {
         .unwrap();
     assert_eq!(resp.status_code, 409);
     let b = body_json(&resp);
-    assert!(
-        b["code"]
-            .as_str()
-            .unwrap()
-            .contains("ResourceAlreadyExistsException")
-    );
+    assert!(b["code"]
+        .as_str()
+        .unwrap()
+        .contains("ResourceAlreadyExistsException"));
 }
 
 #[tokio::test]
@@ -130,12 +129,10 @@ async fn test_describe_domain_not_found() {
         .unwrap();
     assert_eq!(resp.status_code, 409);
     let b = body_json(&resp);
-    assert!(
-        b["code"]
-            .as_str()
-            .unwrap()
-            .contains("ResourceNotFoundException")
-    );
+    assert!(b["code"]
+        .as_str()
+        .unwrap()
+        .contains("ResourceNotFoundException"));
 }
 
 #[tokio::test]

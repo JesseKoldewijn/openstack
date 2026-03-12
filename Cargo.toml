@@ -67,6 +67,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dashmap = { version = "6", features = ["serde"] }
 tokio-util = { version = "0.7", features = ["full"] }
 
+# Streaming / body handling
+http-body = "1"
+http-body-util = "0.1"
+futures-core = "0.3"
+pin-project-lite = "0.2"
+tempfile = "3"
+
 # Docker (for Lambda execution)
 bollard = "0.20"
 

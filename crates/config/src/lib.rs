@@ -59,6 +59,10 @@ pub struct Config {
 
     /// Directory paths
     pub directories: Directories,
+
+    /// Body spool threshold in bytes (BODY_SPOOL_THRESHOLD_BYTES, default 1 MiB).
+    /// Request bodies larger than this are spooled to disk instead of kept in memory.
+    pub body_spool_threshold_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +175,11 @@ impl Config {
 
         let directories = Directories::from_env();
 
+        let body_spool_threshold_bytes: usize = std::env::var("BODY_SPOOL_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_048_576); // 1 MiB default
+
         Ok(Config {
             gateway_listen,
             persistence,
@@ -192,6 +201,7 @@ impl Config {
             eager_service_loading,
             enable_config_updates,
             directories,
+            body_spool_threshold_bytes,
         })
     }
 
@@ -309,8 +319,8 @@ mod tests {
     #[test]
     fn test_env_bool() {
         assert!(!env_bool("__OPENSTACK_TEST_BOOL_TRUE", false)); // unset → default
-        // Can't easily set env vars in unit tests without std::env::set_var (unsafe in Rust 1.80+)
-        // Integration tested via Config::from_env
+                                                                 // Can't easily set env vars in unit tests without std::env::set_var (unsafe in Rust 1.80+)
+                                                                 // Integration tested via Config::from_env
     }
 
     #[test]
@@ -374,6 +384,7 @@ mod tests {
             eager_service_loading: false,
             enable_config_updates: false,
             directories: crate::directories::Directories::from_env(),
+            body_spool_threshold_bytes: 1_048_576,
         };
         assert_eq!(config.base_url(), "http://localhost.localstack.cloud:4566");
         assert_eq!(
@@ -410,6 +421,7 @@ mod tests {
             eager_service_loading: false,
             enable_config_updates: false,
             directories: crate::directories::Directories::from_env(),
+            body_spool_threshold_bytes: 1_048_576,
         };
         assert!(!base.dns_enabled());
         let with_dns = Config {

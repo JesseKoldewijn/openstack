@@ -164,6 +164,7 @@ def evaluate_gate(
     localstack_error_count = int(summary.get("localstack_error_count", 0))
     invalid_reasons = [str(reason) for reason in summary.get("invalid_reasons", []) if reason]
     per_service = summary.get("per_service", {})
+    missing_required_role_count = int(summary.get("missing_required_role_count", 0))
 
     failures: list[str] = []
     checks: list[Dict[str, Any]] = []
@@ -199,14 +200,23 @@ def evaluate_gate(
         service_class = service_summary.get("service_execution_class")
         service_durability = service_summary.get("service_durability_class")
         breaches = service_summary.get("class_envelope_breaches", [])
+        missing_roles = service_summary.get("missing_roles", []) or []
+        role_exclusions = service_summary.get("role_exclusions", {}) or {}
         service_diagnostics.append(
             {
                 "service": service,
                 "service_execution_class": service_class,
                 "service_durability_class": service_durability,
                 "class_envelope_breaches": breaches,
+                "missing_roles": missing_roles,
+                "role_exclusions": role_exclusions,
             }
         )
+        if missing_roles:
+            failures.append(
+                f"lane {lane}: service '{service}' missing required roles ({', '.join(missing_roles)})"
+            )
+            failure_category = failure_category or "data_quality_missing_required_roles"
         if not service_class:
             service_class_failures.append(f"lane {lane}: service '{service}' missing service class")
             missing_class_failures += 1
@@ -324,6 +334,7 @@ def evaluate_gate(
         "localstack_error_count": localstack_error_count,
         "invalid_reasons": invalid_reasons,
         "service_class_failures": service_class_failures,
+        "missing_required_role_count": missing_required_role_count,
         "service_diagnostics": service_diagnostics,
         "runtime_mode_equivalent": runtime_mode_equivalent,
         "execution_driver": execution_driver,
@@ -386,11 +397,12 @@ def format_markdown(result: Dict[str, Any], baseline_run_id: Optional[str]) -> s
         lines.extend(["", "Service diagnostics:"])
         for entry in sorted(service_diagnostics, key=lambda e: e.get("service", "")):
             lines.append(
-                "- {service}: class={clazz}, durability={durability}, envelope_breaches={breaches}".format(
+                "- {service}: class={clazz}, durability={durability}, envelope_breaches={breaches}, missing_roles={missing_roles}".format(
                     service=entry.get("service", "unknown"),
                     clazz=entry.get("service_execution_class", "n/a"),
                     durability=entry.get("service_durability_class", "n/a"),
                     breaches=len(entry.get("class_envelope_breaches", []) or []),
+                    missing_roles=",".join(entry.get("missing_roles", []) or []),
                 )
             )
     skipped_checks = result.get("skipped_checks", [])
@@ -415,6 +427,7 @@ def format_markdown(result: Dict[str, Any], baseline_run_id: Optional[str]) -> s
         "persistence_quality_failure": "fix persistence lifecycle behavior (save/load/recovery) for failing scenarios and re-run parity + benchmark lanes",
         "missing_service_class": "define service class for unclassified service in benchmark classification map",
         "baseline_missing": "seed a successful baseline run for this lane",
+        "data_quality_missing_required_roles": "add valid write/read realistic scenarios (or explicit role exclusions) for all required services",
     }
     category = result.get("failure_category")
     if category in remediation:
@@ -565,6 +578,8 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
                 "openstack_error_count": 0,
                 "localstack_error_count": 0,
                 "invalid_reasons": [],
+                "missing_required_role_count": 0,
+                "per_service": {},
                 "avg_latency_p95_ratio": p95,
                 "avg_latency_p99_ratio": p99,
                 "avg_throughput_ratio": throughput,
@@ -744,6 +759,25 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
         self.assertEqual(metrics["p99"], None)
         self.assertEqual(metrics["throughput"], None)
 
+    def test_missing_required_roles_fails_gate(self) -> None:
+        current = self._report(1.00, 1.00, 1.00)
+        current["summary"]["missing_required_role_count"] = 2
+        current["summary"]["per_service"] = {
+            "s3": {
+                "service_execution_class": "in-proc-stateful",
+                "service_durability_class": "durable",
+                "class_envelope_breaches": [],
+                "missing_roles": ["write"],
+                "role_exclusions": {},
+            }
+        }
+        baseline = self._report(1.00, 1.00, 1.00)
+
+        result = evaluate_gate("fair-low-core", current, baseline, 8.0, 12.0, 8.0, True)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["failure_category"], "data_quality_missing_required_roles")
+
 
 def run_tests() -> int:
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(BenchmarkRegressionGateTests)
@@ -753,3 +787,8 @@ def run_tests() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+    if missing_required_role_count > 0:
+        failures.append(
+            f"lane {lane}: missing required service write/read role coverage ({missing_required_role_count} gaps)"
+        )
+        failure_category = failure_category or "data_quality_missing_required_roles"

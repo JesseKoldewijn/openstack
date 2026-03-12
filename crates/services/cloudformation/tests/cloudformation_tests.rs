@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_cloudformation::CloudFormationProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn make_ctx(operation: &str, params: HashMap<String, String>) -> RequestContext {
     RequestContext {
@@ -17,6 +17,7 @@ fn make_ctx(operation: &str, params: HashMap<String, String>) -> RequestContext 
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: params,
+        spooled_body: None,
     }
 }
 
@@ -33,11 +34,12 @@ fn make_ctx_body(operation: &str, body: Value) -> RequestContext {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
 fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 // ---------------------------------------------------------------------------

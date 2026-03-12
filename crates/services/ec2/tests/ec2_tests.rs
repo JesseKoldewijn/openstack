@@ -16,11 +16,12 @@ fn make_ctx(operation: &str, params: HashMap<String, String>) -> RequestContext 
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: params,
+        spooled_body: None,
     }
 }
 
 fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,110 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// ObjectDataRef — where object bytes live
+// ---------------------------------------------------------------------------
+
+/// Reference to the actual bytes of an S3 object or upload part.
+///
+/// `Inline` keeps the data in memory (small objects, delete markers).
+/// `FileRef` points to a file on disk managed by [`ObjectFileStore`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObjectDataRef {
+    /// Data stored inline in memory.
+    Inline(Vec<u8>),
+    /// Data stored on disk at the given path.
+    FileRef(PathBuf),
+}
+
+impl ObjectDataRef {
+    /// Returns the inline data, if available.
+    pub fn as_inline(&self) -> Option<&[u8]> {
+        match self {
+            ObjectDataRef::Inline(v) => Some(v),
+            ObjectDataRef::FileRef(_) => None,
+        }
+    }
+
+    /// Returns the file path, if this is a file-backed reference.
+    pub fn as_file_ref(&self) -> Option<&PathBuf> {
+        match self {
+            ObjectDataRef::Inline(_) => None,
+            ObjectDataRef::FileRef(p) => Some(p),
+        }
+    }
+
+    /// Returns `true` if data is stored on disk.
+    pub fn is_file_ref(&self) -> bool {
+        matches!(self, ObjectDataRef::FileRef(_))
+    }
+}
+
+impl Default for ObjectDataRef {
+    fn default() -> Self {
+        ObjectDataRef::Inline(Vec::new())
+    }
+}
+
+/// Custom serde: serialize as either a base64 string (Inline) or a
+/// `{"file_ref": "path"}` object (FileRef).  Deserialization is
+/// backward-compatible: a plain base64 string is decoded to Inline,
+/// an object with `file_ref` is decoded to FileRef.
+mod serde_object_data_ref {
+    use std::path::PathBuf;
+
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::de::{self, Deserializer};
+    use serde::ser::Serializer;
+    use serde::Deserialize;
+
+    use super::ObjectDataRef;
+
+    pub fn serialize<S: Serializer>(data: &ObjectDataRef, s: S) -> Result<S::Ok, S::Error> {
+        match data {
+            ObjectDataRef::Inline(bytes) => s.serialize_str(&STANDARD.encode(bytes)),
+            ObjectDataRef::FileRef(path) => {
+                use serde::Serialize;
+                #[derive(Serialize)]
+                struct Ref<'a> {
+                    file_ref: &'a str,
+                }
+                Ref {
+                    file_ref: path.to_str().unwrap_or(""),
+                }
+                .serialize(s)
+            }
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ObjectDataRef, D::Error> {
+        // We accept either a string (base64-encoded inline data) or an
+        // object with a "file_ref" field.
+        let value = serde_json::Value::deserialize(d)?;
+        match &value {
+            serde_json::Value::String(b64) => {
+                let bytes = STANDARD.decode(b64).map_err(de::Error::custom)?;
+                Ok(ObjectDataRef::Inline(bytes))
+            }
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(path)) = map.get("file_ref") {
+                    Ok(ObjectDataRef::FileRef(PathBuf::from(path)))
+                } else {
+                    Err(de::Error::custom(
+                        "expected object with 'file_ref' string field",
+                    ))
+                }
+            }
+            _ => Err(de::Error::custom(
+                "expected base64 string or {file_ref: ...} object",
+            )),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Bucket
@@ -56,14 +158,15 @@ pub struct ObjectVersion {
     pub metadata: HashMap<String, String>,
     /// ACL canned string
     pub acl: String,
-    /// The actual object data
-    #[serde(with = "serde_bytes_base64")]
-    pub data: Vec<u8>,
+    /// The actual object data (inline or file-backed)
+    #[serde(with = "serde_object_data_ref")]
+    pub data: ObjectDataRef,
     /// True when this is a delete marker
     pub delete_marker: bool,
 }
 
 impl ObjectVersion {
+    /// Create a new object version from inline data.
     pub fn new(
         data: Vec<u8>,
         content_type: impl Into<String>,
@@ -71,6 +174,7 @@ impl ObjectVersion {
         versioning_enabled: bool,
     ) -> Self {
         let etag = format!("\"{}\"", hex::encode(md5_bytes(&data)));
+        let size = data.len() as u64;
         let version_id = if versioning_enabled {
             Uuid::new_v4().to_string()
         } else {
@@ -84,10 +188,41 @@ impl ObjectVersion {
             content_encoding: None,
             content_disposition: None,
             cache_control: None,
-            size: data.len() as u64,
+            size,
             metadata,
             acl: "private".to_string(),
-            data,
+            data: ObjectDataRef::Inline(data),
+            delete_marker: false,
+        }
+    }
+
+    /// Create a new object version with a pre-computed ETag and
+    /// file-backed data reference.
+    pub fn new_with_file_ref(
+        file_path: PathBuf,
+        size: u64,
+        etag: String,
+        content_type: impl Into<String>,
+        metadata: HashMap<String, String>,
+        versioning_enabled: bool,
+    ) -> Self {
+        let version_id = if versioning_enabled {
+            Uuid::new_v4().to_string()
+        } else {
+            "null".to_string()
+        };
+        Self {
+            version_id,
+            last_modified: Utc::now(),
+            etag,
+            content_type: content_type.into(),
+            content_encoding: None,
+            content_disposition: None,
+            cache_control: None,
+            size,
+            metadata,
+            acl: "private".to_string(),
+            data: ObjectDataRef::FileRef(file_path),
             delete_marker: false,
         }
     }
@@ -148,8 +283,8 @@ pub struct UploadPart {
     pub part_number: u32,
     pub etag: String,
     pub size: u64,
-    #[serde(with = "serde_bytes_base64")]
-    pub data: Vec<u8>,
+    #[serde(with = "serde_object_data_ref")]
+    pub data: ObjectDataRef,
     pub last_modified: DateTime<Utc>,
 }
 
@@ -226,7 +361,7 @@ impl S3Store {
         &mut self,
         bucket: &str,
         key: &str,
-        data: Vec<u8>,
+        data: ObjectDataRef,
         content_type: impl Into<String>,
         metadata: HashMap<String, String>,
     ) -> Option<ObjectVersion> {
@@ -236,7 +371,26 @@ impl S3Store {
             .map(|b| b.versioning.as_str() == "Enabled")
             .unwrap_or(false);
 
-        let version = ObjectVersion::new(data, content_type, metadata, versioning);
+        let version = match &data {
+            ObjectDataRef::Inline(bytes) => {
+                ObjectVersion::new(bytes.clone(), content_type, metadata, versioning)
+            }
+            ObjectDataRef::FileRef(path) => {
+                // For file-backed data we cannot compute etag here without
+                // reading the file.  The caller is expected to provide a
+                // pre-built ObjectVersion via `put_object_version` instead.
+                // Fallback: empty etag, size 0 — but this path should not
+                // be hit in practice for file-backed objects.
+                ObjectVersion::new_with_file_ref(
+                    path.clone(),
+                    0,
+                    String::new(),
+                    content_type,
+                    metadata,
+                    versioning,
+                )
+            }
+        };
 
         let objects = self.objects.entry(bucket.to_string()).or_default();
 
@@ -248,6 +402,28 @@ impl S3Store {
             prev
         } else {
             objects.insert(key.to_string(), S3Object::new(key, version.clone()));
+            None
+        }
+    }
+
+    /// Insert a fully-constructed `ObjectVersion` into the store.
+    ///
+    /// This is the preferred path for file-backed objects where the
+    /// caller has already computed the ETag and size.
+    pub fn put_object_version(
+        &mut self,
+        bucket: &str,
+        key: &str,
+        version: ObjectVersion,
+    ) -> Option<ObjectVersion> {
+        let objects = self.objects.entry(bucket.to_string()).or_default();
+        if let Some(obj) = objects.get_mut(key) {
+            let prev = obj.versions.first().cloned();
+            obj.versions.insert(0, version);
+            obj.versions.truncate(100);
+            prev
+        } else {
+            objects.insert(key.to_string(), S3Object::new(key, version));
             None
         }
     }
@@ -293,7 +469,7 @@ impl S3Store {
                 size: 0,
                 metadata: HashMap::new(),
                 acl: String::new(),
-                data: Vec::new(),
+                data: ObjectDataRef::Inline(Vec::new()),
                 delete_marker: true,
             };
             let obj = objects.entry(key.to_string()).or_insert_with(|| S3Object {
@@ -362,14 +538,25 @@ impl S3Store {
         &mut self,
         upload_id: &str,
         part_number: u32,
-        data: Vec<u8>,
+        data: ObjectDataRef,
     ) -> Option<String> {
         let upload = self.multipart_uploads.get_mut(upload_id)?;
-        let etag = format!("\"{}\"", hex::encode(md5_bytes(&data)));
+        let (etag, size) = match &data {
+            ObjectDataRef::Inline(bytes) => {
+                let etag = format!("\"{}\"", hex::encode(md5_bytes(bytes)));
+                let size = bytes.len() as u64;
+                (etag, size)
+            }
+            ObjectDataRef::FileRef(_) => {
+                // For file-backed parts the caller should use
+                // `upload_part_with_etag` instead.
+                (String::new(), 0)
+            }
+        };
         let part = UploadPart {
             part_number,
             etag: etag.clone(),
-            size: data.len() as u64,
+            size,
             data,
             last_modified: Utc::now(),
         };
@@ -377,6 +564,33 @@ impl S3Store {
         Some(etag)
     }
 
+    /// Upload a part with a pre-computed ETag and size (for file-backed parts).
+    pub fn upload_part_with_etag(
+        &mut self,
+        upload_id: &str,
+        part_number: u32,
+        data: ObjectDataRef,
+        etag: String,
+        size: u64,
+    ) -> Option<String> {
+        let upload = self.multipart_uploads.get_mut(upload_id)?;
+        let part = UploadPart {
+            part_number,
+            etag: etag.clone(),
+            size,
+            data,
+            last_modified: Utc::now(),
+        };
+        upload.parts.insert(part_number, part);
+        Some(etag)
+    }
+
+    /// Complete a multipart upload by concatenating inline parts.
+    ///
+    /// For file-backed parts, the caller should use
+    /// `complete_multipart_upload_with_version` instead, providing a
+    /// pre-assembled `ObjectVersion` that references the concatenated
+    /// file.
     pub fn complete_multipart_upload(
         &mut self,
         upload_id: &str,
@@ -384,13 +598,17 @@ impl S3Store {
     ) -> Option<ObjectVersion> {
         let upload = self.multipart_uploads.remove(upload_id)?;
 
-        // Concatenate parts in order
+        // Concatenate parts in order (inline only)
         let mut combined = Vec::new();
         let mut sorted_parts: Vec<u32> = parts.iter().map(|(n, _)| *n).collect();
         sorted_parts.sort_unstable();
         for part_num in sorted_parts {
             if let Some(part) = upload.parts.get(&part_num) {
-                combined.extend_from_slice(&part.data);
+                if let ObjectDataRef::Inline(bytes) = &part.data {
+                    combined.extend_from_slice(bytes);
+                }
+                // File-backed parts are skipped here — caller should
+                // use the file-aware path.
             }
         }
 
@@ -420,6 +638,35 @@ impl S3Store {
         Some(version)
     }
 
+    /// Complete a multipart upload with a pre-assembled `ObjectVersion`.
+    ///
+    /// Used when parts are file-backed and the caller has already
+    /// concatenated them on disk.
+    pub fn complete_multipart_upload_with_version(
+        &mut self,
+        upload_id: &str,
+        version: ObjectVersion,
+    ) -> Option<ObjectVersion> {
+        let upload = self.multipart_uploads.remove(upload_id)?;
+
+        let objects = self.objects.entry(upload.bucket.clone()).or_default();
+        if let Some(obj) = objects.get_mut(&upload.key) {
+            obj.versions.insert(0, version.clone());
+        } else {
+            objects.insert(
+                upload.key.clone(),
+                S3Object::new(upload.key.clone(), version.clone()),
+            );
+        }
+
+        Some(version)
+    }
+
+    /// Get the `MultipartUpload` metadata for a given upload_id.
+    pub fn get_multipart_upload(&self, upload_id: &str) -> Option<&MultipartUpload> {
+        self.multipart_uploads.get(upload_id)
+    }
+
     pub fn abort_multipart_upload(&mut self, upload_id: &str) -> bool {
         self.multipart_uploads.remove(upload_id).is_some()
     }
@@ -432,20 +679,6 @@ impl S3Store {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Custom serde helper: serialize Vec<u8> as base64 string
-// ---------------------------------------------------------------------------
-
-mod serde_bytes_base64 {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(data: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
-        STANDARD.encode(data).serialize(s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        let s = String::deserialize(d)?;
-        STANDARD.decode(&s).map_err(serde::de::Error::custom)
-    }
-}
+// The old `serde_bytes_base64` module has been replaced by
+// `serde_object_data_ref` which supports both inline (base64) and
+// file-ref serialization.

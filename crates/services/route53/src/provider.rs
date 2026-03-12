@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
@@ -39,7 +39,7 @@ const ROUTE53_NS: &str = "https://route53.amazonaws.com/doc/2013-04-01/";
 fn xml_ok(body: String) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(body.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
         content_type: "text/xml".to_string(),
         headers: Vec::new(),
     }
@@ -48,7 +48,7 @@ fn xml_ok(body: String) -> DispatchResponse {
 fn xml_created(body: String, location: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 201,
-        body: Bytes::from(body.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
         content_type: "text/xml".to_string(),
         headers: vec![("Location".to_string(), location.to_string())],
     }
@@ -64,7 +64,7 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(body.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
         content_type: "text/xml".to_string(),
         headers: Vec::new(),
     }

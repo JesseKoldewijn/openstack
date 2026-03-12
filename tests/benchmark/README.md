@@ -10,11 +10,13 @@ The benchmark harness compares runtime behavior between openstack and LocalStack
 - `fair-medium-core`: medium-load required-gate lane using cross-target-valid core services.
 - `fair-high`: high-load lane for scheduled deep profiling.
 - `fair-extreme`: extreme S3 heavy-object lane (`1gb`, `5gb`, `10gb`) for non-blocking scheduled validation.
+- Deep lanes (`fair-high`, `fair-extreme`) are marked as non-blocking profile runs in benchmark runtime metadata.
 
 Legacy profile aliases still exist for compatibility:
 
 - `all-services-smoke`
 - `all-services-smoke-fast`
+- `all-services-realistic`
 - `hot-path-deep`
 
 ## Run Locally
@@ -65,6 +67,9 @@ Optional overrides:
 - `BENCHMARK_LARGE_FILES_DIR=tests/benchmark/fixtures`
 - `PARITY_OPENSTACK_PERSISTENCE_MODE=durable|non-durable`
 - `PARITY_LOCALSTACK_PERSISTENCE_MODE=durable|non-durable`
+- `PARITY_BENCHMARK_STARTUP_SAMPLES=3`
+- `PARITY_BENCHMARK_ROLE_COVERAGE_DIAGNOSTICS_ONLY=1`
+- `PARITY_BENCHMARK_ROLE_COVERAGE_STRICT=1`
 
 Optional explicit output path:
 
@@ -90,6 +95,13 @@ Required-lane gate behavior:
 - Missing baseline: fail
 - No performance scenarios: fail
 - All performance scenarios skipped: fail
+- Missing required service write/read role coverage: fail
+
+Diagnostics-first rollout and rollback:
+
+- Set `PARITY_BENCHMARK_ROLE_COVERAGE_DIAGNOSTICS_ONLY=1` and leave `PARITY_BENCHMARK_ROLE_COVERAGE_STRICT=0` to keep lane interpretability permissive while still reporting missing-role diagnostics.
+- Enable strict enforcement with `PARITY_BENCHMARK_ROLE_COVERAGE_STRICT=1` once lane stability is acceptable.
+- Roll back strict behavior by resetting `PARITY_BENCHMARK_ROLE_COVERAGE_STRICT=0` while keeping diagnostics mode enabled.
 
 Manual gate run example:
 
@@ -179,12 +191,15 @@ See also: `docs/act-benchmark-validation.md` for the full local workflow simulat
 
 - `results[*].openstack.metrics` and `results[*].localstack.metrics` include p50/p95/p99 latency, min/max/stddev, throughput (ops/s), operation count, error count, success rate, timeout count, retry count, and total duration.
 - `results[*].scenario_class` identifies `coverage` vs `performance` scenarios.
+- `results[*].scenario_role` identifies scenario intent (`write`, `read`, `admin`, `aux`).
 - `results[*].load_tier` identifies `low`, `medium`, `high`, or `extreme` load levels.
 - `results[*].skipped` and `results[*].skip_reason` indicate environment-gated scenarios (for example heavy-object runs without fixtures).
 - `results[*].comparison` includes openstack-vs-localstack deltas and ratios for latency and throughput.
 - `summary` provides aggregate error totals, scenario class counts, skipped count, and average ratios across performance (non-skipped) scenarios only.
 - `summary.valid_performance_scenarios`, `summary.invalid_performance_scenarios`, `summary.lane_interpretable`, and `summary.invalid_reasons` provide benchmark signal-quality diagnostics.
+- `summary.missing_required_role_count` provides lane-level count of missing required service role coverage.
 - `summary.per_service` provides per-service execution class, durability class, scenario counts, skipped counts, average p95/p99/throughput ratios, and class-envelope breach diagnostics.
+- `summary.per_service[*].required_roles`, `summary.per_service[*].covered_roles`, `summary.per_service[*].missing_roles`, and `summary.per_service[*].role_exclusions` provide realistic write/read coverage diagnostics.
 - `runtime.openstack_persistence_mode`, `runtime.localstack_persistence_mode`, and `runtime.persistence_mode_equivalent` capture mode-equivalence metadata.
 - `scripts/benchmark_report_consolidated.py` can generate a single consolidated markdown report across fairness lanes, including optional gate verdicts (`--include-gate`).
 

@@ -3,16 +3,16 @@
 #[cfg(test)]
 mod service_framework_tests {
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     use async_trait::async_trait;
     use openstack_config::Config;
     use openstack_service_framework::{
-        ServiceContainer, ServicePluginManager,
         lifecycle::ServiceState,
         traits::{DispatchError, DispatchResponse, RequestContext, ServiceProvider},
+        ServiceContainer, ServicePluginManager,
     };
 
     fn test_config() -> Config {
@@ -42,6 +42,7 @@ mod service_framework_tests {
             eager_service_loading: false,
             enable_config_updates: false,
             directories: openstack_config::Directories::from_env(),
+            body_spool_threshold_bytes: 1_048_576,
         }
     }
 
@@ -172,7 +173,8 @@ mod service_framework_tests {
         let ctx = test_ctx("echo", "TestOperation");
         let resp = manager.dispatch(&ctx).await.expect("dispatch ok");
         assert_eq!(resp.status_code, 200);
-        let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid json");
+        let body: serde_json::Value =
+            serde_json::from_slice(resp.body.as_bytes()).expect("valid json");
         assert_eq!(body["echo"], "ok");
         assert_eq!(body["operation"], "TestOperation");
     }
@@ -225,7 +227,7 @@ mod service_framework_tests {
             DispatchResponse::ok_json(serde_json::json!({"foo": "bar"})).expect("serialize ok");
         assert_eq!(resp.status_code, 200);
         assert!(resp.content_type.contains("json"));
-        let v: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(resp.body.as_bytes()).unwrap();
         assert_eq!(v["foo"], "bar");
     }
 

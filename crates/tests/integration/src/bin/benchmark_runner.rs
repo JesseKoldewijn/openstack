@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use openstack_integration_tests::benchmark::{BenchmarkConfig, run_profile};
+use openstack_integration_tests::benchmark::{run_profile, BenchmarkConfig};
 
 fn parse_args() -> (String, Option<PathBuf>) {
     let mut profile = "all-services-smoke".to_string();
@@ -44,6 +44,10 @@ async fn main() -> anyhow::Result<()> {
         report.summary.localstack_error_count
     );
     println!(
+        "required role coverage gaps: {}",
+        report.summary.missing_required_role_count
+    );
+    println!(
         "lane mode: {:?}; execution driver: {:?}; persistence modes: openstack={:?}, localstack={:?}, equivalent={}",
         report.runtime.benchmark_lane_mode,
         report.runtime.execution_driver,
@@ -59,6 +63,16 @@ async fn main() -> anyhow::Result<()> {
         println!("average throughput ratio (OS/LS): {v:.3}");
     }
     if let Some(memory) = &report.memory_summary {
+        let os_idle_mb = memory
+            .openstack_idle_rss_bytes
+            .map(|b| b as f64 / (1024.0 * 1024.0))
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let ls_idle_mb = memory
+            .localstack_idle_rss_bytes
+            .map(|b| b as f64 / (1024.0 * 1024.0))
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "n/a".to_string());
         let os_mb = memory
             .openstack_rss_bytes
             .map(|b| b as f64 / (1024.0 * 1024.0))
@@ -74,9 +88,39 @@ async fn main() -> anyhow::Result<()> {
             .map(|v| format!("{v:.3}"))
             .unwrap_or_else(|| "n/a".to_string());
         println!(
-            "memory rss (MB): openstack={}, localstack={}, os/ls ratio={}",
-            os_mb, ls_mb, ratio
+            "memory rss (MB): openstack idle={}, openstack post-load={}, localstack idle={}, localstack post-load={}, os/ls ratio={}",
+            os_idle_mb, os_mb, ls_idle_mb, ls_mb, ratio
         );
+        if !memory.missing_targets.is_empty() {
+            println!(
+                "memory diagnostics: missing targets={}",
+                memory.missing_targets.join(",")
+            );
+        }
+    }
+    if let Some(startup) = &report.startup_summary {
+        let os = startup
+            .openstack_avg_ms
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let ls = startup
+            .localstack_avg_ms
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let ratio = startup
+            .startup_ratio_openstack_over_localstack
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        println!(
+            "startup avg (ms): openstack={}, localstack={}, os/ls ratio={}",
+            os, ls, ratio
+        );
+        if !startup.missing_targets.is_empty() {
+            println!(
+                "startup diagnostics: missing targets={}",
+                startup.missing_targets.join(",")
+            );
+        }
     }
 
     println!("per-service comparison:");
@@ -94,11 +138,17 @@ async fn main() -> anyhow::Result<()> {
             .map(|v| format!("{v:.3}"))
             .unwrap_or_else(|| "n/a".to_string());
         println!(
-            "  - {service}: class={:?}, durability={:?}, scenarios={}, skipped={}, p95_ratio={}, p99_ratio={}, throughput_ratio={}",
+            "  - {service}: class={:?}, durability={:?}, scenarios={}, skipped={}, missing_roles={}, p95_ratio={}, p99_ratio={}, throughput_ratio={}",
             summary.service_execution_class,
             summary.service_durability_class,
             summary.total_scenarios,
             summary.skipped_scenarios,
+            summary
+                .missing_roles
+                .iter()
+                .map(|role| format!("{:?}", role).to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join(","),
             p95,
             p99,
             throughput

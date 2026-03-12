@@ -16,11 +16,12 @@ fn make_ctx(operation: &str, xml_body: &str, path: &str, method: &str) -> Reques
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
 fn body_str(resp: &DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 /// Extract text content of a simple XML tag (first occurrence)

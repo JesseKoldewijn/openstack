@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_dynamodb::DynamoDbProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -21,11 +21,12 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
 fn body(resp: &openstack_service_framework::traits::DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("response body is valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("response body is valid JSON")
 }
 
 // Create a simple table (pk only)
@@ -46,7 +47,7 @@ async fn create_pk_table(provider: &DynamoDbProvider, table_name: &str) {
         resp.status_code,
         200,
         "CreateTable failed: {}",
-        String::from_utf8_lossy(&resp.body)
+        String::from_utf8_lossy(resp.body.as_bytes())
     );
 }
 
@@ -74,7 +75,7 @@ async fn create_pksk_table(provider: &DynamoDbProvider, table_name: &str) {
         resp.status_code,
         200,
         "CreateTable failed: {}",
-        String::from_utf8_lossy(&resp.body)
+        String::from_utf8_lossy(resp.body.as_bytes())
     );
 }
 
@@ -115,12 +116,10 @@ async fn test_create_table_already_exists() {
         .unwrap();
     assert_eq!(resp.status_code, 400);
     let b = body(&resp);
-    assert!(
-        b["__type"]
-            .as_str()
-            .unwrap()
-            .contains("ResourceInUseException")
-    );
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("ResourceInUseException"));
 }
 
 #[tokio::test]
@@ -147,12 +146,10 @@ async fn test_delete_table() {
         .unwrap();
     assert_eq!(resp2.status_code, 400);
     let b = body(&resp2);
-    assert!(
-        b["__type"]
-            .as_str()
-            .unwrap()
-            .contains("ResourceNotFoundException")
-    );
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("ResourceNotFoundException"));
 }
 
 #[tokio::test]
@@ -437,12 +434,10 @@ async fn test_put_item_condition_check_fails() {
     // Condition fails because item doesn't exist yet
     assert_eq!(resp.status_code, 400);
     let b = body(&resp);
-    assert!(
-        b["__type"]
-            .as_str()
-            .unwrap()
-            .contains("ConditionalCheckFailedException")
-    );
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("ConditionalCheckFailedException"));
 }
 
 // ---------------------------------------------------------------------------
@@ -869,12 +864,10 @@ async fn test_transact_write_condition_cancel() {
         .unwrap();
     assert_eq!(resp.status_code, 400);
     let b = body(&resp);
-    assert!(
-        b["__type"]
-            .as_str()
-            .unwrap()
-            .contains("TransactionCanceledException")
-    );
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("TransactionCanceledException"));
 }
 
 #[tokio::test]

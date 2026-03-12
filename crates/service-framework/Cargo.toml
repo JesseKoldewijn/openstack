@@ -9,6 +9,7 @@ openstack-config.workspace = true
 openstack-aws-protocol.workspace = true
 
 tokio.workspace = true
+tokio-util.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
@@ -17,6 +18,9 @@ dashmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bytes.workspace = true
+tempfile.workspace = true
+futures-core.workspace = true
+pin-project-lite.workspace = true
 
 [dev-dependencies]
 openstack-sqs.workspace = true

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
 use openstack_stepfunctions::StepFunctionsProvider;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -17,15 +17,16 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
 fn body(resp: &DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("valid JSON")
 }
 
 fn body_str(resp: &DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 fn simple_pass_machine() -> Value {
@@ -61,12 +62,10 @@ async fn test_create_state_machine() {
         .unwrap();
     assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
     let b = body(&resp);
-    assert!(
-        b["stateMachineArn"]
-            .as_str()
-            .unwrap()
-            .contains("my-machine")
-    );
+    assert!(b["stateMachineArn"]
+        .as_str()
+        .unwrap()
+        .contains("my-machine"));
 }
 
 #[tokio::test]
@@ -422,11 +421,9 @@ async fn test_delete_state_machine() {
         .await
         .unwrap();
     let b = body(&resp);
-    assert!(
-        !b["stateMachines"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["name"] == "del-machine")
-    );
+    assert!(!b["stateMachines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["name"] == "del-machine"));
 }

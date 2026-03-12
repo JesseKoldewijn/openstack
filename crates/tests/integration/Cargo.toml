@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
+tempfile.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { workspace = true }
 serde_json.workspace = true
