@@ -150,7 +150,7 @@ pub async fn get_studio_services(State(state): State<ApiState>) -> impl IntoResp
             json!({
                 "name": name,
                 "status": status,
-                "support_tier": support_tier(&name, &manifests),
+                "support_tier": support_tier(&name, manifests),
             })
         })
         .collect::<Vec<_>>();
