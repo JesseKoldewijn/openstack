@@ -186,7 +186,10 @@ fn register_all_services(manager: &ServicePluginManager, config: &Config) {
             }
         };
     }
-    reg!("s3", openstack_s3::S3Provider::new(&config.directories.s3_objects));
+    reg!(
+        "s3",
+        openstack_s3::S3Provider::new(&config.directories.s3_objects)
+    );
     reg!("sqs", openstack_sqs::SqsProvider::new());
     reg!("sns", openstack_sns::SnsProvider::new());
     reg!("dynamodb", openstack_dynamodb::DynamoDbProvider::new());

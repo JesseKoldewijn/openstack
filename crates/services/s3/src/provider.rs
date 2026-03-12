@@ -11,7 +11,7 @@ use openstack_state::AccountRegionBundle;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
 
-use crate::object_store::ObjectFileStore;
+use crate::object_store::{ObjectFileStore, ObjectLocation};
 use crate::store::{ObjectDataRef, S3Store};
 
 pub struct S3Provider {
@@ -384,9 +384,8 @@ async fn handle_get_object_async(
             store.get_object(&bucket, &key)
         };
 
-        match version {
-            None => None,
-            Some(v) => Some((
+        version.map(|v| {
+            (
                 v.data.clone(),
                 v.etag.clone(),
                 v.last_modified,
@@ -395,13 +394,22 @@ async fn handle_get_object_async(
                 v.content_type.clone(),
                 v.content_encoding.clone(),
                 v.metadata.clone(),
-            )),
-        }
+            )
+        })
     };
 
     match version_info {
         None => s3_error("NoSuchKey", "The specified key does not exist", 404),
-        Some((data, etag, last_modified, size, version_id, content_type, content_encoding, metadata)) => {
+        Some((
+            data,
+            etag,
+            last_modified,
+            size,
+            version_id,
+            content_type,
+            content_encoding,
+            metadata,
+        )) => {
             let mut headers = vec![
                 ("ETag".to_string(), etag),
                 (
@@ -518,10 +526,10 @@ async fn handle_delete_object_async(
             let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
             store.delete_object_version(&bucket, &key, &vid)
         };
-        if let Some(removed_version) = &removed {
-            if let ObjectDataRef::FileRef(path) = &removed_version.data {
-                let _ = tokio::fs::remove_file(path).await;
-            }
+        if let Some(removed_version) = &removed
+            && let ObjectDataRef::FileRef(path) = &removed_version.data
+        {
+            let _ = tokio::fs::remove_file(path).await;
         }
         headers.push(("x-amz-version-id".to_string(), vid));
     } else {
@@ -531,14 +539,17 @@ async fn handle_delete_object_async(
         };
         if let Some(deleted_version) = &deleted {
             // If not versioned, the actual object was removed — clean up file
-            if !deleted_version.delete_marker {
-                if let ObjectDataRef::FileRef(path) = &deleted_version.data {
-                    let _ = tokio::fs::remove_file(path).await;
-                }
+            if !deleted_version.delete_marker
+                && let ObjectDataRef::FileRef(path) = &deleted_version.data
+            {
+                let _ = tokio::fs::remove_file(path).await;
             }
             if deleted_version.delete_marker {
                 headers.push(("x-amz-delete-marker".to_string(), "true".to_string()));
-                headers.push(("x-amz-version-id".to_string(), deleted_version.version_id.clone()));
+                headers.push((
+                    "x-amz-version-id".to_string(),
+                    deleted_version.version_id.clone(),
+                ));
             }
         }
     }
@@ -596,10 +607,10 @@ async fn handle_delete_objects_async(
 
         for (key, version_id) in &keys {
             if let Some(vid) = version_id {
-                if let Some(removed) = store.delete_object_version(&bucket, key, vid) {
-                    if let ObjectDataRef::FileRef(path) = &removed.data {
-                        files_to_delete.push(path.clone());
-                    }
+                if let Some(removed) = store.delete_object_version(&bucket, key, vid)
+                    && let ObjectDataRef::FileRef(path) = &removed.data
+                {
+                    files_to_delete.push(path.clone());
                 }
                 deleted_xml.push_str(&format!(
                     "<Deleted><Key>{}</Key><VersionId>{}</VersionId></Deleted>",
@@ -607,12 +618,11 @@ async fn handle_delete_objects_async(
                     escape_xml(vid)
                 ));
             } else {
-                if let Some(removed) = store.delete_object(&bucket, key) {
-                    if !removed.delete_marker {
-                        if let ObjectDataRef::FileRef(path) = &removed.data {
-                            files_to_delete.push(path.clone());
-                        }
-                    }
+                if let Some(removed) = store.delete_object(&bucket, key)
+                    && !removed.delete_marker
+                    && let ObjectDataRef::FileRef(path) = &removed.data
+                {
+                    files_to_delete.push(path.clone());
                 }
                 deleted_xml.push_str(&format!(
                     "<Deleted><Key>{}</Key></Deleted>",
@@ -698,16 +708,20 @@ async fn handle_copy_object_async(
         ObjectDataRef::FileRef(_path) => {
             match file_store
                 .copy_object(
-                    &ctx.account_id,
-                    &ctx.region,
-                    &src_bucket,
-                    &src_key,
-                    &src_version_id,
-                    &ctx.account_id,
-                    &ctx.region,
-                    &dest_bucket,
-                    &dest_key,
-                    &dest_version_id,
+                    ObjectLocation {
+                        account_id: &ctx.account_id,
+                        region: &ctx.region,
+                        bucket: &src_bucket,
+                        key: &src_key,
+                        version_id: &src_version_id,
+                    },
+                    ObjectLocation {
+                        account_id: &ctx.account_id,
+                        region: &ctx.region,
+                        bucket: &dest_bucket,
+                        key: &dest_key,
+                        version_id: &dest_version_id,
+                    },
                 )
                 .await
             {
@@ -1219,15 +1233,13 @@ async fn handle_complete_multipart_upload_async(
             ObjectDataRef::Inline(bytes) => {
                 combined.extend_from_slice(bytes);
             }
-            ObjectDataRef::FileRef(path) => {
-                match tokio::fs::read(path).await {
-                    Ok(bytes) => combined.extend_from_slice(&bytes),
-                    Err(e) => {
-                        warn!(error = %e, path = %path.display(), "Failed to read part file");
-                        return s3_error("InternalError", "Failed to read part", 500);
-                    }
+            ObjectDataRef::FileRef(path) => match tokio::fs::read(path).await {
+                Ok(bytes) => combined.extend_from_slice(&bytes),
+                Err(e) => {
+                    warn!(error = %e, path = %path.display(), "Failed to read part file");
+                    return s3_error("InternalError", "Failed to read part", 500);
                 }
-            }
+            },
         }
     }
 
@@ -1681,10 +1693,16 @@ impl ServiceProvider for S3Provider {
 
     async fn start(&self) -> Result<(), anyhow::Error> {
         let dir = self.s3_objects_dir.clone();
-        let store = self.object_store
-            .get_or_try_init(|| async { ObjectFileStore::new(dir).await.map_err(anyhow::Error::from) })
+        let store = self
+            .object_store
+            .get_or_try_init(|| async {
+                ObjectFileStore::new(dir).await.map_err(anyhow::Error::from)
+            })
             .await?;
-        debug!("S3 ObjectFileStore initialized at {:?}", self.s3_objects_dir);
+        debug!(
+            "S3 ObjectFileStore initialized at {:?}",
+            self.s3_objects_dir
+        );
 
         // Clean up any orphaned .tmp files from previous crashes.
         match store.cleanup_orphaned_temps().await {
@@ -1722,9 +1740,7 @@ impl ServiceProvider for S3Provider {
                 let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 handle_create_bucket(&mut store, ctx)
             }
-            "DeleteBucket" => {
-                handle_delete_bucket_async(&self.store, self.file_store(), ctx).await
-            }
+            "DeleteBucket" => handle_delete_bucket_async(&self.store, self.file_store(), ctx).await,
             "HeadBucket" => {
                 let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 handle_head_bucket(&store, ctx)
@@ -1734,25 +1750,15 @@ impl ServiceProvider for S3Provider {
                 handle_get_bucket_location(&store, ctx)
             }
             // ---- Object ops ----
-            "PutObject" => {
-                handle_put_object_async(&self.store, self.file_store(), ctx).await
-            }
-            "GetObject" => {
-                handle_get_object_async(&self.store, ctx).await
-            }
+            "PutObject" => handle_put_object_async(&self.store, self.file_store(), ctx).await,
+            "GetObject" => handle_get_object_async(&self.store, ctx).await,
             "HeadObject" => {
                 let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 handle_head_object(&store, ctx)
             }
-            "DeleteObject" => {
-                handle_delete_object_async(&self.store, ctx).await
-            }
-            "DeleteObjects" => {
-                handle_delete_objects_async(&self.store, ctx).await
-            }
-            "CopyObject" => {
-                handle_copy_object_async(&self.store, self.file_store(), ctx).await
-            }
+            "DeleteObject" => handle_delete_object_async(&self.store, ctx).await,
+            "DeleteObjects" => handle_delete_objects_async(&self.store, ctx).await,
+            "CopyObject" => handle_copy_object_async(&self.store, self.file_store(), ctx).await,
             // ---- Listing ----
             "ListObjectsV2" => {
                 let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
@@ -1767,9 +1773,7 @@ impl ServiceProvider for S3Provider {
                 let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 handle_create_multipart_upload(&mut store, ctx)
             }
-            "UploadPart" => {
-                handle_upload_part_async(&self.store, self.file_store(), ctx).await
-            }
+            "UploadPart" => handle_upload_part_async(&self.store, self.file_store(), ctx).await,
             "CompleteMultipartUpload" => {
                 handle_complete_multipart_upload_async(&self.store, self.file_store(), ctx).await
             }
@@ -1834,9 +1838,7 @@ impl ServiceProvider for S3Provider {
                 handle_put_bucket_notification(&mut store, ctx)
             }
             // ---- Pre-signed ----
-            "PresignedGetObject" => {
-                handle_get_object_async(&self.store, ctx).await
-            }
+            "PresignedGetObject" => handle_get_object_async(&self.store, ctx).await,
             _ => {
                 warn!(service = "s3", operation = %op, "S3 operation not implemented");
                 return Err(DispatchError::NotImplemented(op));

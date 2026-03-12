@@ -787,16 +787,15 @@ async fn smoke_s3_persistence_round_trip() {
         if std::time::Instant::now() > deadline {
             panic!("server1 not ready");
         }
-        if let Ok(r) = reqwest::get(&health1).await {
-            if r.status().is_success() {
-                break;
-            }
+        if let Ok(r) = reqwest::get(&health1).await
+            && r.status().is_success()
+        {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let auth =
-        "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     // Create bucket + object
     client
@@ -863,16 +862,15 @@ async fn smoke_s3_persistence_round_trip() {
         if std::time::Instant::now() > deadline {
             panic!("server2 not ready");
         }
-        if let Ok(r) = reqwest::get(&health2).await {
-            if r.status().is_success() {
-                break;
-            }
+        if let Ok(r) = reqwest::get(&health2).await
+            && r.status().is_success()
+        {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let auth2 =
-        "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let auth2 = "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     // GetObject from restored server — should return the persisted object
     let resp = client

@@ -25,6 +25,15 @@ pub struct ObjectFileStore {
     base_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectLocation<'a> {
+    pub account_id: &'a str,
+    pub region: &'a str,
+    pub bucket: &'a str,
+    pub key: &'a str,
+    pub version_id: &'a str,
+}
+
 impl ObjectFileStore {
     /// Create a new `ObjectFileStore` rooted at `base_dir`.
     ///
@@ -231,27 +240,19 @@ impl ObjectFileStore {
     /// Returns the destination `PathBuf`.
     pub async fn copy_object(
         &self,
-        src_account_id: &str,
-        src_region: &str,
-        src_bucket: &str,
-        src_key: &str,
-        src_version_id: &str,
-        dst_account_id: &str,
-        dst_region: &str,
-        dst_bucket: &str,
-        dst_key: &str,
-        dst_version_id: &str,
+        src: ObjectLocation<'_>,
+        dst: ObjectLocation<'_>,
     ) -> io::Result<PathBuf> {
         let src = self.object_path(
-            src_account_id,
-            src_region,
-            src_bucket,
-            src_key,
-            src_version_id,
+            src.account_id,
+            src.region,
+            src.bucket,
+            src.key,
+            src.version_id,
         );
-        let dst_dir = self.object_dir(dst_account_id, dst_region, dst_bucket, dst_key);
+        let dst_dir = self.object_dir(dst.account_id, dst.region, dst.bucket, dst.key);
         fs::create_dir_all(&dst_dir).await?;
-        let dst = dst_dir.join(dst_version_id);
+        let dst = dst_dir.join(dst.version_id);
 
         fs::copy(&src, &dst).await?;
 
@@ -283,22 +284,21 @@ impl ObjectFileStore {
                 let ft = entry.file_type().await?;
                 if ft.is_dir() {
                     stack.push(entry.path());
-                } else if ft.is_file() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        if name.ends_with(".tmp") {
-                            match fs::remove_file(entry.path()).await {
-                                Ok(()) => {
-                                    count += 1;
-                                    debug!(path = %entry.path().display(), "Removed orphaned temp file");
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        path = %entry.path().display(),
-                                        error = %e,
-                                        "Failed to remove orphaned temp file"
-                                    );
-                                }
-                            }
+                } else if ft.is_file()
+                    && let Some(name) = entry.file_name().to_str()
+                    && name.ends_with(".tmp")
+                {
+                    match fs::remove_file(entry.path()).await {
+                        Ok(()) => {
+                            count += 1;
+                            debug!(path = %entry.path().display(), "Removed orphaned temp file");
+                        }
+                        Err(e) => {
+                            warn!(
+                                path = %entry.path().display(),
+                                error = %e,
+                                "Failed to remove orphaned temp file"
+                            );
                         }
                     }
                 }
@@ -443,16 +443,20 @@ mod tests {
 
         let dst = store
             .copy_object(
-                "acct1",
-                "us-east-1",
-                "src-bkt",
-                "srckey",
-                "v1",
-                "acct1",
-                "us-east-1",
-                "dst-bkt",
-                "dstkey",
-                "v2",
+                ObjectLocation {
+                    account_id: "acct1",
+                    region: "us-east-1",
+                    bucket: "src-bkt",
+                    key: "srckey",
+                    version_id: "v1",
+                },
+                ObjectLocation {
+                    account_id: "acct1",
+                    region: "us-east-1",
+                    bucket: "dst-bkt",
+                    key: "dstkey",
+                    version_id: "v2",
+                },
             )
             .await
             .unwrap();

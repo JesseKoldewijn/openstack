@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn test_env_bool() {
         assert!(!env_bool("__OPENSTACK_TEST_BOOL_TRUE", false)); // unset → default
-                                                                 // Can't easily set env vars in unit tests without std::env::set_var (unsafe in Rust 1.80+)
-                                                                 // Integration tested via Config::from_env
+        // Can't easily set env vars in unit tests without std::env::set_var (unsafe in Rust 1.80+)
+        // Integration tested via Config::from_env
     }
 
     #[test]

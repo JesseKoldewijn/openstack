@@ -137,10 +137,10 @@ fn resolve_and_verify_paths(store: &mut S3Store, base: &Path) {
 }
 
 fn relativize_data_ref(data: &mut ObjectDataRef, base: &Path) {
-    if let ObjectDataRef::FileRef(abs_path) = data {
-        if let Ok(rel) = abs_path.strip_prefix(base) {
-            *data = ObjectDataRef::FileRef(rel.to_path_buf());
-        }
+    if let ObjectDataRef::FileRef(abs_path) = data
+        && let Ok(rel) = abs_path.strip_prefix(base)
+    {
+        *data = ObjectDataRef::FileRef(rel.to_path_buf());
         // If strip_prefix fails, the path is already relative or points
         // elsewhere — leave it as-is.
     }

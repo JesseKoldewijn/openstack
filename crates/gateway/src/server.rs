@@ -17,8 +17,8 @@ use openstack_aws_protocol::{
     rest_json::parse_rest_json_request, rest_xml::parse_rest_xml_request,
 };
 use openstack_config::Config;
-use openstack_service_framework::{ServicePluginManager, SpooledBody};
 use openstack_service_framework::traits::ResponseBody;
+use openstack_service_framework::{ServicePluginManager, SpooledBody};
 use openstack_state::StateManager;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -47,10 +47,7 @@ impl BodyStreamAdapter {
 impl futures_core::Stream for BodyStreamAdapter {
     type Item = Result<Bytes, io::Error>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(frame))) => {
@@ -60,9 +57,7 @@ impl futures_core::Stream for BodyStreamAdapter {
                     // Skip non-data frames (trailers, etc.)
                     continue;
                 }
-                Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::Other, e))));
-                }
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(io::Error::other(e)))),
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             }
@@ -364,9 +359,7 @@ async fn handle_request(
             if let Some(len) = content_length {
                 builder = builder.header("content-length", len.to_string());
             }
-            builder
-                .body(Body::from_stream(stream))
-                .unwrap_or_default()
+            builder.body(Body::from_stream(stream)).unwrap_or_default()
         }
     };
 

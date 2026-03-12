@@ -60,17 +60,7 @@ pub enum BenchmarkLoadTier {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    Default,
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord, Default,
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum BenchmarkScenarioRole {
@@ -916,7 +906,10 @@ async fn collect_startup_summary(
 
         let start = Instant::now();
         let ls_ok = client
-            .get(format!("{}/_localstack/health", manager.localstack.endpoint))
+            .get(format!(
+                "{}/_localstack/health",
+                manager.localstack.endpoint
+            ))
             .send()
             .await
             .map(|r| r.status().is_success())
@@ -2148,9 +2141,7 @@ async fn execute_direct_http_command(endpoint: &str, command: &[String]) -> (f64
     };
 
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let success = response
-        .map(|resp| resp.status().is_success())
-        .ok();
+    let success = response.map(|resp| resp.status().is_success()).ok();
     (elapsed_ms, success)
 }
 
@@ -2502,14 +2493,8 @@ fn validate_service_workload_matrix(services: &[String]) -> anyhow::Result<()> {
             continue;
         }
 
-        let has_write = entry
-            .required_roles
-            .iter()
-            .any(|r| *r == BenchmarkScenarioRole::Write);
-        let has_read = entry
-            .required_roles
-            .iter()
-            .any(|r| *r == BenchmarkScenarioRole::Read);
+        let has_write = entry.required_roles.contains(&BenchmarkScenarioRole::Write);
+        let has_read = entry.required_roles.contains(&BenchmarkScenarioRole::Read);
         if !has_write || !has_read {
             invalid_entries.push(format!(
                 "{service}: required roles must include write and read (got: {:?})",
@@ -2937,7 +2922,12 @@ fn setup_cleanup_for_service(service: &str) -> (Vec<ScenarioStep>, Vec<ScenarioS
             vec![scenario_step(
                 "sqs-create-queue",
                 ProtocolFamily::QueryXml,
-                vec!["sqs".into(), "create-queue".into(), "--queue-name".into(), "{{queue}}".into()],
+                vec![
+                    "sqs".into(),
+                    "create-queue".into(),
+                    "--queue-name".into(),
+                    "{{queue}}".into(),
+                ],
             )],
             vec![],
         ),
@@ -2945,7 +2935,12 @@ fn setup_cleanup_for_service(service: &str) -> (Vec<ScenarioStep>, Vec<ScenarioS
             vec![scenario_step(
                 "sns-create-topic",
                 ProtocolFamily::QueryXml,
-                vec!["sns".into(), "create-topic".into(), "--name".into(), "bench-topic-{{run_id}}".into()],
+                vec![
+                    "sns".into(),
+                    "create-topic".into(),
+                    "--name".into(),
+                    "bench-topic-{{run_id}}".into(),
+                ],
             )],
             vec![],
         ),
@@ -3275,6 +3270,8 @@ pub fn ensure_profile_scenarios(profile_name: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         BenchmarkLoadTier, BenchmarkMetrics, BenchmarkScenarioClass, BenchmarkScenarioRole,
         all_service_names, compare_metrics, default_benchmark_scenarios, load_profile_scenarios,
@@ -3284,11 +3281,10 @@ mod tests {
     use crate::benchmark::{
         BenchmarkComparison, BenchmarkConfig, BenchmarkMemorySample, BenchmarkMemorySummary,
         BenchmarkRunConfig, BenchmarkScenarioResult, BenchmarkServiceSummary,
-        BenchmarkStartupSample, BenchmarkStartupSummary, BenchmarkSummary,
-        BenchmarkTargetMetadata, BenchmarkTargetResult, enforce_required_role_completeness,
+        BenchmarkStartupSample, BenchmarkStartupSummary, BenchmarkSummary, BenchmarkTargetMetadata,
+        BenchmarkTargetResult, enforce_required_role_completeness,
     };
     use crate::classification::{PersistenceMode, ServiceExecutionClass};
-    use std::collections::BTreeMap;
 
     #[test]
     fn computes_percentiles() {
@@ -3689,8 +3685,10 @@ mod tests {
     fn all_services_have_default_write_and_read_scenarios() {
         let scenarios = default_benchmark_scenarios("seed");
 
-        let mut per_service_roles: std::collections::HashMap<&str, std::collections::HashSet<BenchmarkScenarioRole>> =
-            std::collections::HashMap::new();
+        let mut per_service_roles: std::collections::HashMap<
+            &str,
+            std::collections::HashSet<BenchmarkScenarioRole>,
+        > = std::collections::HashMap::new();
         for scenario in &scenarios {
             per_service_roles
                 .entry(scenario.service.as_str())
@@ -3791,7 +3789,8 @@ mod tests {
             summary
                 .invalid_reasons
                 .iter()
-                .any(|r| r.contains("missing Write role coverage") || r.contains("missing write role coverage"))
+                .any(|r| r.contains("missing Write role coverage")
+                    || r.contains("missing write role coverage"))
         );
     }
 

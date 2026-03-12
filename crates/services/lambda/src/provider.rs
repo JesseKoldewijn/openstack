@@ -301,7 +301,9 @@ impl ServiceProvider for LambdaProvider {
 
                 Ok(DispatchResponse {
                     status_code: 201,
-                    body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&function_to_json(&func)).unwrap())),
+                    body: ResponseBody::Buffered(Bytes::from(
+                        serde_json::to_vec(&function_to_json(&func)).unwrap(),
+                    )),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })
@@ -723,7 +725,9 @@ impl ServiceProvider for LambdaProvider {
 
                 Ok(DispatchResponse {
                     status_code: 201,
-                    body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&lv_json).unwrap())),
+                    body: ResponseBody::Buffered(Bytes::from(
+                        serde_json::to_vec(&lv_json).unwrap(),
+                    )),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })
@@ -847,7 +851,9 @@ impl ServiceProvider for LambdaProvider {
 
                 Ok(DispatchResponse {
                     status_code: 202,
-                    body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&esm_to_json(&esm)).unwrap())),
+                    body: ResponseBody::Buffered(Bytes::from(
+                        serde_json::to_vec(&esm_to_json(&esm)).unwrap(),
+                    )),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })

@@ -9,7 +9,7 @@ mod gateway_tests {
     };
     use openstack_gateway::cors::CorsHandler;
     use openstack_gateway::sigv4::{
-        access_key_to_account_id, is_valid_region, parse_sigv4_auth, DEFAULT_ACCOUNT_ID,
+        DEFAULT_ACCOUNT_ID, access_key_to_account_id, is_valid_region, parse_sigv4_auth,
     };
 
     fn test_config() -> Config {

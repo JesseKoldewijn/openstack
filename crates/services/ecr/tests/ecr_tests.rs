@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_ecr::EcrProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -68,10 +68,12 @@ async fn test_create_repository_duplicate_fails() {
         .unwrap();
     assert_eq!(resp.status_code, 400);
     let b = body_json(&resp);
-    assert!(b["__type"]
-        .as_str()
-        .unwrap()
-        .contains("RepositoryAlreadyExistsException"));
+    assert!(
+        b["__type"]
+            .as_str()
+            .unwrap()
+            .contains("RepositoryAlreadyExistsException")
+    );
 }
 
 #[tokio::test]
@@ -173,10 +175,12 @@ async fn test_put_image_and_list() {
     let lb = body_json(&list_resp);
     let image_ids = lb["imageIds"].as_array().unwrap();
     assert_eq!(image_ids.len(), 1);
-    assert!(image_ids[0]["imageDigest"]
-        .as_str()
-        .unwrap()
-        .starts_with("sha256:"));
+    assert!(
+        image_ids[0]["imageDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
 }
 
 #[tokio::test]

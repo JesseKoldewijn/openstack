@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_opensearch::OpenSearchProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn make_ctx(operation: &str, body: Value, path: &str, method: &str) -> RequestContext {
     RequestContext {
@@ -82,10 +82,12 @@ async fn test_create_domain_duplicate_fails() {
         .unwrap();
     assert_eq!(resp.status_code, 409);
     let b = body_json(&resp);
-    assert!(b["code"]
-        .as_str()
-        .unwrap()
-        .contains("ResourceAlreadyExistsException"));
+    assert!(
+        b["code"]
+            .as_str()
+            .unwrap()
+            .contains("ResourceAlreadyExistsException")
+    );
 }
 
 #[tokio::test]
@@ -129,10 +131,12 @@ async fn test_describe_domain_not_found() {
         .unwrap();
     assert_eq!(resp.status_code, 409);
     let b = body_json(&resp);
-    assert!(b["code"]
-        .as_str()
-        .unwrap()
-        .contains("ResourceNotFoundException"));
+    assert!(
+        b["code"]
+            .as_str()
+            .unwrap()
+            .contains("ResourceNotFoundException")
+    );
 }
 
 #[tokio::test]

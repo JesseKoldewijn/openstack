@@ -82,6 +82,10 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Prepare runtime directories for non-root execution.
+RUN mkdir -p /var/lib/localstack /etc/localstack/init \
+    && chown -R 1000:1000 /var/lib/localstack /etc/localstack
+
 # Non-root user
 RUN useradd -ms /bin/bash openstack
 USER openstack

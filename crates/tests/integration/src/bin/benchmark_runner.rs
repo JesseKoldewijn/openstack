@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use openstack_integration_tests::benchmark::{run_profile, BenchmarkConfig};
+use openstack_integration_tests::benchmark::{BenchmarkConfig, run_profile};
 
 fn parse_args() -> (String, Option<PathBuf>) {
     let mut profile = "all-services-smoke".to_string();

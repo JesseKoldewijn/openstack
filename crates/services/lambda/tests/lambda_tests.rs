@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
 use openstack_lambda::LambdaProvider;
 use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -307,10 +307,12 @@ async fn test_publish_layer_version() {
     assert_eq!(resp.status_code, 201, "{}", body_str(&resp));
     let b = body(&resp);
     assert_eq!(b["Version"], 1);
-    assert!(b["LayerVersionArn"]
-        .as_str()
-        .unwrap()
-        .contains("my-layer:1"));
+    assert!(
+        b["LayerVersionArn"]
+            .as_str()
+            .unwrap()
+            .contains("my-layer:1")
+    );
 }
 
 #[tokio::test]

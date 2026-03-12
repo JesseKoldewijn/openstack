@@ -57,10 +57,10 @@ impl Default for ObjectDataRef {
 mod serde_object_data_ref {
     use std::path::PathBuf;
 
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde::Deserialize;
     use serde::de::{self, Deserializer};
     use serde::ser::Serializer;
-    use serde::Deserialize;
 
     use super::ObjectDataRef;
 
@@ -603,10 +603,10 @@ impl S3Store {
         let mut sorted_parts: Vec<u32> = parts.iter().map(|(n, _)| *n).collect();
         sorted_parts.sort_unstable();
         for part_num in sorted_parts {
-            if let Some(part) = upload.parts.get(&part_num) {
-                if let ObjectDataRef::Inline(bytes) = &part.data {
-                    combined.extend_from_slice(bytes);
-                }
+            if let Some(part) = upload.parts.get(&part_num)
+                && let ObjectDataRef::Inline(bytes) = &part.data
+            {
+                combined.extend_from_slice(bytes);
                 // File-backed parts are skipped here — caller should
                 // use the file-aware path.
             }

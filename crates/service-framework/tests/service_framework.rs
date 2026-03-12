@@ -3,16 +3,16 @@
 #[cfg(test)]
 mod service_framework_tests {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use async_trait::async_trait;
     use openstack_config::Config;
     use openstack_service_framework::{
+        ServiceContainer, ServicePluginManager,
         lifecycle::ServiceState,
         traits::{DispatchError, DispatchResponse, RequestContext, ServiceProvider},
-        ServiceContainer, ServicePluginManager,
     };
 
     fn test_config() -> Config {
