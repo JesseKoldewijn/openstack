@@ -112,6 +112,24 @@ fn start_with_existing_running_pid_prevents_duplicate_start() {
 }
 
 #[test]
+fn studio_print_url_outputs_dashboard_url() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = run_openstack_with_data_dir(tmp.path(), &["studio", "--print-url"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("/_localstack/studio"));
+}
+
+#[test]
+fn studio_unknown_option_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = run_openstack_with_data_dir(tmp.path(), &["studio", "--bad-opt"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Unknown studio option"));
+}
+
+#[test]
 fn stop_cleans_stale_metadata_for_non_running_pid() {
     let tmp = tempfile::tempdir().unwrap();
     write_lock(tmp.path());

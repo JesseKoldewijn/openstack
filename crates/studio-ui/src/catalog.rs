@@ -8,6 +8,7 @@ use crate::models::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuidedServiceSummary {
     pub service: String,
+    pub protocol: String,
     pub maturity: String,
     pub flow_count: usize,
     pub l1_flows: usize,
@@ -75,6 +76,7 @@ fn to_summary(
 ) -> GuidedServiceSummary {
     GuidedServiceSummary {
         service: flow.service,
+        protocol: flow.protocol,
         maturity: flow.maturity,
         flow_count: flow.flow_count,
         l1_flows: coverage.map(|item| item.l1_flows).unwrap_or(0),

@@ -124,6 +124,7 @@ fn assert_rendered(rendered: RenderedGuidedFlow, fixture: &Fixture) {
     );
     assert!(rendered.assertions.total >= fixture.steps.len());
     assert_eq!(rendered.cleanup.total, 0);
+    assert!(rendered.error_guidance.is_empty());
     assert!(
         fixture
             .steps

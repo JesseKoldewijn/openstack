@@ -146,5 +146,13 @@
     }
   ],
   "total_guided_services": 24,
+  "total_supported_services": 24,
+  "protocol_counts": {
+    "rest_json": 11,
+    "query": 5,
+    "json_target": 7,
+    "rest_xml": 1
+  },
+  "missing_services": [],
   "source": "manifests/guided"
 }

@@ -25,6 +25,34 @@ struct GuidedManifestFile {
     inputs: Vec<serde_json::Value>,
 }
 
+fn service_matrix_services() -> HashSet<String> {
+    let matrix_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("harness")
+        .join("service-matrix.json");
+
+    let Ok(raw) = fs::read_to_string(matrix_path) else {
+        return HashSet::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return HashSet::new();
+    };
+
+    value
+        .get("services")
+        .and_then(|services| services.as_array())
+        .map(|services| {
+            services
+                .iter()
+                .filter_map(|entry| entry.get("name").and_then(|name| name.as_str()))
+                .map(ToOwned::to_owned)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default()
+}
+
 fn manifests_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -193,6 +221,7 @@ pub async fn get_studio_flow_definition(Path(service): Path<String>) -> impl Int
 pub async fn get_studio_flow_coverage(State(state): State<ApiState>) -> impl IntoResponse {
     let service_states = state.plugin_manager.service_states().await;
     let manifests = manifest_inventory();
+    let matrix_services = service_matrix_services();
     let mut seen = HashSet::new();
 
     let mut services = service_states
@@ -215,6 +244,9 @@ pub async fn get_studio_flow_coverage(State(state): State<ApiState>) -> impl Int
         if seen.contains(service) {
             continue;
         }
+        if !matrix_services.is_empty() && !matrix_services.contains(service) {
+            continue;
+        }
         services.push(json!({
             "service": service,
             "has_manifest": true,
@@ -231,9 +263,19 @@ pub async fn get_studio_flow_coverage(State(state): State<ApiState>) -> impl Int
             .cmp(b["service"].as_str().unwrap_or_default())
     });
 
+    let guided_services = services
+        .iter()
+        .filter(|item| item["has_manifest"].as_bool().unwrap_or(false))
+        .count();
+    let supported_services = services.len();
+
     Json(json!({
         "schema_version": GUIDED_MANIFEST_SCHEMA_VERSION,
         "summary": "guided coverage by service",
+        "counts": {
+            "guided_services": guided_services,
+            "supported_services": supported_services,
+        },
         "services": services,
     }))
 }

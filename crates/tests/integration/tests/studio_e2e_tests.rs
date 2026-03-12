@@ -23,6 +23,30 @@ async fn studio_boot_and_theme_round_trip() {
         Some("no-cache")
     );
 
+    let services = harness
+        .client
+        .get(harness.url("/_localstack/studio-api/services"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(services.status().as_u16(), 200);
+
+    let catalog = harness
+        .client
+        .get(harness.url("/_localstack/studio-api/flows/catalog"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(catalog.status().as_u16(), 200);
+
+    let coverage = harness
+        .client
+        .get(harness.url("/_localstack/studio-api/flows/coverage"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(coverage.status().as_u16(), 200);
+
     // Use the theme state model from studio-ui crate as hydration/persistence signal.
     let mut theme = openstack_studio_ui::ThemeStore::new(openstack_studio_ui::ThemeMode::Light);
     theme.toggle();

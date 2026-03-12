@@ -39,6 +39,8 @@ pub struct RenderedGuidedFlow {
     pub timeline: Vec<TimelineItem>,
     pub assertions: AssertionsPanel,
     pub cleanup: CleanupPanel,
+    pub captures: HashMap<String, String>,
+    pub error_guidance: Vec<String>,
 }
 
 pub fn render_guided_flow(
@@ -80,6 +82,25 @@ pub fn render_guided_flow(
         })
         .unwrap_or(0);
     let cleanup_failed = cleanup_total.saturating_sub(cleanup_succeeded);
+    let captures = report.map(|item| item.captures.clone()).unwrap_or_default();
+    let error_guidance = flow
+        .steps
+        .iter()
+        .filter_map(|step| {
+            let failed = report
+                .map(|item| {
+                    item.outcomes
+                        .iter()
+                        .any(|outcome| outcome.step_id == step.id && !outcome.success)
+                })
+                .unwrap_or(false);
+            if failed {
+                step.error_guidance.clone()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
 
     RenderedGuidedFlow {
         flow_id: flow.id.clone(),
@@ -94,6 +115,8 @@ pub fn render_guided_flow(
             succeeded: cleanup_succeeded,
             failed: cleanup_failed,
         },
+        captures,
+        error_guidance,
     }
 }
 
@@ -152,6 +175,7 @@ mod tests {
     use crate::guided_manifest::{
         CaptureBinding, FlowAssertion, GuidedManifest, NormalizedOperation, ProtocolClass,
     };
+    use crate::guided_runtime::{GuidedExecutionReport, GuidedExecutionState, StepOutcome};
 
     fn sample_manifest(protocol: ProtocolClass) -> GuidedManifest {
         GuidedManifest {
@@ -209,5 +233,31 @@ mod tests {
         let values = HashMap::from([(String::from("bucket"), String::from("b"))]);
         let result = validate_guided_inputs(&required, &values).expect_err("should fail");
         assert_eq!(result, vec!["key".to_string()]);
+    }
+
+    #[test]
+    fn renderer_includes_captures_and_failed_step_guidance() {
+        let mut manifest = sample_manifest(ProtocolClass::RestXml);
+        manifest.flows[0].steps[0].error_guidance = Some("Check bucket policy".to_string());
+
+        let report = GuidedExecutionReport {
+            state: GuidedExecutionState::Failed,
+            outcomes: vec![StepOutcome {
+                step_id: "step-a".to_string(),
+                success: false,
+                attempts: 1,
+                status_code: Some(403),
+                error: None,
+            }],
+            cleanup: vec![],
+            captures: HashMap::from([(String::from("bucket"), String::from("demo"))]),
+        };
+
+        let rendered = render_guided_flow(&manifest, &manifest.flows[0], Some(&report));
+        assert_eq!(rendered.captures.get("bucket"), Some(&"demo".to_string()));
+        assert_eq!(
+            rendered.error_guidance,
+            vec!["Check bucket policy".to_string()]
+        );
     }
 }

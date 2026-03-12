@@ -120,5 +120,7 @@ async fn studio_flow_coverage_contract_contains_metrics() {
     let (status, body) = get_json(&router, "/_localstack/studio-api/flows/coverage").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["schema_version"].is_string());
+    assert!(body["counts"]["guided_services"].is_u64());
+    assert!(body["counts"]["supported_services"].is_u64());
     assert!(body["services"].is_array());
 }

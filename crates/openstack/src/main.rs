@@ -18,6 +18,7 @@ enum CliCommand {
     Status,
     Restart,
     Logs { follow: bool },
+    Studio { print_url: bool },
     Help,
     Version,
 }
@@ -72,6 +73,7 @@ async fn main() -> Result<()> {
         CliCommand::Status => daemon_status(&config).await,
         CliCommand::Restart => daemon_restart(&config).await,
         CliCommand::Logs { follow } => daemon_logs(&config, follow).await,
+        CliCommand::Studio { print_url } => studio_open(&config, print_url).await,
         CliCommand::Help | CliCommand::Version => Ok(()),
     }
 }
@@ -148,6 +150,15 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             }
             Ok(CliCommand::Logs { follow })
         }
+        "studio" => {
+            let print_url = args.iter().skip(1).any(|a| a == "--print-url");
+            for arg in args.iter().skip(1) {
+                if arg != "--print-url" {
+                    return Err(anyhow!("Unknown studio option: {arg}"));
+                }
+            }
+            Ok(CliCommand::Studio { print_url })
+        }
         unknown => Err(anyhow!("Unknown command: {unknown}")),
     }
 }
@@ -162,10 +173,95 @@ fn print_help() {
     println!("  status             Show managed daemon status");
     println!("  restart            Restart managed daemon instance");
     println!("  logs [--follow]    Show daemon logs");
+    println!("  studio [--print-url]  Print/open Studio dashboard URL");
     println!();
     println!("Flags:");
     println!("  -h, --help         Show help");
     println!("  -V, --version      Show version");
+}
+
+async fn studio_open(config: &openstack_config::Config, print_url: bool) -> Result<()> {
+    let paths = daemon_paths(config);
+
+    let daemon_health = if paths.meta.exists() {
+        read_meta(&paths.meta)
+            .await
+            .ok()
+            .map(|meta| meta.health_url)
+    } else {
+        None
+    };
+
+    let resolution = openstack_studio_ui::api::resolve_studio_url(
+        None,
+        daemon_health.as_deref(),
+        &config.base_url(),
+    )
+    .await;
+
+    if print_url {
+        println!("{}", resolution.url);
+        return Ok(());
+    }
+
+    if !resolution.daemon_ready {
+        println!("Studio runtime is not ready yet.");
+        println!("URL: {}", resolution.url);
+        println!("Tip: start daemon with 'openstack start --daemon' and retry.");
+        return Ok(());
+    }
+
+    if try_open_browser(&resolution.url).is_ok() {
+        println!("Opened Studio: {}", resolution.url);
+    } else {
+        println!("Could not open browser automatically.");
+        println!("Studio URL: {}", resolution.url);
+    }
+
+    Ok(())
+}
+
+fn try_open_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if Command::new("xdg-open")
+            .arg(url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if Command::new("open")
+            .arg(url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!("failed to open browser"))
 }
 
 fn daemon_paths(config: &openstack_config::Config) -> DaemonPaths {
@@ -579,6 +675,15 @@ mod tests {
         assert_eq!(
             parse_cli_command(&args).unwrap(),
             CliCommand::Logs { follow: true }
+        );
+    }
+
+    #[test]
+    fn parse_studio_print_url() {
+        let args = vec!["studio".to_string(), "--print-url".to_string()];
+        assert_eq!(
+            parse_cli_command(&args).unwrap(),
+            CliCommand::Studio { print_url: true }
         );
     }
 

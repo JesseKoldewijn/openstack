@@ -28,7 +28,13 @@ cargo test -p openstack-studio-ui
 cargo test -p openstack-integration-tests --test studio_e2e_tests
 cargo test -p openstack-integration-tests --test studio_guided_manifest_e2e_tests
 python3 scripts/studio_guided_coverage_gate.py
+python3 scripts/studio_coverage_report.py
 ```
+
+## Semgrep
+
+- Semgrep policy and enforcement behavior remain unchanged.
+- Studio workflow treats Semgrep findings as non-blocking unless repository policy changes elsewhere.
 
 ## Guided manifest docs
 

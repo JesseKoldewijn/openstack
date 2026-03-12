@@ -2044,6 +2044,7 @@ dependencies = [
  "openstack-state",
  "openstack-stepfunctions",
  "openstack-sts",
+ "openstack-studio-ui",
  "predicates",
  "reqwest 0.12.28",
  "serde",

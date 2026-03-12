@@ -37,28 +37,215 @@ const STUDIO_SPA: &str = r#"<!doctype html>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
   <title>openstack studio</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { margin:0; font-family: ui-sans-serif,system-ui,sans-serif; }
-    main { padding: 24px; max-width: 900px; margin: 0 auto; }
-    h1 { margin: 0 0 12px; }
-    p { opacity: 0.9; }
-    code { background: #00000022; padding: 2px 6px; border-radius: 6px; }
-  </style>
+  <link rel=\"stylesheet\" href=\"/_localstack/studio/assets/app.css\" />
 </head>
 <body>
-  <main>
-    <h1>openstack studio</h1>
-    <p>Studio shell is available. Frontend bundle integration is pending.</p>
-    <p>API: <code>/_localstack/studio-api/services</code></p>
-  </main>
+  <div id=\"studio-app\">Loading Studio dashboard...</div>
+  <script src=\"/_localstack/studio/assets/app.js\"></script>
 </body>
 </html>
 "#;
 
-const STUDIO_ASSET_JS: &str = "console.log('openstack studio shell');";
+const STUDIO_ASSET_JS: &str = r#"(function () {
+  const root = document.getElementById('studio-app');
+  if (!root) return;
 
-const STUDIO_ASSET_CSS: &str = ":root{color-scheme:light dark}body{margin:0}";
+  const state = {
+    services: [],
+    flowCatalog: [],
+    flowCoverage: [],
+    selectedService: null,
+    flowDefinition: null,
+    history: [],
+    raw: { method: 'GET', path: '/_localstack/health', body: '' },
+    response: null,
+  };
+
+  function esc(v) {
+    return String(v ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  async function getJson(path) {
+    const r = await fetch(path, { headers: { 'accept': 'application/json' } });
+    if (!r.ok) throw new Error(path + ' failed: ' + r.status);
+    return r.json();
+  }
+
+  function mergeServiceData() {
+    const byFlow = new Map(state.flowCatalog.map((x) => [x.service, x]));
+    const byCoverage = new Map(state.flowCoverage.map((x) => [x.service, x]));
+    return state.services.map((s) => {
+      const flow = byFlow.get(s.name) || { protocol: 'unknown', flow_count: 0, maturity: 'none' };
+      const coverage = byCoverage.get(s.name) || { quality: 'unknown', l1_flows: 0 };
+      return {
+        name: s.name,
+        status: s.status,
+        tier: s.support_tier,
+        protocol: flow.protocol,
+        flows: flow.flow_count,
+        quality: coverage.quality,
+      };
+    });
+  }
+
+  function render() {
+    const cards = mergeServiceData();
+    const selected = state.selectedService;
+    const selectedCard = cards.find((c) => c.name === selected);
+
+    root.innerHTML = `
+      <div class=\"studio-layout\">
+        <header class=\"studio-header\">
+          <h1>OpenStack Studio</h1>
+          <p>Service dashboard for guided and raw operations</p>
+        </header>
+        <main class=\"studio-grid\">
+          <section class=\"studio-panel\">
+            <h2>Services</h2>
+            <div class=\"service-list\">
+              ${cards.map((c) => `
+                <button class=\"service-card ${selected === c.name ? 'active' : ''}\" data-service=\"${esc(c.name)}\">
+                  <strong>${esc(c.name)}</strong>
+                  <span>Status: ${esc(c.status)}</span>
+                  <span>Tier: ${esc(c.tier)}</span>
+                  <span>Protocol: ${esc(c.protocol)}</span>
+                  <span>Flows: ${esc(c.flows)}</span>
+                  <span>Coverage: ${esc(c.quality)}</span>
+                </button>
+              `).join('')}
+            </div>
+          </section>
+          <section class=\"studio-panel\">
+            <h2>Service Detail ${selectedCard ? '(' + esc(selectedCard.name) + ')' : ''}</h2>
+            ${selected ? renderDetail() : '<p>Select a service to run guided or raw operations.</p>'}
+          </section>
+          <section class=\"studio-panel\">
+            <h2>History</h2>
+            <div class=\"history-list\">
+              ${state.history.length === 0 ? '<p>No interactions yet.</p>' : state.history.map((h, i) =>
+                `<button class=\"history-item\" data-history=\"${i}\">${esc(h.service)} - ${esc(h.method)} ${esc(h.path)} (${esc(h.status)})</button>`
+              ).join('')}
+            </div>
+          </section>
+        </main>
+      </div>
+    `;
+
+    root.querySelectorAll('[data-service]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        state.selectedService = btn.getAttribute('data-service');
+        try {
+          state.flowDefinition = await getJson('/_localstack/studio-api/flows/' + state.selectedService);
+        } catch (e) {
+          state.flowDefinition = { service: state.selectedService, flows: [], inputs: [] };
+        }
+        render();
+      });
+    });
+
+    root.querySelectorAll('[data-history]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.getAttribute('data-history'));
+        const item = state.history[idx];
+        if (!item) return;
+        state.raw.method = item.method;
+        state.raw.path = item.path;
+        state.raw.body = item.body || '';
+        render();
+      });
+    });
+
+    const rawRun = root.querySelector('[data-run-raw]');
+    if (rawRun) rawRun.addEventListener('click', runRaw);
+    const flowRun = root.querySelector('[data-run-flow]');
+    if (flowRun) flowRun.addEventListener('click', runGuided);
+  }
+
+  function renderDetail() {
+    const flow = state.flowDefinition;
+    return `
+      <div class=\"detail-grid\">
+        <div>
+          <h3>Guided Flow</h3>
+          <p>Flows available: ${esc(flow && flow.flows ? flow.flows.length : 0)}</p>
+          <button data-run-flow ${!flow || !flow.flows || flow.flows.length === 0 ? 'disabled' : ''}>Run first guided flow</button>
+        </div>
+        <div>
+          <h3>Raw Request</h3>
+          <label>Method <input id=\"raw-method\" value=\"${esc(state.raw.method)}\"/></label>
+          <label>Path <input id=\"raw-path\" value=\"${esc(state.raw.path)}\"/></label>
+          <label>Body <textarea id=\"raw-body\">${esc(state.raw.body)}</textarea></label>
+          <button data-run-raw>Run raw request</button>
+          ${state.response ? `<pre>${esc(JSON.stringify(state.response, null, 2))}</pre>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  async function runRaw() {
+    const methodInput = document.getElementById('raw-method');
+    const pathInput = document.getElementById('raw-path');
+    const bodyInput = document.getElementById('raw-body');
+    state.raw.method = (methodInput && methodInput.value || 'GET').toUpperCase();
+    state.raw.path = (pathInput && pathInput.value || '/_localstack/health');
+    state.raw.body = bodyInput ? bodyInput.value : '';
+
+    const opts = { method: state.raw.method, headers: {} };
+    if (state.raw.body) opts.body = state.raw.body;
+    const r = await fetch(state.raw.path, opts);
+    const text = await r.text();
+    state.response = { status: r.status, body: text };
+    state.history.unshift({
+      service: state.selectedService || 'raw',
+      method: state.raw.method,
+      path: state.raw.path,
+      body: state.raw.body,
+      status: r.status,
+    });
+    state.history = state.history.slice(0, 20);
+    render();
+  }
+
+  async function runGuided() {
+    if (!state.flowDefinition || !state.flowDefinition.flows || state.flowDefinition.flows.length === 0) return;
+    const firstFlow = state.flowDefinition.flows[0];
+    for (const step of (firstFlow.steps || [])) {
+      const op = step.operation || {};
+      const method = (op.method || 'GET').toUpperCase();
+      const path = (op.path || '/').replace('{{inputs.resource_name}}', 'studio-resource');
+      const body = op.body || undefined;
+      const r = await fetch(path, { method, body });
+      state.history.unshift({
+        service: state.selectedService || 'guided',
+        method,
+        path,
+        body: body || '',
+        status: r.status,
+      });
+    }
+    state.history = state.history.slice(0, 20);
+    render();
+  }
+
+  async function bootstrap() {
+    const [services, flowCatalog, flowCoverage] = await Promise.all([
+      getJson('/_localstack/studio-api/services'),
+      getJson('/_localstack/studio-api/flows/catalog'),
+      getJson('/_localstack/studio-api/flows/coverage'),
+    ]);
+    state.services = services.services || [];
+    state.flowCatalog = flowCatalog.services || [];
+    state.flowCoverage = flowCoverage.services || [];
+    render();
+  }
+
+  bootstrap().catch((err) => {
+    root.innerHTML = '<pre>Studio dashboard failed to load: ' + esc(err.message || String(err)) + '</pre>';
+  });
+})();
+"#;
+
+const STUDIO_ASSET_CSS: &str = r#":root{color-scheme:light dark;--bg:#0f172a;--fg:#e2e8f0;--card:#1e293b;--muted:#94a3b8;--accent:#22c55e}*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,sans-serif;background:linear-gradient(120deg,#0f172a,#111827);color:var(--fg)}.studio-layout{max-width:1200px;margin:0 auto;padding:20px}.studio-header h1{margin:0}.studio-header p{color:var(--muted)}.studio-grid{display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:16px}.studio-panel{background:color-mix(in oklab,var(--card) 92%,black);border:1px solid #334155;border-radius:12px;padding:12px;min-height:260px}.service-list{display:grid;gap:8px}.service-card{display:grid;text-align:left;gap:2px;padding:8px;border:1px solid #334155;background:#0b1220;color:var(--fg);border-radius:8px;cursor:pointer}.service-card.active{border-color:var(--accent)}.detail-grid{display:grid;gap:12px}label{display:grid;gap:6px;margin:6px 0}input,textarea{width:100%;background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px}button{background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.history-list{display:grid;gap:8px}.history-item{text-align:left}pre{white-space:pre-wrap;overflow:auto;background:#0b1220;padding:8px;border-radius:8px}@media(max-width:1024px){.studio-grid{grid-template-columns:1fr}}"#;
 const STUDIO_GUIDED_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
 /// Adapter that converts `http_body_util::BodyStream<axum::body::Body>` into

@@ -36,6 +36,54 @@ pub struct RawResponse {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StudioUrlResolution {
+    pub url: String,
+    pub source: String,
+    pub daemon_ready: bool,
+}
+
+pub async fn resolve_studio_url(
+    explicit_url: Option<&str>,
+    daemon_health_url: Option<&str>,
+    fallback_base_url: &str,
+) -> StudioUrlResolution {
+    let (base_url, source) = if let Some(url) = explicit_url {
+        (url.to_string(), "explicit")
+    } else if let Some(url) = daemon_health_url {
+        (strip_health_suffix(url), "daemon")
+    } else {
+        (fallback_base_url.to_string(), "fallback")
+    };
+
+    let health_url = format!("{}/_localstack/health", base_url.trim_end_matches('/'));
+    let daemon_ready = if let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(600))
+        .build()
+    {
+        client
+            .get(&health_url)
+            .send()
+            .await
+            .map(|resp| resp.status().is_success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    StudioUrlResolution {
+        url: format!("{}/_localstack/studio", base_url.trim_end_matches('/')),
+        source: source.to_string(),
+        daemon_ready,
+    }
+}
+
+fn strip_health_suffix(url: &str) -> String {
+    url.strip_suffix("/_localstack/health")
+        .unwrap_or(url)
+        .to_string()
+}
+
 impl StudioApiClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {

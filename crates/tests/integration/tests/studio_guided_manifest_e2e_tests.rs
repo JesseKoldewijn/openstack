@@ -51,6 +51,7 @@ async fn guided_coverage_reports_all_matrix_services() {
     assert_eq!(response.status().as_u16(), 200);
     let body: serde_json::Value = response.json().await.unwrap();
     let services = body["services"].as_array().unwrap();
+    assert!(body["counts"]["supported_services"].as_u64().unwrap_or(0) >= 24);
     assert!(services.iter().any(|s| s["service"] == "s3"));
     assert!(services.iter().any(|s| s["service"] == "sqs"));
     assert!(services.iter().any(|s| s["service"] == "lambda"));
