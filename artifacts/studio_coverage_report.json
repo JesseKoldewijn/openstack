@@ -1,0 +1,8 @@
+{
+  "guided": [
+    "s3",
+    "sqs"
+  ],
+  "raw_or_other": "all other registered services",
+  "source": "crates/internal-api/src/studio.rs"
+}

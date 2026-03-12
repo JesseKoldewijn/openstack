@@ -47,6 +47,8 @@ openstack-opensearch = { workspace = true }
 openstack-redshift = { workspace = true }
 openstack-cloudformation = { workspace = true }
 openstack-lambda = { workspace = true }
+openstack-studio-ui = { workspace = true }
 
 [dev-dependencies]
+assert_cmd = "2"
 tokio = { workspace = true }

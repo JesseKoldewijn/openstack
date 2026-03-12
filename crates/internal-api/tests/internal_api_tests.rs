@@ -175,6 +175,11 @@ mod internal_api_tests {
         assert!(body["version"].is_string());
         assert_eq!(body["session_id"], "test-session-id");
         assert!(body["uptime"].is_number());
+        assert_eq!(body["studio"]["enabled"], true);
+        assert_eq!(body["studio"]["base_path"], "/_localstack/studio");
+        assert_eq!(body["studio"]["api_base_path"], "/_localstack/studio-api");
+        assert!(body["daemon"]["managed"].is_boolean());
+        assert!(body["daemon"]["pid"].is_number());
     }
 
     // ── 7.6  GET /_localstack/init ────────────────────────────────────────────
@@ -213,7 +218,41 @@ mod internal_api_tests {
             assert!(first.get("startup_attempts").is_some());
             assert!(first.get("startup_wait_count").is_some());
             assert!(first.get("last_startup_duration_ms").is_some());
+            assert!(first.get("studio_support_tier").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn health_includes_daemon_metadata() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["daemon"]["managed"].is_boolean());
+        assert_eq!(body["daemon"]["status"], "running");
+        assert!(body["daemon"]["pid"].is_number());
+    }
+
+    #[tokio::test]
+    async fn studio_api_services_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/services").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["services"].is_array());
+    }
+
+    #[tokio::test]
+    async fn studio_api_interaction_schema_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/interactions/schema").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["request"]["fields"].is_array());
+        assert!(body["response"]["fields"].is_array());
     }
 
     // ── 7.8  GET /_localstack/diagnose ────────────────────────────────────────

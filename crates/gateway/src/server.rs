@@ -20,6 +20,8 @@ use openstack_config::Config;
 use openstack_service_framework::traits::ResponseBody;
 use openstack_service_framework::{ServicePluginManager, SpooledBody};
 use openstack_state::StateManager;
+use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -53,6 +55,10 @@ const STUDIO_SPA: &str = r#"<!doctype html>
 </body>
 </html>
 "#;
+
+const STUDIO_ASSET_JS: &str = "console.log('openstack studio shell');";
+
+const STUDIO_ASSET_CSS: &str = ":root{color-scheme:light dark}body{margin:0}";
 
 /// Adapter that converts `http_body_util::BodyStream<axum::body::Body>` into
 /// a `futures_core::Stream<Item = Result<Bytes, io::Error>>` suitable for
@@ -120,7 +126,15 @@ impl Gateway {
             plugin_manager: self.plugin_manager.clone(),
             cors,
         };
-        Router::new().fallback(handle_request).with_state(app_state)
+        Router::new()
+            .fallback(handle_request)
+            .layer(ServiceBuilder::new().layer(CompressionLayer::new()))
+            .with_state(app_state)
+    }
+
+    #[doc(hidden)]
+    pub fn build_app_for_tests(&self) -> Router {
+        self.build_app()
     }
 
     /// Run the gateway using a pre-bound listener and an external shutdown signal.
@@ -245,6 +259,10 @@ async fn handle_request(
     }
 
     // Studio SPA routes are resolved before generic AWS inference.
+    if is_studio_asset_route(&path) {
+        return studio_asset_response(&path);
+    }
+
     if is_studio_spa_route(&path) {
         return studio_spa_response();
     }
@@ -418,12 +436,35 @@ fn is_studio_spa_route(path: &str) -> bool {
         || path.starts_with("/_localstack/studio/")
 }
 
+fn is_studio_asset_route(path: &str) -> bool {
+    path == "/_localstack/studio/assets/app.js" || path == "/_localstack/studio/assets/app.css"
+}
+
 fn studio_spa_response() -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/html; charset=utf-8")
-        .header("cache-control", "public, max-age=60")
+        .header("cache-control", "no-cache")
+        .header("etag", "\"studio-shell-v1\"")
         .body(Body::from(STUDIO_SPA))
+        .unwrap_or_default()
+}
+
+fn studio_asset_response(path: &str) -> Response {
+    let (content_type, body) = match path {
+        "/_localstack/studio/assets/app.js" => {
+            ("application/javascript; charset=utf-8", STUDIO_ASSET_JS)
+        }
+        "/_localstack/studio/assets/app.css" => ("text/css; charset=utf-8", STUDIO_ASSET_CSS),
+        _ => ("text/plain; charset=utf-8", "Not found"),
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", content_type)
+        .header("cache-control", "public, max-age=31536000, immutable")
+        .header("etag", "\"studio-asset-v1\"")
+        .body(Body::from(body))
         .unwrap_or_default()
 }
 

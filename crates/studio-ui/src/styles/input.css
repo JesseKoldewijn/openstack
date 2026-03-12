@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: oklch(98% 0.01 220);
+  --color-fg: oklch(18% 0.02 250);
+  --color-surface: oklch(100% 0 0);
+  --color-border: oklch(85% 0.01 240);
+  --color-accent: oklch(62% 0.16 250);
+}
+
+:root[data-theme="dark"] {
+  --color-bg: oklch(14% 0.01 250);
+  --color-fg: oklch(94% 0.01 250);
+  --color-surface: oklch(19% 0.01 250);
+  --color-border: oklch(30% 0.01 250);
+  --color-accent: oklch(73% 0.13 250);
+}

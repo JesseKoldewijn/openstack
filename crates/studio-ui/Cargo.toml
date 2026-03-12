@@ -1,0 +1,19 @@
+[package]
+name = "openstack-studio-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "openstack_studio_ui"
+path = "src/lib.rs"
+
+[dependencies]
+leptos = { version = "0.7", default-features = false, features = ["ssr"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

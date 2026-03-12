@@ -107,6 +107,23 @@ jobs:
             echo "| OS | \\`${{ matrix.os }}\\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  studio-ui-gates:
+    name: Studio UI Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-studio-ui
+          key: studio-ui-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run Studio crate tests
+        run: cargo test -p openstack-studio-ui
+      - name: Run Studio integration E2E tests
+        run: cargo test -p openstack-integration-tests --test studio_e2e_tests
+        env:
+          SKIP_DOCKER_TESTS: "1"
+
   build:
     name: Build (release)
     runs-on: ubuntu-latest
@@ -212,6 +229,22 @@ jobs:
             echo "|---|---|"
             echo "| Result | \\`${{ job.status }}\\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  studio-coverage:
+    name: Studio Coverage Report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Studio coverage report
+        run: python3 scripts/studio_coverage_report.py
+
+  studio-performance-budget:
+    name: Studio Asset Budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Studio asset budget
+        run: scripts/check_studio_asset_budget.sh
 
   parity-core:
     name: Parity (core)

@@ -2,15 +2,20 @@
 
 #[cfg(test)]
 mod gateway_tests {
+    use axum::body::Body;
     use axum::http::{HeaderMap, HeaderValue, Method};
+    use axum::http::{Request, StatusCode};
     use openstack_config::{
         Config, CorsConfig, Directories, LogLevel, ServicesConfig, SnapshotLoadStrategy,
         SnapshotSaveStrategy,
     };
+    use openstack_gateway::Gateway;
     use openstack_gateway::cors::CorsHandler;
     use openstack_gateway::sigv4::{
         DEFAULT_ACCOUNT_ID, access_key_to_account_id, is_valid_region, parse_sigv4_auth,
     };
+    use openstack_service_framework::ServicePluginManager;
+    use tower::ServiceExt;
 
     fn test_config() -> Config {
         Config {
@@ -164,5 +169,97 @@ mod gateway_tests {
         let mut response_headers = HeaderMap::new();
         handler.add_cors_headers(&mut response_headers, Some("http://example.com"));
         assert!(!response_headers.contains_key("access-control-allow-origin"));
+    }
+
+    #[tokio::test]
+    async fn studio_spa_route_returns_html_with_cache_headers() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio/services/s3")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-cache"
+        );
+        assert!(resp.headers().get("etag").is_some());
+    }
+
+    #[tokio::test]
+    async fn studio_asset_route_returns_cacheable_asset_headers() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio/assets/app.js")
+            .header("accept-encoding", "gzip")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+        assert!(resp.headers().get("etag").is_some());
+    }
+
+    #[tokio::test]
+    async fn studio_api_route_takes_internal_precedence() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio-api/services")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("services").is_some());
+    }
+
+    #[tokio::test]
+    async fn aws_route_non_regression_for_unknown_service() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef",
+            )
+            .body(Body::from(""))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
