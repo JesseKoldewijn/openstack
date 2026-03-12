@@ -34,6 +34,18 @@ async fn main() -> anyhow::Result<()> {
         report.summary.failed,
         report.summary.accepted_differences
     );
+    println!(
+        "persistence modes: openstack={:?}, localstack={:?}, equivalent={}",
+        report.openstack_persistence_mode,
+        report.localstack_persistence_mode,
+        report.persistence_mode_equivalent
+    );
+    if !report.summary.persistence_failure_classes.is_empty() {
+        println!("persistence failure classes:");
+        for (kind, count) in &report.summary.persistence_failure_classes {
+            println!("  - {}: {}", kind, count);
+        }
+    }
 
     if report.summary.failed > 0 {
         std::process::exit(1);

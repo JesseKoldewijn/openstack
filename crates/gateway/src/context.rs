@@ -41,6 +41,15 @@ impl RequestContext {
     pub fn to_service_request_context(
         &self,
     ) -> openstack_service_framework::traits::RequestContext {
+        let mut headers = std::collections::HashMap::with_capacity(self.headers.len());
+        for (k, v) in &self.headers {
+            headers.insert(k.clone(), v.clone());
+        }
+        let mut query_params = std::collections::HashMap::with_capacity(self.query_params.len());
+        for (k, v) in &self.query_params {
+            query_params.insert(k.clone(), v.clone());
+        }
+
         openstack_service_framework::traits::RequestContext {
             service: self.service.clone(),
             operation: self.operation.clone(),
@@ -48,10 +57,10 @@ impl RequestContext {
             account_id: self.account_id.clone(),
             request_body: self.params.clone(),
             raw_body: self.raw_body.clone(),
-            headers: self.headers.clone(),
+            headers,
             path: self.path.clone(),
             method: self.method.clone(),
-            query_params: self.query_params.clone(),
+            query_params,
         }
     }
 }

@@ -208,6 +208,11 @@ mod internal_api_tests {
         let (status, body) = get_json(&router, "/_localstack/plugins").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["plugins"].is_array());
+        if let Some(first) = body["plugins"].as_array().and_then(|a| a.first()) {
+            assert!(first.get("startup_attempts").is_some());
+            assert!(first.get("startup_wait_count").is_some());
+            assert!(first.get("last_startup_duration_ms").is_some());
+        }
     }
 
     // ── 7.8  GET /_localstack/diagnose ────────────────────────────────────────

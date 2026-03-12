@@ -134,20 +134,24 @@ def build_markdown(report_dir: str, include_gate: bool) -> str:
         lines.extend(
             [
                 "",
-                "| Service | Scenarios | Skipped | p95 ratio | p99 ratio | Throughput ratio |",
-                "|---|---:|---:|---:|---:|---:|",
+                "| Service | Class | Durability | Scenarios | Skipped | p95 ratio | p99 ratio | Throughput ratio | Envelope breaches |",
+                "|---|---|---|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for service in sorted(per_service.keys()):
             entry = per_service[service]
+            breaches = entry.get("class_envelope_breaches", [])
             lines.append(
-                "| {service} | {scenarios} | {skipped} | {p95} | {p99} | {tp} |".format(
+                "| {service} | {clazz} | {durability} | {scenarios} | {skipped} | {p95} | {p99} | {tp} | {breaches} |".format(
                     service=service,
+                    clazz=entry.get("service_execution_class", "n/a"),
+                    durability=entry.get("service_durability_class", "n/a"),
                     scenarios=entry.get("total_scenarios", 0),
                     skipped=entry.get("skipped_scenarios", 0),
                     p95=fmt(entry.get("avg_latency_p95_ratio")),
                     p99=fmt(entry.get("avg_latency_p99_ratio")),
                     tp=fmt(entry.get("avg_throughput_ratio")),
+                    breaches=len(breaches),
                 )
             )
 
@@ -194,11 +198,14 @@ class ConsolidatedReportTests(unittest.TestCase):
                     "avg_throughput_ratio": 0.95,
                     "per_service": {
                         "s3": {
+                            "service_execution_class": "in-proc-stateful",
+                            "service_durability_class": "durable",
                             "total_scenarios": 1,
                             "skipped_scenarios": 0,
                             "avg_latency_p95_ratio": 1.2,
                             "avg_latency_p99_ratio": 1.3,
                             "avg_throughput_ratio": 0.9,
+                            "class_envelope_breaches": [],
                         }
                     },
                 }
@@ -222,6 +229,7 @@ class ConsolidatedReportTests(unittest.TestCase):
             self.assertIn("Regression Gate Verdicts", content)
             self.assertIn("Fair Low", content)
             self.assertIn("s3", content)
+            self.assertIn("in-proc-stateful", content)
 
 
 def run_tests() -> int:

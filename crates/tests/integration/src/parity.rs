@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::classification::{
+    PersistenceMode, ServiceDurabilityClass, ServiceExecutionClass, parse_persistence_mode,
+    service_durability_class, service_execution_class,
+};
 use crate::harness::TestHarness;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +25,7 @@ pub enum ProtocolFamily {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParityConfig {
+    pub openstack_image: Option<String>,
     pub localstack_image: String,
     pub report_dir: PathBuf,
     pub known_differences_path: PathBuf,
@@ -30,6 +35,8 @@ pub struct ParityConfig {
     pub openstack_endpoint: Option<String>,
     pub localstack_endpoint: Option<String>,
     pub target_services: Option<Vec<String>>,
+    pub openstack_persistence_mode: PersistenceMode,
+    pub localstack_persistence_mode: PersistenceMode,
 }
 
 impl Default for ParityConfig {
@@ -86,6 +93,7 @@ impl Default for ParityConfig {
         );
 
         Self {
+            openstack_image: std::env::var("PARITY_OPENSTACK_IMAGE").ok(),
             localstack_image: std::env::var("PARITY_LOCALSTACK_IMAGE")
                 .unwrap_or_else(|_| "localstack/localstack:3.7.2".to_string()),
             report_dir: PathBuf::from("target/parity-reports"),
@@ -96,6 +104,14 @@ impl Default for ParityConfig {
             openstack_endpoint: std::env::var("PARITY_OPENSTACK_ENDPOINT").ok(),
             localstack_endpoint: std::env::var("PARITY_LOCALSTACK_ENDPOINT").ok(),
             target_services: None,
+            openstack_persistence_mode: std::env::var("PARITY_OPENSTACK_PERSISTENCE_MODE")
+                .ok()
+                .and_then(|v| parse_persistence_mode(&v))
+                .unwrap_or(PersistenceMode::NonDurable),
+            localstack_persistence_mode: std::env::var("PARITY_LOCALSTACK_PERSISTENCE_MODE")
+                .ok()
+                .and_then(|v| parse_persistence_mode(&v))
+                .unwrap_or(PersistenceMode::NonDurable),
         }
     }
 }
@@ -147,6 +163,8 @@ pub struct Scenario {
     pub steps: Vec<ScenarioStep>,
     pub assertions: Vec<ScenarioStep>,
     pub cleanup: Vec<ScenarioStep>,
+    #[serde(default)]
+    pub requires_restart: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +198,8 @@ pub struct StepTrace {
 pub struct ScenarioResult {
     pub scenario_id: String,
     pub service: String,
+    pub service_execution_class: Option<ServiceExecutionClass>,
+    pub service_durability_class: Option<ServiceDurabilityClass>,
     pub passed: bool,
     pub accepted_differences: usize,
     pub mismatches: Vec<Mismatch>,
@@ -206,10 +226,13 @@ pub struct ParitySummary {
     pub failed: usize,
     pub accepted_differences: usize,
     pub per_service_score: BTreeMap<String, ServiceScore>,
+    pub persistence_failure_classes: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceScore {
+    pub service_execution_class: Option<ServiceExecutionClass>,
+    pub service_durability_class: Option<ServiceDurabilityClass>,
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
@@ -222,6 +245,9 @@ pub struct ParityReport {
     pub generated_at: String,
     pub openstack_endpoint: String,
     pub localstack_endpoint: String,
+    pub openstack_persistence_mode: PersistenceMode,
+    pub localstack_persistence_mode: PersistenceMode,
+    pub persistence_mode_equivalent: bool,
     pub summary: ParitySummary,
     pub results: Vec<ScenarioResult>,
 }
@@ -295,9 +321,19 @@ pub async fn run_profile(
         generated_at: Utc::now().to_rfc3339(),
         openstack_endpoint: manager.openstack.endpoint.clone(),
         localstack_endpoint: manager.localstack.endpoint.clone(),
+        openstack_persistence_mode: config.openstack_persistence_mode,
+        localstack_persistence_mode: config.localstack_persistence_mode,
+        persistence_mode_equivalent: config.openstack_persistence_mode
+            == config.localstack_persistence_mode,
         summary,
         results,
     };
+
+    let profile_path = config
+        .report_dir
+        .join(format!("{profile_name}-latest.json"));
+    let profile_json = serde_json::to_string_pretty(&report)?;
+    std::fs::write(profile_path, profile_json)?;
 
     let report_path = config.report_dir.join(format!("{run_id}.json"));
     let report_json = serde_json::to_string_pretty(&report)?;
@@ -371,16 +407,30 @@ fn summarize_results(results: &[ScenarioResult]) -> ParitySummary {
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut accepted_differences = 0usize;
+    let mut persistence_failure_classes: BTreeMap<String, usize> = BTreeMap::new();
 
     for result in results {
         let score = per_service_score
             .entry(result.service.clone())
             .or_insert(ServiceScore {
+                service_execution_class: result.service_execution_class,
+                service_durability_class: result.service_durability_class,
                 total: 0,
                 passed: 0,
                 failed: 0,
             });
         score.total += 1;
+
+        for mismatch in &result.mismatches {
+            if mismatch.kind == "persistence_mode_mismatch"
+                || mismatch.kind == "persistence_recovery_inconsistency"
+                || mismatch.kind == "persistence_durability_mismatch"
+            {
+                *persistence_failure_classes
+                    .entry(mismatch.kind.clone())
+                    .or_insert(0) += 1;
+            }
+        }
 
         accepted_differences += result.accepted_differences;
         if result.passed {
@@ -398,6 +448,7 @@ fn summarize_results(results: &[ScenarioResult]) -> ParitySummary {
         failed,
         accepted_differences,
         per_service_score,
+        persistence_failure_classes,
     }
 }
 
@@ -407,8 +458,50 @@ async fn run_scenario(
     known_differences: &[KnownDifferenceRule],
     config: &ParityConfig,
 ) -> ScenarioResult {
+    let service_execution_class = service_execution_class(&scenario.service);
+    let service_durability_class = service_durability_class(&scenario.service);
+
     let mut openstack_context = HashMap::new();
     let mut localstack_context = HashMap::new();
+
+    if scenario.requires_restart {
+        let openstack_restart = reqwest::Client::new()
+            .post(format!("{}/_localstack/health", manager.openstack.endpoint))
+            .send()
+            .await;
+        let localstack_restart = reqwest::Client::new()
+            .post(format!(
+                "{}/_localstack/health",
+                manager.localstack.endpoint
+            ))
+            .send()
+            .await;
+
+        if openstack_restart.is_err() || localstack_restart.is_err() {
+            let mut mismatches = vec![Mismatch {
+                scenario_id: scenario.id.clone(),
+                service: scenario.service.clone(),
+                step_id: "restart".to_string(),
+                path: "lifecycle".to_string(),
+                kind: "persistence_recovery_inconsistency".to_string(),
+                openstack: format!("{:?}", openstack_restart.err()),
+                localstack: format!("{:?}", localstack_restart.err()),
+                accepted_difference_id: None,
+            }];
+            dedupe_mismatches(&mut mismatches);
+            return ScenarioResult {
+                scenario_id: scenario.id.clone(),
+                service: scenario.service.clone(),
+                service_execution_class,
+                service_durability_class,
+                passed: false,
+                accepted_differences: 0,
+                mismatches,
+                openstack_traces: Vec::new(),
+                localstack_traces: Vec::new(),
+            };
+        }
+    }
 
     let openstack_traces = run_steps(
         &manager.openstack.endpoint,
@@ -438,6 +531,19 @@ async fn run_scenario(
         &mut mismatches,
     );
 
+    if config.openstack_persistence_mode != config.localstack_persistence_mode {
+        mismatches.push(Mismatch {
+            scenario_id: scenario.id.clone(),
+            service: scenario.service.clone(),
+            step_id: "persistence".to_string(),
+            path: "mode".to_string(),
+            kind: "persistence_mode_mismatch".to_string(),
+            openstack: format!("{:?}", config.openstack_persistence_mode),
+            localstack: format!("{:?}", config.localstack_persistence_mode),
+            accepted_difference_id: None,
+        });
+    }
+
     dedupe_mismatches(&mut mismatches);
     for mismatch in &mut mismatches {
         if let Some(rule) = match_known_difference(mismatch, known_differences) {
@@ -458,6 +564,8 @@ async fn run_scenario(
     ScenarioResult {
         scenario_id: scenario.id.clone(),
         service: scenario.service.clone(),
+        service_execution_class,
+        service_durability_class,
         passed: unaccepted == 0,
         accepted_differences,
         mismatches,
@@ -1039,6 +1147,7 @@ fn validate_known_differences(rules: &[KnownDifferenceRule]) -> anyhow::Result<(
 pub struct TargetManager {
     pub openstack: ManagedTarget,
     pub localstack: ManagedTarget,
+    openstack_container_id: Option<String>,
     localstack_container_id: Option<String>,
     openstack_harness: Option<TestHarness>,
 }
@@ -1055,18 +1164,47 @@ impl TargetManager {
             .unwrap_or_else(|| vec!["s3".into(), "sqs".into(), "dynamodb".into(), "sts".into()]);
         let services = target_services.join(",");
 
-        let (openstack, openstack_harness) = if let Some(endpoint) = &config.openstack_endpoint {
-            (
-                ManagedTarget {
-                    endpoint: endpoint.clone(),
-                },
-                None,
-            )
-        } else {
-            let harness = TestHarness::start_services(&services).await;
-            let endpoint = harness.base_url.clone();
-            (ManagedTarget { endpoint }, Some(harness))
-        };
+        let (openstack, openstack_harness, openstack_container_id) =
+            if let Some(endpoint) = &config.openstack_endpoint {
+                (
+                    ManagedTarget {
+                        endpoint: endpoint.clone(),
+                    },
+                    None,
+                    None,
+                )
+            } else if let Some(image) = &config.openstack_image {
+                let port = free_port()?;
+                let endpoint = format!("http://127.0.0.1:{port}");
+                let output = Command::new("docker")
+                    .args([
+                        "run",
+                        "-d",
+                        "-p",
+                        &format!("127.0.0.1:{port}:4566"),
+                        "-e",
+                        &format!("SERVICES={services}"),
+                        "-e",
+                        "DEBUG=1",
+                        image,
+                    ])
+                    .output()?;
+
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!(
+                        "failed to start openstack image target: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+
+                let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                wait_for_health(&endpoint, Duration::from_secs(60)).await?;
+                (ManagedTarget { endpoint }, None, Some(container_id))
+            } else {
+                let harness = TestHarness::start_services(&services).await;
+                let endpoint = harness.base_url.clone();
+                (ManagedTarget { endpoint }, Some(harness), None)
+            };
 
         let (localstack, container_id) = if let Some(endpoint) = &config.localstack_endpoint {
             (
@@ -1113,12 +1251,20 @@ impl TargetManager {
         Ok(Self {
             openstack,
             localstack,
+            openstack_container_id,
             localstack_container_id: container_id,
             openstack_harness,
         })
     }
 
     pub async fn stop(&mut self) {
+        if let Some(container_id) = &self.openstack_container_id {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", container_id])
+                .output();
+        }
+        self.openstack_container_id = None;
+
         if let Some(container_id) = &self.localstack_container_id {
             let _ = Command::new("docker")
                 .args(["rm", "-f", container_id])
@@ -1263,6 +1409,7 @@ pub fn default_scenarios(run_id: &str) -> Vec<Scenario> {
                     capture_json: None,
                 },
             ],
+            requires_restart: false,
         },
         Scenario {
             id: "sqs-basic-lifecycle".to_string(),
@@ -1347,6 +1494,7 @@ pub fn default_scenarios(run_id: &str) -> Vec<Scenario> {
                 expect_success: true,
                 capture_json: None,
             }],
+            requires_restart: false,
         },
         Scenario {
             id: "dynamodb-basic-lifecycle".to_string(),
@@ -1425,6 +1573,7 @@ pub fn default_scenarios(run_id: &str) -> Vec<Scenario> {
                 expect_success: true,
                 capture_json: None,
             }],
+            requires_restart: false,
         },
         Scenario {
             id: "sts-identity-and-error".to_string(),
@@ -1456,6 +1605,7 @@ pub fn default_scenarios(run_id: &str) -> Vec<Scenario> {
             ],
             assertions: vec![],
             cleanup: vec![],
+            requires_restart: false,
         },
         Scenario {
             id: "compat-services-env-behavior".to_string(),
@@ -1492,13 +1642,15 @@ pub fn default_scenarios(run_id: &str) -> Vec<Scenario> {
             ],
             assertions: vec![],
             cleanup: vec![],
+            requires_restart: false,
         },
     ]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_xml;
+    use super::{Mismatch, ScenarioResult, normalize_xml, summarize_results};
+    use crate::classification::{ServiceDurabilityClass, ServiceExecutionClass};
 
     #[test]
     fn normalize_xml_removes_additional_error_details_footer() {
@@ -1509,6 +1661,39 @@ mod tests {
         assert_eq!(
             normalized,
             "aws: [ERROR]: An error occurred (InternalFailure) when calling the ListTopics operation: Service 'sns' is not enabled. Please check your 'SERVICES' configuration variable.",
+        );
+    }
+
+    #[test]
+    fn summarize_results_collects_persistence_failure_classes() {
+        let result = ScenarioResult {
+            scenario_id: "s3-persistence-restart".to_string(),
+            service: "s3".to_string(),
+            service_execution_class: Some(ServiceExecutionClass::InProcStateful),
+            service_durability_class: Some(ServiceDurabilityClass::Durable),
+            passed: false,
+            accepted_differences: 0,
+            mismatches: vec![Mismatch {
+                scenario_id: "s3-persistence-restart".to_string(),
+                service: "s3".to_string(),
+                step_id: "persistence".to_string(),
+                path: "mode".to_string(),
+                kind: "persistence_mode_mismatch".to_string(),
+                openstack: "Durable".to_string(),
+                localstack: "NonDurable".to_string(),
+                accepted_difference_id: None,
+            }],
+            openstack_traces: Vec::new(),
+            localstack_traces: Vec::new(),
+        };
+
+        let summary = summarize_results(&[result]);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(
+            summary
+                .persistence_failure_classes
+                .get("persistence_mode_mismatch"),
+            Some(&1)
         );
     }
 }

@@ -17,6 +17,7 @@ env:
   PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
   PARITY_BENCHMARK_RUNTIME_MODE: symmetric-docker
   PARITY_BENCHMARK_EXECUTION_ORDER: alternating
+  PARITY_BENCHMARK_LANE_MODE: harness-influenced
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
   PARITY_DOCKER_NETWORK_MODE: bridge
@@ -154,6 +155,46 @@ jobs:
             echo "| Result | \\`${{ job.status }}\\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  prepare-openstack-runtime-image:
+    name: Prepare OpenStack runtime image
+    runs-on: ubuntu-latest
+    outputs:
+      openstack_runtime_image_ref: ${{ steps.runtime_meta.outputs.image_ref }}
+      openstack_runtime_image_id: ${{ steps.runtime_id.outputs.image_id }}
+      openstack_runtime_image_artifact: ${{ steps.runtime_meta.outputs.image_artifact }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute deterministic runtime image reference
+        id: runtime_meta
+        run: |
+          set -euo pipefail
+          image_ref="openstack-runtime-ci:${{ github.run_id }}-${{ github.sha }}"
+          echo "image_ref=${image_ref}" >> "$GITHUB_OUTPUT"
+          echo "image_artifact=openstack-runtime-image-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+      - name: Build OpenStack runtime image once
+        run: |
+          set -euo pipefail
+          docker build --target runtime -t "${{ steps.runtime_meta.outputs.image_ref }}" .
+      - name: Capture immutable runtime image id
+        id: runtime_id
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect "${{ steps.runtime_meta.outputs.image_ref }}" --format '{{.Id}}')"
+          echo "image_id=${image_id}" >> "$GITHUB_OUTPUT"
+          echo "image_id=${image_id}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Export runtime image as artifact
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker save "${{ steps.runtime_meta.outputs.image_ref }}" -o /tmp/openstack-runtime-image.tar
+      - name: Upload runtime image artifact
+        if: env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.runtime_meta.outputs.image_artifact }}
+          path: /tmp/openstack-runtime-image.tar
+          retention-days: 2
+
   validate-harness-coverage:
     name: Validate Harness Coverage
     runs-on: ubuntu-latest
@@ -175,6 +216,10 @@ jobs:
   parity-core:
     name: Parity (core)
     runs-on: ubuntu-latest
+    needs: [prepare-openstack-runtime-image]
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -206,6 +251,39 @@ jobs:
             fi
           fi
           aws --version
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
+          fi
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
+          fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
+            echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
+            exit 1
+          fi
       - name: Preflight parity environment
         run: |
           set -euo pipefail
@@ -258,6 +336,10 @@ jobs:
     name: Parity (all-services-smoke full)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    needs: [prepare-openstack-runtime-image]
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -289,6 +371,39 @@ jobs:
             fi
           fi
           aws --version
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
+          fi
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
+          fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
+            echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
+            exit 1
+          fi
       - name: Preflight parity environment
         run: |
           set -euo pipefail
@@ -298,6 +413,8 @@ jobs:
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity all-services smoke full profile
         run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
+      - name: Validate parity lifecycle latest report exists
+        run: test -f target/parity-reports/all-services-smoke-latest.json
       - name: Add parity full table to workflow summary
         if: always()
         run: |
@@ -336,6 +453,10 @@ jobs:
     name: Parity (all-services-smoke fast)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' && github.base_ref != 'main'
+    needs: [prepare-openstack-runtime-image]
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -367,6 +488,39 @@ jobs:
             fi
           fi
           aws --version
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
+          fi
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
+          fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
+            echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
+            exit 1
+          fi
       - name: Preflight parity environment
         run: |
           set -euo pipefail
@@ -376,6 +530,8 @@ jobs:
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity all-services smoke fast profile
         run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke-fast
+      - name: Validate parity lifecycle latest report exists
+        run: test -f target/parity-reports/all-services-smoke-fast-latest.json
       - name: Add parity fast table to workflow summary
         if: always()
         run: |
@@ -414,6 +570,10 @@ jobs:
     name: Benchmark (all-services-smoke full)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    needs: [prepare-openstack-runtime-image]
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -445,15 +605,54 @@ jobs:
             fi
           fi
           aws --version
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
+          fi
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
+          fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
+            echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
+            exit 1
+          fi
       - name: Preflight benchmark environment
         run: |
           set -euo pipefail
           command -v aws
           aws --version
           docker --version
-          docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run benchmark fairness medium core profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
+      - name: Validate benchmark latest report exists
+        run: test -f target/benchmark-reports/fair-medium-core-latest.json
+      - name: Run benchmark fairness medium core isolated direct-http profile
+        env:
+          PARITY_BENCHMARK_LANE_MODE: low-overhead
+          PARITY_BENCHMARK_EXECUTION_DRIVER: direct-http
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
       - name: Enforce memory budget (main core lane)
         run: |
@@ -490,6 +689,7 @@ jobs:
             --p95-limit 8 \
             --p99-limit 12 \
             --throughput-limit 8 \
+            --warning-mode \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-json "target/benchmark-reports/benchmark-gate-fair-medium-core-${{ github.run_id }}.json" \
             --output-markdown "benchmark_gate_full_summary.md"
@@ -513,6 +713,14 @@ jobs:
             --include-gate \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-path "benchmark_consolidated_summary.md"
+      - name: Add benchmark progress dashboard to workflow summary
+        if: always()
+        run: |
+          python3 scripts/benchmark_progress_dashboard.py \
+            --report-dir "target/benchmark-reports" \
+            --parity-dir "target/parity-reports" \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_progress_dashboard.md"
       - name: Upload benchmark full report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -525,6 +733,10 @@ jobs:
     name: Benchmark (all-services-smoke fast)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' && github.base_ref != 'main'
+    needs: [prepare-openstack-runtime-image]
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -556,15 +768,54 @@ jobs:
             fi
           fi
           aws --version
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
+          fi
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
+          fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
+            echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
+            exit 1
+          fi
       - name: Preflight benchmark environment
         run: |
           set -euo pipefail
           command -v aws
           aws --version
           docker --version
-          docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run benchmark fairness low core profile
+        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low-core
+      - name: Validate benchmark latest report exists
+        run: test -f target/benchmark-reports/fair-low-core-latest.json
+      - name: Run benchmark fairness low core isolated direct-http profile
+        env:
+          PARITY_BENCHMARK_LANE_MODE: low-overhead
+          PARITY_BENCHMARK_EXECUTION_DRIVER: direct-http
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low-core
       - name: Enforce memory budget (non-main core lane)
         run: |
@@ -601,6 +852,7 @@ jobs:
             --p95-limit 8 \
             --p99-limit 12 \
             --throughput-limit 8 \
+            --warning-mode \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-json "target/benchmark-reports/benchmark-gate-fair-low-core-${{ github.run_id }}.json" \
             --output-markdown "benchmark_gate_fast_summary.md"
@@ -624,6 +876,14 @@ jobs:
             --include-gate \
             --summary-path "$GITHUB_STEP_SUMMARY" \
             --output-path "benchmark_consolidated_summary.md"
+      - name: Add benchmark progress dashboard to workflow summary
+        if: always()
+        run: |
+          python3 scripts/benchmark_progress_dashboard.py \
+            --report-dir "target/benchmark-reports" \
+            --parity-dir "target/parity-reports" \
+            --summary-path "$GITHUB_STEP_SUMMARY" \
+            --output-path "benchmark_progress_dashboard.md"
       - name: Upload benchmark fast report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -637,6 +897,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     continue-on-error: true
+    needs: [prepare-openstack-runtime-image]
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -668,6 +932,37 @@ jobs:
             fi
           fi
           aws --version
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
+          fi
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
+          fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
+          if ! timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version > /dev/null; then
+            echo "Runtime image smoke check failed (--version)"
+            exit 1
+          fi
       - name: Preflight parity environment
         run: |
           set -euo pipefail
@@ -690,6 +985,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     continue-on-error: true
+    needs: [prepare-openstack-runtime-image]
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -721,15 +1020,43 @@ jobs:
             fi
           fi
           aws --version
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
+          fi
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
+          fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
       - name: Preflight benchmark environment
         run: |
           set -euo pipefail
           command -v aws
           aws --version
           docker --version
-          docker pull "$PARITY_OPENSTACK_IMAGE"
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run benchmark fairness medium core profile
+        env:
+          PARITY_BENCHMARK_EXECUTION_DRIVER: direct-http
         run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
       - name: Add benchmark push summary
         if: always()

@@ -8,6 +8,15 @@ use crate::container::ServiceContainer;
 use crate::lifecycle::ServiceState;
 use crate::traits::{DispatchError, DispatchResponse, RequestContext, ServiceProvider};
 
+#[derive(Debug, Clone)]
+pub struct ServiceManagerMetrics {
+    pub service: String,
+    pub state: ServiceState,
+    pub startup_attempts: usize,
+    pub startup_wait_count: usize,
+    pub last_startup_duration_ms: u64,
+}
+
 /// Central registry and dispatcher for service providers.
 #[derive(Clone)]
 pub struct ServicePluginManager {
@@ -83,6 +92,22 @@ impl ServicePluginManager {
                 }
             });
         }
+    }
+
+    pub async fn service_runtime_metrics(&self) -> Vec<ServiceManagerMetrics> {
+        let mut metrics = Vec::new();
+        for entry in self.containers.iter() {
+            let container = entry.value();
+            let runtime = container.runtime_metrics();
+            metrics.push(ServiceManagerMetrics {
+                service: entry.key().clone(),
+                state: container.current_state().await,
+                startup_attempts: runtime.startup_attempts,
+                startup_wait_count: runtime.startup_wait_count,
+                last_startup_duration_ms: runtime.last_startup_duration_ms,
+            });
+        }
+        metrics
     }
 
     /// Stop all registered services.

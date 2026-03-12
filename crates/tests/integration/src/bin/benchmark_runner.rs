@@ -43,6 +43,14 @@ async fn main() -> anyhow::Result<()> {
         report.summary.openstack_error_count,
         report.summary.localstack_error_count
     );
+    println!(
+        "lane mode: {:?}; execution driver: {:?}; persistence modes: openstack={:?}, localstack={:?}, equivalent={}",
+        report.runtime.benchmark_lane_mode,
+        report.runtime.execution_driver,
+        report.runtime.openstack_persistence_mode,
+        report.runtime.localstack_persistence_mode,
+        report.runtime.persistence_mode_equivalent
+    );
 
     if let Some(v) = report.summary.avg_latency_p95_ratio {
         println!("average p95 ratio (OS/LS): {v:.3}");
@@ -86,9 +94,21 @@ async fn main() -> anyhow::Result<()> {
             .map(|v| format!("{v:.3}"))
             .unwrap_or_else(|| "n/a".to_string());
         println!(
-            "  - {service}: scenarios={}, skipped={}, p95_ratio={}, p99_ratio={}, throughput_ratio={}",
-            summary.total_scenarios, summary.skipped_scenarios, p95, p99, throughput
+            "  - {service}: class={:?}, durability={:?}, scenarios={}, skipped={}, p95_ratio={}, p99_ratio={}, throughput_ratio={}",
+            summary.service_execution_class,
+            summary.service_durability_class,
+            summary.total_scenarios,
+            summary.skipped_scenarios,
+            p95,
+            p99,
+            throughput
         );
+        if !summary.class_envelope_breaches.is_empty() {
+            println!(
+                "    envelope breaches: {}",
+                summary.class_envelope_breaches.join(", ")
+            );
+        }
     }
 
     Ok(())

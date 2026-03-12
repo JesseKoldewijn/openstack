@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
@@ -12,6 +13,16 @@ pub struct ServiceContainer {
     pub provider: Arc<dyn ServiceProvider>,
     state: Arc<RwLock<ServiceState>>,
     init_lock: Arc<Mutex<()>>,
+    startup_attempts: AtomicUsize,
+    startup_wait_count: AtomicUsize,
+    last_startup_duration_ms: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceRuntimeMetrics {
+    pub startup_attempts: usize,
+    pub startup_wait_count: usize,
+    pub last_startup_duration_ms: u64,
 }
 
 impl ServiceContainer {
@@ -20,6 +31,17 @@ impl ServiceContainer {
             provider,
             state: Arc::new(RwLock::new(ServiceState::Available)),
             init_lock: Arc::new(Mutex::new(())),
+            startup_attempts: AtomicUsize::new(0),
+            startup_wait_count: AtomicUsize::new(0),
+            last_startup_duration_ms: AtomicU64::new(0),
+        }
+    }
+
+    pub fn runtime_metrics(&self) -> ServiceRuntimeMetrics {
+        ServiceRuntimeMetrics {
+            startup_attempts: self.startup_attempts.load(Ordering::Relaxed),
+            startup_wait_count: self.startup_wait_count.load(Ordering::Relaxed),
+            last_startup_duration_ms: self.last_startup_duration_ms.load(Ordering::Relaxed),
         }
     }
 
@@ -45,6 +67,7 @@ impl ServiceContainer {
         }
 
         // Acquire the init lock to prevent double-initialization
+        self.startup_wait_count.fetch_add(1, Ordering::Relaxed);
         let _lock = self.init_lock.lock().await;
 
         // Re-check after acquiring lock
@@ -62,9 +85,15 @@ impl ServiceContainer {
         }
 
         info!("Starting service: {}", self.provider.service_name());
+        self.startup_attempts.fetch_add(1, Ordering::Relaxed);
+        let startup_started = std::time::Instant::now();
 
         match self.provider.start().await {
             Ok(()) => {
+                self.last_startup_duration_ms.store(
+                    startup_started.elapsed().as_millis() as u64,
+                    Ordering::Relaxed,
+                );
                 let mut state = self.state.write().await;
                 *state = ServiceState::Running;
                 info!("Service started: {}", self.provider.service_name());

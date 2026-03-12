@@ -5,7 +5,7 @@ pub mod manager;
 pub mod skeleton;
 pub mod traits;
 
-pub use container::ServiceContainer;
+pub use container::{ServiceContainer, ServiceRuntimeMetrics};
 pub use lifecycle::ServiceState;
-pub use manager::ServicePluginManager;
+pub use manager::{ServiceManagerMetrics, ServicePluginManager};
 pub use traits::{DispatchError, DispatchResponse, RequestContext, ServiceProvider};

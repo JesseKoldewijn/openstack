@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use tokio::time;
 use tracing::{error, info};
 
-use crate::hooks::{NoopHooks, StateHooks};
+use crate::hooks::{NoopHooks, StateFailureClass, StateFailureDiagnostic, StateHooks};
 use crate::persistence::PersistableStore;
 
 /// Central manager that orchestrates snapshot save/load/reset across all service stores.
@@ -46,7 +46,12 @@ impl StateManager {
         if self.config.snapshot_load_strategy != SnapshotLoadStrategy::OnStartup {
             return Ok(());
         }
-        self.load_all().await
+        self.load_all().await.map_err(|e| {
+            anyhow::anyhow!(
+                "startup_state_load_failed: required durable startup load failed: {}",
+                e
+            )
+        })
     }
 
     /// Load state from disk on-demand (for `ON_REQUEST` strategy).
@@ -148,9 +153,21 @@ impl StateManager {
         let stores = self.stores.read().await;
         let data_dir = &self.config.directories.data;
         for store in stores.iter() {
-            store.save(data_dir).await.map_err(|e| {
-                anyhow::anyhow!("Failed to save state for '{}': {}", store.service_name(), e)
-            })?;
+            if let Err(e) = store.save(data_dir).await {
+                let diagnostic = StateFailureDiagnostic {
+                    failure_class: StateFailureClass::SaveFailure,
+                    service: store.service_name().to_string(),
+                    operation: "save".to_string(),
+                    path: Some(data_dir.join("state").join(store.service_name())),
+                    message: e.to_string(),
+                };
+                self.hooks.on_state_save_error(&diagnostic).await;
+                return Err(anyhow::anyhow!(
+                    "Failed to save state for '{}': {}",
+                    store.service_name(),
+                    e
+                ));
+            }
         }
         self.hooks.on_after_state_save().await;
         info!("All state saved to {:?}", data_dir);
@@ -162,9 +179,21 @@ impl StateManager {
         let stores = self.stores.read().await;
         let data_dir = &self.config.directories.data;
         for store in stores.iter() {
-            store.load(data_dir).await.map_err(|e| {
-                anyhow::anyhow!("Failed to load state for '{}': {}", store.service_name(), e)
-            })?;
+            if let Err(e) = store.load(data_dir).await {
+                let diagnostic = StateFailureDiagnostic {
+                    failure_class: StateFailureClass::LoadFailure,
+                    service: store.service_name().to_string(),
+                    operation: "load".to_string(),
+                    path: Some(data_dir.join("state").join(store.service_name())),
+                    message: e.to_string(),
+                };
+                self.hooks.on_state_load_error(&diagnostic).await;
+                return Err(anyhow::anyhow!(
+                    "Failed to load state for '{}': {}",
+                    store.service_name(),
+                    e
+                ));
+            }
         }
         self.hooks.on_after_state_load().await;
         info!("All state loaded from {:?}", data_dir);

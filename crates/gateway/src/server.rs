@@ -134,18 +134,19 @@ async fn handle_request(
     let query_string = uri.query().unwrap_or("").to_string();
 
     // Parse query parameters
-    let query_params: HashMap<String, String> =
-        serde_urlencoded::from_str(&query_string).unwrap_or_default();
+    let query_params: HashMap<String, String> = if query_string.is_empty() {
+        HashMap::new()
+    } else {
+        serde_urlencoded::from_str(&query_string).unwrap_or_default()
+    };
 
     // Collect headers into a HashMap (lowercase keys)
-    let header_map: HashMap<String, String> = headers
-        .iter()
-        .filter_map(|(k, v)| {
-            v.to_str()
-                .ok()
-                .map(|v| (k.as_str().to_lowercase(), v.to_string()))
-        })
-        .collect();
+    let mut header_map: HashMap<String, String> = HashMap::with_capacity(headers.len());
+    for (k, v) in &headers {
+        if let Ok(vs) = v.to_str() {
+            header_map.insert(k.as_str().to_ascii_lowercase(), vs.to_string());
+        }
+    }
 
     // Read the request body
     let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {

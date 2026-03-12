@@ -8,6 +8,11 @@ use crate::ApiState;
 
 pub async fn get_plugins(State(state): State<ApiState>) -> impl IntoResponse {
     let service_states = state.plugin_manager.service_states().await;
+    let runtime_metrics = state.plugin_manager.service_runtime_metrics().await;
+    let mut metrics_map = std::collections::HashMap::new();
+    for metric in runtime_metrics {
+        metrics_map.insert(metric.service.clone(), metric);
+    }
 
     let plugins: Vec<serde_json::Value> = service_states
         .iter()
@@ -20,9 +25,13 @@ pub async fn get_plugins(State(state): State<ApiState>) -> impl IntoResponse {
                 ServiceState::Available => "available",
                 ServiceState::Error(_) => "error",
             };
+            let metric = metrics_map.get(name);
             json!({
                 "name": name,
                 "status": status_str,
+                "startup_attempts": metric.map(|m| m.startup_attempts).unwrap_or(0),
+                "startup_wait_count": metric.map(|m| m.startup_wait_count).unwrap_or(0),
+                "last_startup_duration_ms": metric.map(|m| m.last_startup_duration_ms).unwrap_or(0),
             })
         })
         .collect();
