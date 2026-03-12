@@ -24,5 +24,13 @@ pub fn internal_api_router(state: ApiState) -> Router {
             "/_localstack/config",
             get(crate::config_api::get_config).post(crate::config_api::post_config),
         )
+        .route(
+            "/_localstack/studio-api/services",
+            get(crate::studio::get_studio_services),
+        )
+        .route(
+            "/_localstack/studio-api/interactions/schema",
+            get(crate::studio::get_studio_interaction_schema),
+        )
         .with_state(state)
 }

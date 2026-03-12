@@ -29,6 +29,31 @@ use crate::sigv4::{
     DEFAULT_ACCESS_KEY, DEFAULT_REGION, access_key_to_account_id, is_valid_region, parse_sigv4_auth,
 };
 
+const STUDIO_SPA: &str = r#"<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
+  <title>openstack studio</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin:0; font-family: ui-sans-serif,system-ui,sans-serif; }
+    main { padding: 24px; max-width: 900px; margin: 0 auto; }
+    h1 { margin: 0 0 12px; }
+    p { opacity: 0.9; }
+    code { background: #00000022; padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>openstack studio</h1>
+    <p>Studio shell is available. Frontend bundle integration is pending.</p>
+    <p>API: <code>/_localstack/studio-api/services</code></p>
+  </main>
+</body>
+</html>
+"#;
+
 /// Adapter that converts `http_body_util::BodyStream<axum::body::Body>` into
 /// a `futures_core::Stream<Item = Result<Bytes, io::Error>>` suitable for
 /// `SpooledBody::write_from_stream()`.
@@ -219,7 +244,12 @@ async fn handle_request(
         return response;
     }
 
-    // Internal API routes go to the internal API handler
+    // Studio SPA routes are resolved before generic AWS inference.
+    if is_studio_spa_route(&path) {
+        return studio_spa_response();
+    }
+
+    // Internal API routes go to the internal API handler.
     if path.starts_with("/_localstack/") {
         return handle_internal_api(
             path,
@@ -380,6 +410,21 @@ async fn handle_request(
     );
 
     response
+}
+
+fn is_studio_spa_route(path: &str) -> bool {
+    path == "/_localstack/studio"
+        || path == "/_localstack/studio/"
+        || path.starts_with("/_localstack/studio/")
+}
+
+fn studio_spa_response() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("cache-control", "public, max-age=60")
+        .body(Body::from(STUDIO_SPA))
+        .unwrap_or_default()
 }
 
 #[allow(clippy::result_large_err)]
@@ -732,26 +777,39 @@ async fn handle_internal_api(
     _body: &Bytes,
     _state: &AppState,
 ) -> Response {
-    // Delegate to the internal-api crate
-    // For now, handle the most critical endpoints inline
-    match path.as_str() {
-        "/_localstack/health" if method == Method::HEAD => StatusCode::OK.into_response(),
-        "/_localstack/health" => {
-            let body = serde_json::json!({
-                "edition": "community",
-                "version": env!("CARGO_PKG_VERSION"),
-                "services": {}
-            });
-            axum::Json(body).into_response()
+    let shutdown_tx = tokio::sync::broadcast::channel::<()>(1).0;
+    let state = openstack_internal_api::ApiState::new(
+        _state.config.clone(),
+        _state.plugin_manager.clone(),
+        shutdown_tx,
+    );
+    let router = openstack_internal_api::internal_api_router(state);
+
+    let uri = if _query_params.is_empty() {
+        path
+    } else {
+        let query = serde_urlencoded::to_string(_query_params).unwrap_or_default();
+        format!("{}?{}", path, query)
+    };
+
+    let mut req_builder = axum::http::Request::builder()
+        .method(method.clone())
+        .uri(uri);
+    for (k, v) in _headers {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::header::HeaderName::from_bytes(k.as_bytes()),
+            axum::http::header::HeaderValue::from_str(v),
+        ) {
+            req_builder = req_builder.header(name, value);
         }
-        "/_localstack/info" => {
-            let body = serde_json::json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "edition": "community",
-                "is_license_activated": false,
-            });
-            axum::Json(body).into_response()
-        }
-        _ => (StatusCode::NOT_FOUND, format!("Unknown endpoint: {}", path)).into_response(),
+    }
+    let req = req_builder
+        .body(Body::from(_body.clone()))
+        .unwrap_or_default();
+
+    use tower::ServiceExt;
+    match router.oneshot(req).await {
+        Ok(resp) => resp,
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal API error").into_response(),
     }
 }

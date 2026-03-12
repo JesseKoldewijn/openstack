@@ -5,6 +5,7 @@ pub mod info;
 pub mod init;
 pub mod plugins;
 pub mod router;
+pub mod studio;
 
 use std::sync::Arc;
 use std::time::Instant;
