@@ -19,6 +19,10 @@ The project SHALL include a Studio frontend test pyramid that covers unit, compo
 - **WHEN** a pull request includes Studio-affecting changes
 - **THEN** CI SHALL execute browser E2E suites against a real openstack runtime and block merge on failures
 
+#### Scenario: Dashboard journey E2E coverage exists
+- **WHEN** Studio E2E suite runs
+- **THEN** it SHALL include dashboard load, service selection, guided execution, raw execution, and history replay journeys
+
 ### Requirement: End-to-end API interaction fidelity
 Studio E2E tests SHALL execute real interactions against openstack endpoints and SHALL verify that user-triggered actions produce expected backend-visible side effects.
 

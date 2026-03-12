@@ -26,6 +26,8 @@ The system SHALL expose all AWS services on a single HTTP port (default 4566) co
 
 The gateway SHALL also serve first-party Studio assets and Studio API endpoints under reserved internal namespaces without changing behavior of AWS-compatible service routes.
 
+The Studio namespace SHALL serve bundled dashboard assets and SHALL continue SPA fallback semantics for client routes.
+
 #### Scenario: Default port binding
 - **WHEN** the server starts with no `GATEWAY_LISTEN` configured
 - **THEN** it SHALL bind to `0.0.0.0:4566`
@@ -45,6 +47,10 @@ The gateway SHALL also serve first-party Studio assets and Studio API endpoints 
 #### Scenario: AWS routes remain unaffected by Studio routing
 - **WHEN** a client requests standard AWS-compatible paths or host-based service routes
 - **THEN** the gateway SHALL dispatch to service providers exactly as before and SHALL NOT route those requests to Studio handlers
+
+#### Scenario: Studio dashboard assets are cache-safe and discoverable
+- **WHEN** Studio dashboard assets are requested under `/_localstack/studio/assets/*`
+- **THEN** the gateway SHALL return correct content types and cache behavior compatible with dashboard runtime loading
 
 ### Requirement: AWS service detection from request
 The gateway SHALL determine which AWS service a request targets by examining (in priority order): (1) the `Authorization` header's credential scope, (2) the `Host` header (e.g., `sqs.us-east-1.localhost.localstack.cloud`), (3) the `X-Amz-Target` header, (4) URL path patterns.

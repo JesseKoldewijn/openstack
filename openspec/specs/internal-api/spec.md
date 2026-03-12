@@ -58,6 +58,8 @@ The system SHALL expose Studio-specific endpoints under `/_localstack/studio-api
 
 The namespace SHALL additionally expose guided-flow manifest and guided coverage endpoints required for manifest-driven rendering and governance visibility.
 
+The namespace SHALL provide dashboard-ready contract guarantees so Studio can compose home, detail, and operation workspaces without out-of-band assumptions.
+
 #### Scenario: Studio service catalog endpoint responds
 - **WHEN** `GET /_localstack/studio-api/services` is called
 - **THEN** the endpoint SHALL return Studio-consumable service catalog data including support tiers
@@ -77,6 +79,10 @@ The namespace SHALL additionally expose guided-flow manifest and guided coverage
 #### Scenario: Studio guided coverage endpoint responds
 - **WHEN** `GET /_localstack/studio-api/flows/coverage` is called
 - **THEN** the endpoint SHALL return guided coverage metrics by service and maturity level
+
+#### Scenario: Dashboard contract compatibility is preserved
+- **WHEN** Studio dashboard consumes service, flow, and coverage metadata endpoints together
+- **THEN** response fields and semantics SHALL remain compatible with documented Studio UI requirements and integration tests
 
 ### Requirement: Init script runner
 The system SHALL execute shell scripts found in `/etc/localstack/init/{stage}.d/` at the corresponding lifecycle stages: `boot` (before services start), `start` (during startup), `ready` (after all services ready), `shutdown` (during shutdown). Scripts SHALL be executed in alphabetical order.
