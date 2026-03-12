@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: false
+
+reviews:
+  profile: "assertive"
+  high_level_summary: true
+  review_status: true
+  review_details: false
+  path_filters:
+    - "**/*.rs"
+    - ".github/workflows/**/*.yml"
+    - ".github/workflows/**/*.yaml"
+    - "Cargo.toml"
+    - "Cargo.lock"
+    - "!target/**"
+    - "!**/*.snap"
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: >-
+        Prioritize correctness and safety in async Rust code. Flag error handling that
+        drops context, unnecessary cloning or allocations, blocking operations in async
+        paths, and opportunities to use idiomatic Result-based flow.
+    - path: ".github/workflows/**/*.yml"
+      instructions: >-
+        Focus on least-privilege permissions, trigger safety for pull_request vs
+        pull_request_target, secret handling, and deterministic CI behavior.
+    - path: ".github/workflows/**/*.yaml"
+      instructions: >-
+        Focus on least-privilege permissions, trigger safety for pull_request vs
+        pull_request_target, secret handling, and deterministic CI behavior.
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "github-actions[bot]"
+
+chat:
+  auto_reply: true
