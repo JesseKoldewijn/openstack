@@ -17,15 +17,16 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
 fn body(resp: &openstack_service_framework::traits::DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("response body is valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("response body is valid JSON")
 }
 
 fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 async fn create_key(p: &KmsProvider) -> String {

@@ -84,8 +84,6 @@ The system SHALL handle SIGTERM and SIGINT by: (1) stopping acceptance of new co
 - **WHEN** SIGTERM is sent to the process while persistence is enabled and there is in-memory state
 - **THEN** the system SHALL save state to disk, run shutdown scripts, and exit with code 0
 
-## ADDED Requirements
-
 ### Requirement: Differential compatibility verification in CI
 The system SHALL run a parity harness in CI that compares openstack and LocalStack behavior for a defined core compatibility profile and surfaces regressions as CI-visible failures.
 

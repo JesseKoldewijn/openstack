@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
+use openstack_service_framework::SpooledBody;
 
 /// Full context for an in-flight AWS request as it passes through the handler chain.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RequestContext {
     /// Target AWS service (e.g., "s3", "sqs")
     pub service: String,
@@ -31,6 +32,8 @@ pub struct RequestContext {
     pub query_params: HashMap<String, String>,
     /// Unique request ID for tracing
     pub request_id: String,
+    /// Spooled request body (for large payloads, may be on disk)
+    pub spooled_body: Option<SpooledBody>,
 }
 
 impl RequestContext {
@@ -38,29 +41,21 @@ impl RequestContext {
         self.headers.get(&name.to_lowercase()).map(|s| s.as_str())
     }
 
-    pub fn to_service_request_context(
-        &self,
-    ) -> openstack_service_framework::traits::RequestContext {
-        let mut headers = std::collections::HashMap::with_capacity(self.headers.len());
-        for (k, v) in &self.headers {
-            headers.insert(k.clone(), v.clone());
-        }
-        let mut query_params = std::collections::HashMap::with_capacity(self.query_params.len());
-        for (k, v) in &self.query_params {
-            query_params.insert(k.clone(), v.clone());
-        }
-
+    /// Convert to the service-framework `RequestContext`, consuming self
+    /// (because `SpooledBody` is not `Clone`).
+    pub fn to_service_request_context(self) -> openstack_service_framework::traits::RequestContext {
         openstack_service_framework::traits::RequestContext {
-            service: self.service.clone(),
-            operation: self.operation.clone(),
-            region: self.region.clone(),
-            account_id: self.account_id.clone(),
-            request_body: self.params.clone(),
-            raw_body: self.raw_body.clone(),
-            headers,
-            path: self.path.clone(),
-            method: self.method.clone(),
-            query_params,
+            service: self.service,
+            operation: self.operation,
+            region: self.region,
+            account_id: self.account_id,
+            request_body: self.params,
+            raw_body: self.raw_body,
+            headers: self.headers,
+            path: self.path,
+            method: self.method,
+            query_params: self.query_params,
+            spooled_body: self.spooled_body,
         }
     }
 }

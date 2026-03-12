@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use tracing::{debug, warn};
@@ -43,7 +43,7 @@ fn xml_wrap(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(xml.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
         content_type: "text/xml".to_string(),
         headers: Vec::new(),
     }
@@ -58,7 +58,7 @@ fn xml_no_result(action: &str, request_id: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(xml.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
         content_type: "text/xml".to_string(),
         headers: Vec::new(),
     }
@@ -73,7 +73,7 @@ fn sqs_error(code: &str, message: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 400,
-        body: Bytes::from(xml.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
         content_type: "text/xml".to_string(),
         headers: Vec::new(),
     }
@@ -82,7 +82,7 @@ fn sqs_error(code: &str, message: &str) -> DispatchResponse {
 fn sqs_json_response(value: serde_json::Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(value.to_string().into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(value.to_string().into_bytes())),
         content_type: "application/x-amz-json-1.0".to_string(),
         headers: Vec::new(),
     }
@@ -95,7 +95,7 @@ fn sqs_json_error(code: &str, message: &str, status_code: u16) -> DispatchRespon
     });
     DispatchResponse {
         status_code,
-        body: Bytes::from(body.to_string().into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(body.to_string().into_bytes())),
         content_type: "application/x-amz-json-1.0".to_string(),
         headers: Vec::new(),
     }

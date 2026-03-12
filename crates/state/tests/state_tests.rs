@@ -30,6 +30,8 @@ mod state_tests {
             init_start: data_dir.join("init/start.d"),
             init_ready: data_dir.join("init/ready.d"),
             init_shutdown: data_dir.join("init/shutdown.d"),
+            s3_objects: data_dir.join("s3/objects"),
+            spool: data_dir.join("spool"),
         };
         Config {
             gateway_listen: vec!["0.0.0.0:4566".parse().unwrap()],
@@ -57,6 +59,7 @@ mod state_tests {
             eager_service_loading: false,
             enable_config_updates: false,
             directories: dirs,
+            body_spool_threshold_bytes: 1_048_576,
         }
     }
 

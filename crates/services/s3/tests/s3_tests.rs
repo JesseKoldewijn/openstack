@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use openstack_s3::{provider::S3Provider, store::S3Store};
+use openstack_s3::{
+    provider::S3Provider,
+    store::{ObjectDataRef, S3Store},
+};
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 
 fn make_ctx(method: &str, path: &str, body: &[u8]) -> RequestContext {
@@ -16,6 +19,7 @@ fn make_ctx(method: &str, path: &str, body: &[u8]) -> RequestContext {
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
@@ -36,6 +40,7 @@ fn make_ctx_with_headers(
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
@@ -56,6 +61,7 @@ fn make_ctx_with_query(
         path: path.to_string(),
         method: method.to_string(),
         query_params,
+        spooled_body: None,
     }
 }
 
@@ -63,15 +69,23 @@ fn make_ctx_with_query(
 // Bucket operations
 // ---------------------------------------------------------------------------
 
+async fn new_provider() -> S3Provider {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.keep();
+    let provider = S3Provider::new(path);
+    provider.start().await.unwrap();
+    provider
+}
+
 #[tokio::test]
 async fn test_create_and_list_buckets() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
 
     // Initially empty
     let ctx = make_ctx("GET", "/", b"");
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("ListAllMyBucketsResult"));
     assert!(!body.contains("my-bucket"));
 
@@ -83,13 +97,13 @@ async fn test_create_and_list_buckets() {
     // List again
     let ctx = make_ctx("GET", "/", b"");
     let resp = provider.dispatch(&ctx).await.unwrap();
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("my-bucket"));
 }
 
 #[tokio::test]
 async fn test_create_bucket_already_exists() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/test-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -97,13 +111,13 @@ async fn test_create_bucket_already_exists() {
     let ctx = make_ctx("PUT", "/test-bucket", b"");
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 409);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("BucketAlreadyOwnedByYou"));
 }
 
 #[tokio::test]
 async fn test_delete_bucket() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/del-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -119,7 +133,7 @@ async fn test_delete_bucket() {
 
 #[tokio::test]
 async fn test_delete_non_empty_bucket_fails() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/ne-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -135,7 +149,7 @@ async fn test_delete_non_empty_bucket_fails() {
 
 #[tokio::test]
 async fn test_head_bucket() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/hb-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -146,7 +160,7 @@ async fn test_head_bucket() {
 
 #[tokio::test]
 async fn test_get_bucket_location() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/loc-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -155,7 +169,7 @@ async fn test_get_bucket_location() {
     let ctx = make_ctx_with_query("GET", "/loc-bucket", b"", qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("LocationConstraint"));
 }
 
@@ -165,7 +179,7 @@ async fn test_get_bucket_location() {
 
 #[tokio::test]
 async fn test_put_and_get_object() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
 
     // Create bucket
     let ctx = make_ctx("PUT", "/obj-bucket", b"");
@@ -183,26 +197,27 @@ async fn test_put_and_get_object() {
     let ctx = make_ctx("GET", "/obj-bucket/hello.txt", b"");
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    assert_eq!(&resp.body[..], b"hello world");
+    let body_bytes = resp.body.into_bytes().await.unwrap();
+    assert_eq!(&body_bytes[..], b"hello world");
     assert_eq!(resp.content_type, "text/plain");
 }
 
 #[tokio::test]
 async fn test_get_nonexistent_object() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/miss-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
     let ctx = make_ctx("GET", "/miss-bucket/no-such-key", b"");
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 404);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("NoSuchKey"));
 }
 
 #[tokio::test]
 async fn test_head_object() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/ho-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -214,13 +229,13 @@ async fn test_head_object() {
     let ctx = make_ctx("HEAD", "/ho-bucket/data.json", b"");
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    assert!(resp.body.is_empty()); // HEAD returns no body
+    assert!(resp.body.as_bytes().is_empty()); // HEAD returns no body
     assert_eq!(resp.content_type, "application/json");
 }
 
 #[tokio::test]
 async fn test_delete_object() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/do-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -239,7 +254,7 @@ async fn test_delete_object() {
 
 #[tokio::test]
 async fn test_delete_objects_bulk() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/bulk-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -255,7 +270,7 @@ async fn test_delete_objects_bulk() {
     let ctx = make_ctx_with_query("POST", "/bulk-bucket", body, qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("a.txt"));
     assert!(body.contains("b.txt"));
 
@@ -267,7 +282,7 @@ async fn test_delete_objects_bulk() {
 
 #[tokio::test]
 async fn test_copy_object() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/src-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
     let ctx = make_ctx("PUT", "/dst-bucket", b"");
@@ -291,12 +306,13 @@ async fn test_copy_object() {
     let ctx = make_ctx_with_headers("PUT", "/dst-bucket/copy.txt", b"", headers);
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("CopyObjectResult"));
 
     let ctx = make_ctx("GET", "/dst-bucket/copy.txt", b"");
     let resp = provider.dispatch(&ctx).await.unwrap();
-    assert_eq!(&resp.body[..], b"original content");
+    let body_bytes = resp.body.into_bytes().await.unwrap();
+    assert_eq!(&body_bytes[..], b"original content");
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +321,7 @@ async fn test_copy_object() {
 
 #[tokio::test]
 async fn test_list_objects_v2_prefix() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/list-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -321,7 +337,7 @@ async fn test_list_objects_v2_prefix() {
     let ctx = make_ctx_with_query("GET", "/list-bucket", b"", qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("a/1.txt"));
     assert!(body.contains("a/2.txt"));
     assert!(!body.contains("b/1.txt"));
@@ -329,7 +345,7 @@ async fn test_list_objects_v2_prefix() {
 
 #[tokio::test]
 async fn test_list_objects_v2_delimiter() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/delim-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -344,14 +360,14 @@ async fn test_list_objects_v2_delimiter() {
     qp.insert("delimiter".to_string(), "/".to_string());
     let ctx = make_ctx_with_query("GET", "/delim-bucket", b"", qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("CommonPrefixes"));
     assert!(body.contains("root.txt")); // top-level object in Contents
 }
 
 #[tokio::test]
 async fn test_list_objects_v2_max_keys() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/maxk-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -366,7 +382,7 @@ async fn test_list_objects_v2_max_keys() {
     qp.insert("max-keys".to_string(), "2".to_string());
     let ctx = make_ctx_with_query("GET", "/maxk-bucket", b"", qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("<IsTruncated>true</IsTruncated>"));
     assert!(body.contains("NextContinuationToken"));
 }
@@ -377,7 +393,7 @@ async fn test_list_objects_v2_max_keys() {
 
 #[tokio::test]
 async fn test_multipart_upload() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/mp-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -387,7 +403,7 @@ async fn test_multipart_upload() {
     let ctx = make_ctx_with_query("POST", "/mp-bucket/large.bin", b"", qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("InitiateMultipartUploadResult"));
 
     // Extract upload_id
@@ -441,19 +457,20 @@ async fn test_multipart_upload() {
     );
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("CompleteMultipartUploadResult"));
 
     // Get the assembled object
     let ctx = make_ctx("GET", "/mp-bucket/large.bin", b"");
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    assert_eq!(&resp.body[..], b"part-one-data-part-two-data");
+    let body_bytes = resp.body.into_bytes().await.unwrap();
+    assert_eq!(&body_bytes[..], b"part-one-data-part-two-data");
 }
 
 #[tokio::test]
 async fn test_abort_multipart_upload() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/abort-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -461,7 +478,7 @@ async fn test_abort_multipart_upload() {
     qp.insert("uploads".to_string(), String::new());
     let ctx = make_ctx_with_query("POST", "/abort-bucket/file.bin", b"", qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     let start = body.find("<UploadId>").unwrap() + 10;
     let end = body.find("</UploadId>").unwrap();
     let upload_id = body[start..end].to_string();
@@ -479,7 +496,7 @@ async fn test_abort_multipart_upload() {
 
 #[tokio::test]
 async fn test_versioning() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/ver-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -504,14 +521,15 @@ async fn test_versioning() {
     // Current version is v2
     let ctx = make_ctx("GET", "/ver-bucket/key.txt", b"");
     let resp = provider.dispatch(&ctx).await.unwrap();
-    assert_eq!(&resp.body[..], b"version-2");
+    let body_bytes = resp.body.into_bytes().await.unwrap();
+    assert_eq!(&body_bytes[..], b"version-2");
 
     // List versions — should have 2 entries
     let mut qp = HashMap::new();
     qp.insert("versions".to_string(), String::new());
     let ctx = make_ctx_with_query("GET", "/ver-bucket", b"", qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("ListVersionsResult"));
     // Should contain two <Version> entries
     assert_eq!(body.matches("<Version>").count(), 2);
@@ -523,7 +541,7 @@ async fn test_versioning() {
 
 #[tokio::test]
 async fn test_bucket_policy() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/pol-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -548,7 +566,7 @@ async fn test_bucket_policy() {
     let ctx = make_ctx_with_query("GET", "/pol-bucket", b"", qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    assert_eq!(std::str::from_utf8(&resp.body).unwrap(), policy);
+    assert_eq!(std::str::from_utf8(resp.body.as_bytes()).unwrap(), policy);
 
     // Delete policy
     let mut qp = HashMap::new();
@@ -571,7 +589,7 @@ async fn test_bucket_policy() {
 
 #[tokio::test]
 async fn test_acl_bucket() {
-    let provider = S3Provider::new();
+    let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/acl-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
@@ -580,7 +598,7 @@ async fn test_acl_bucket() {
     let ctx = make_ctx_with_query("GET", "/acl-bucket", b"", qp);
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
-    let body = std::str::from_utf8(&resp.body).unwrap();
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("AccessControlPolicy"));
 }
 
@@ -595,13 +613,13 @@ fn test_store_put_get() {
     store.put_object(
         "bucket",
         "key",
-        b"hello".to_vec(),
+        ObjectDataRef::Inline(b"hello".to_vec()),
         "text/plain",
         HashMap::new(),
     );
 
     let v = store.get_object("bucket", "key").unwrap();
-    assert_eq!(v.data, b"hello");
+    assert_eq!(v.data, ObjectDataRef::Inline(b"hello".to_vec()));
     assert!(!v.etag.is_empty());
 }
 
@@ -612,7 +630,7 @@ fn test_store_delete_object() {
     store.put_object(
         "bucket",
         "key",
-        b"data".to_vec(),
+        ObjectDataRef::Inline(b"data".to_vec()),
         "text/plain",
         HashMap::new(),
     );
@@ -627,11 +645,23 @@ fn test_store_versioning() {
     store.create_bucket("bucket", "us-east-1");
     store.buckets.get_mut("bucket").unwrap().versioning = "Enabled".to_string();
 
-    store.put_object("bucket", "k", b"v1".to_vec(), "text/plain", HashMap::new());
-    store.put_object("bucket", "k", b"v2".to_vec(), "text/plain", HashMap::new());
+    store.put_object(
+        "bucket",
+        "k",
+        ObjectDataRef::Inline(b"v1".to_vec()),
+        "text/plain",
+        HashMap::new(),
+    );
+    store.put_object(
+        "bucket",
+        "k",
+        ObjectDataRef::Inline(b"v2".to_vec()),
+        "text/plain",
+        HashMap::new(),
+    );
 
     let current = store.get_object("bucket", "k").unwrap();
-    assert_eq!(current.data, b"v2");
+    assert_eq!(current.data, ObjectDataRef::Inline(b"v2".to_vec()));
 
     let objs = store.list_objects("bucket");
     let obj = objs.into_iter().find(|o| o.key == "k").unwrap();
@@ -644,10 +674,10 @@ fn test_store_multipart() {
     store.create_bucket("bucket", "us-east-1");
     let uid =
         store.create_multipart_upload("bucket", "key", "application/octet-stream", HashMap::new());
-    store.upload_part(&uid, 1, b"part1".to_vec());
-    store.upload_part(&uid, 2, b"part2".to_vec());
+    store.upload_part(&uid, 1, ObjectDataRef::Inline(b"part1".to_vec()));
+    store.upload_part(&uid, 2, ObjectDataRef::Inline(b"part2".to_vec()));
     let v = store
         .complete_multipart_upload(&uid, &[(1, String::new()), (2, String::new())])
         .unwrap();
-    assert_eq!(v.data, b"part1part2");
+    assert_eq!(v.data, ObjectDataRef::Inline(b"part1part2".to_vec()));
 }

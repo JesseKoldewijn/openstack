@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
@@ -38,7 +38,7 @@ impl Default for CloudFormationProvider {
 fn xml_ok(body: String) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(body.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
         content_type: "text/xml".to_string(),
         headers: Vec::new(),
     }
@@ -47,7 +47,7 @@ fn xml_ok(body: String) -> DispatchResponse {
 fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(format!(
+        body: ResponseBody::Buffered(Bytes::from(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ErrorResponse>
   <Error>
@@ -56,7 +56,7 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     <Message>{message}</Message>
   </Error>
 </ErrorResponse>"#
-        )),
+        ))),
         content_type: "text/xml".to_string(),
         headers: Vec::new(),
     }

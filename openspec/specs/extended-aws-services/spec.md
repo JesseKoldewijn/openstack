@@ -69,3 +69,95 @@ The system SHALL emulate the OpenSearch Service API including domain management 
 #### Scenario: Durable mode domain metadata survives restart
 - **WHEN** domain state is created in a declared durable mode and the runtime restarts
 - **THEN** domain metadata visibility SHALL remain parity-consistent with declared durability semantics
+
+### Requirement: CloudWatch Logs emulation
+The system SHALL emulate the CloudWatch Logs API including log group management (CreateLogGroup, DeleteLogGroup, DescribeLogGroups), log stream management (CreateLogStream, DescribeLogStreams), and log events (PutLogEvents, GetLogEvents, FilterLogEvents).
+
+#### Scenario: Write and read log events
+- **WHEN** log events are put to a log stream
+- **THEN** `GetLogEvents` SHALL return the events in chronological order
+
+### Requirement: EventBridge emulation
+The system SHALL emulate the EventBridge API including event bus management (CreateEventBus, DeleteEventBus), rule management (PutRule, DeleteRule, ListRules, EnableRule, DisableRule), target management (PutTargets, RemoveTargets, ListTargetsByRule), and event publishing (PutEvents).
+
+#### Scenario: Rule routes event to SQS target
+- **WHEN** a rule with an event pattern matching `{"source": ["my.app"]}` has an SQS target, and an event with source `my.app` is put
+- **THEN** the event SHALL be delivered to the SQS queue
+
+### Requirement: Step Functions emulation
+The system SHALL emulate the Step Functions API including state machine management (CreateStateMachine, DeleteStateMachine, DescribeStateMachine), execution management (StartExecution, DescribeExecution, ListExecutions, StopExecution), and ASL (Amazon States Language) interpretation for at minimum Task, Pass, Wait, Choice, Parallel, Map, Succeed, and Fail states.
+
+#### Scenario: Execute a simple state machine
+- **WHEN** a state machine with a Pass state is created and an execution is started with input `{"key": "value"}`
+- **THEN** `DescribeExecution` SHALL eventually show status `SUCCEEDED` with the expected output
+
+### Requirement: API Gateway emulation
+The system SHALL emulate the API Gateway REST API including API management (CreateRestApi, DeleteRestApi), resource management (CreateResource, GetResources), method management (PutMethod, PutIntegration), deployment (CreateDeployment), and request routing to Lambda integrations.
+
+#### Scenario: API Gateway invokes Lambda
+- **WHEN** an API is created with a Lambda proxy integration and a request is sent to the deployed API URL
+- **THEN** the Lambda function SHALL be invoked and its response SHALL be returned to the caller
+
+### Requirement: EC2 emulation
+The system SHALL emulate a subset of the EC2 API including VPC operations (CreateVpc, DescribeVpcs, DeleteVpc), subnet operations (CreateSubnet, DescribeSubnets), security group operations (CreateSecurityGroup, AuthorizeSecurityGroupIngress, DescribeSecurityGroups), and instance operations (RunInstances, DescribeInstances, TerminateInstances). EC2 emulation SHALL be metadata-only (no actual VMs).
+
+#### Scenario: Create and describe VPC
+- **WHEN** `CreateVpc` is called with CIDR `10.0.0.0/16`
+- **THEN** `DescribeVpcs` SHALL return the VPC with the correct CIDR and a generated VPC ID
+
+#### Scenario: Run instances (metadata only)
+- **WHEN** `RunInstances` is called
+- **THEN** `DescribeInstances` SHALL return instance(s) in `running` state with generated instance IDs, but no actual compute SHALL be provisioned
+
+### Requirement: Route53 DNS emulation
+The system SHALL emulate the Route53 API including hosted zone management (CreateHostedZone, DeleteHostedZone, ListHostedZones) and record set management (ChangeResourceRecordSets, ListResourceRecordSets).
+
+#### Scenario: Create hosted zone and records
+- **WHEN** a hosted zone is created for `example.com` and an A record is added
+- **THEN** `ListResourceRecordSets` SHALL return the A record
+
+### Requirement: SSM Parameter Store emulation
+The system SHALL emulate the SSM Parameter Store API including PutParameter, GetParameter, GetParameters, GetParametersByPath, DeleteParameter, and DescribeParameters. The system SHALL support String, StringList, and SecureString parameter types.
+
+#### Scenario: Put and get parameter
+- **WHEN** a parameter `/app/config/db-host` is put with value `localhost`
+- **THEN** `GetParameter` SHALL return the value `localhost`
+
+#### Scenario: Get parameters by path
+- **WHEN** parameters `/app/config/a` and `/app/config/b` exist
+- **THEN** `GetParametersByPath` with path `/app/config/` SHALL return both parameters
+
+### Requirement: Secrets Manager emulation
+The system SHALL emulate the Secrets Manager API including secret management (CreateSecret, GetSecretValue, PutSecretValue, DeleteSecret, ListSecrets, DescribeSecret, UpdateSecret) and rotation scheduling.
+
+#### Scenario: Create and retrieve secret
+- **WHEN** a secret is created with name `my-secret` and value `s3cret`
+- **THEN** `GetSecretValue` SHALL return `s3cret`
+
+### Requirement: SES email emulation
+The system SHALL emulate the SES API including identity management (VerifyEmailIdentity, ListIdentities) and email sending (SendEmail, SendRawEmail). Emails SHALL be stored in memory and accessible for test verification rather than actually sent.
+
+#### Scenario: Send and verify email
+- **WHEN** `SendEmail` is called with recipient `test@example.com`
+- **THEN** the email SHALL be stored and retrievable through the internal API for test verification
+
+### Requirement: ACM certificate emulation
+The system SHALL emulate the ACM API including certificate management (RequestCertificate, DescribeCertificate, ListCertificates, DeleteCertificate). Certificates SHALL be automatically issued (no actual DNS/email validation).
+
+#### Scenario: Request certificate
+- **WHEN** `RequestCertificate` is called for domain `example.com`
+- **THEN** `DescribeCertificate` SHALL show the certificate in `ISSUED` status
+
+### Requirement: ECR container registry emulation
+The system SHALL emulate the ECR API including repository management (CreateRepository, DeleteRepository, DescribeRepositories) and image management (PutImage, BatchGetImage, ListImages). Image data SHALL be stored in memory or on disk.
+
+#### Scenario: Create repository and describe
+- **WHEN** `CreateRepository` is called with name `my-app`
+- **THEN** `DescribeRepositories` SHALL return the repository with a generated URI
+
+### Requirement: Redshift emulation
+The system SHALL emulate a subset of the Redshift API including cluster management (CreateCluster, DeleteCluster, DescribeClusters). Emulation SHALL be metadata-only.
+
+#### Scenario: Create and describe cluster
+- **WHEN** `CreateCluster` is called
+- **THEN** `DescribeClusters` SHALL return the cluster in `available` status

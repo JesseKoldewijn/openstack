@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,12 +19,18 @@ async fn main() -> Result<()> {
     // Initialize the service plugin manager
     let plugin_manager = openstack_service_framework::ServicePluginManager::new(config.clone());
 
-    // Register all built-in service providers
-    register_services(&plugin_manager, &config);
+    // Register all built-in service providers and collect persistable stores
+    let persistable_stores = register_services(&plugin_manager, &config);
 
-    // Initialize state
+    // Initialize state and register persistable stores before loading
     let state_manager = openstack_state::StateManager::new(config.clone());
+    for store in persistable_stores {
+        state_manager.register_store(store).await;
+    }
     state_manager.load_on_startup().await?;
+
+    // Clean up orphaned spool temp files from previous crashes
+    cleanup_spool_dir(&config.directories.spool).await;
 
     // Start internal API server and gateway
     let gateway = openstack_gateway::Gateway::new(config.clone(), plugin_manager.clone());
@@ -79,8 +85,17 @@ fn handle_cli_shortcuts() -> bool {
 fn register_services(
     manager: &openstack_service_framework::ServicePluginManager,
     config: &openstack_config::Config,
-) {
+) -> Vec<std::sync::Arc<dyn openstack_state::PersistableStore>> {
     let services = &config.services;
+    let mut persistable_stores: Vec<std::sync::Arc<dyn openstack_state::PersistableStore>> =
+        Vec::new();
+
+    // S3 is special: it has a persistable store that shares state with the provider
+    if services.is_enabled("s3") {
+        let s3_provider = openstack_s3::S3Provider::new(&config.directories.s3_objects);
+        persistable_stores.push(s3_provider.persistable_store());
+        manager.register("s3", s3_provider);
+    }
 
     macro_rules! register {
         ($name:literal, $provider:expr) => {
@@ -90,7 +105,6 @@ fn register_services(
         };
     }
 
-    register!("s3", openstack_s3::S3Provider::new());
     register!("sqs", openstack_sqs::SqsProvider::new());
     register!("sns", openstack_sns::SnsProvider::new());
     register!("dynamodb", openstack_dynamodb::DynamoDbProvider::new());
@@ -132,4 +146,28 @@ fn register_services(
         openstack_opensearch::OpenSearchProvider::new()
     );
     register!("redshift", openstack_redshift::RedshiftProvider::new());
+
+    persistable_stores
+}
+
+/// Remove any `.tmp` files left in the spool directory from a previous crash.
+async fn cleanup_spool_dir(spool_dir: &std::path::Path) {
+    let Ok(mut rd) = tokio::fs::read_dir(spool_dir).await else {
+        // Directory may not exist yet — that's fine.
+        return;
+    };
+    let mut cleaned = 0u64;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "tmp") {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                warn!("Failed to remove orphaned spool file {:?}: {}", path, e);
+            } else {
+                cleaned += 1;
+            }
+        }
+    }
+    if cleaned > 0 {
+        debug!("Cleaned up {} orphaned spool temp files", cleaned);
+    }
 }

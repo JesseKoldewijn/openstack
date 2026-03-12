@@ -20,6 +20,7 @@ fn make_ctx(body: &[u8]) -> RequestContext {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
@@ -48,7 +49,9 @@ fn url_encode(s: &str) -> String {
 }
 
 fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    std::str::from_utf8(&resp.body).unwrap().to_string()
+    std::str::from_utf8(resp.body.as_bytes())
+        .unwrap()
+        .to_string()
 }
 
 async fn create_topic(provider: &SnsProvider, name: &str) -> String {

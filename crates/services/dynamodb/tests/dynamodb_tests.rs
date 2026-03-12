@@ -21,11 +21,12 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
 fn body(resp: &openstack_service_framework::traits::DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("response body is valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("response body is valid JSON")
 }
 
 // Create a simple table (pk only)
@@ -46,7 +47,7 @@ async fn create_pk_table(provider: &DynamoDbProvider, table_name: &str) {
         resp.status_code,
         200,
         "CreateTable failed: {}",
-        String::from_utf8_lossy(&resp.body)
+        String::from_utf8_lossy(resp.body.as_bytes())
     );
 }
 
@@ -74,7 +75,7 @@ async fn create_pksk_table(provider: &DynamoDbProvider, table_name: &str) {
         resp.status_code,
         200,
         "CreateTable failed: {}",
-        String::from_utf8_lossy(&resp.body)
+        String::from_utf8_lossy(resp.body.as_bytes())
     );
 }
 

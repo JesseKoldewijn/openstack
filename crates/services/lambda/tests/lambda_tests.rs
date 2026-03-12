@@ -22,6 +22,7 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
@@ -37,15 +38,16 @@ fn make_ctx_with_path(operation: &str, body: Value, path: &str) -> RequestContex
         path: path.to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
 fn body(resp: &DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("response body is valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("response body is valid JSON")
 }
 
 fn body_str(resp: &DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 /// Make a minimal valid base64-encoded zip containing a handler file.
@@ -556,6 +558,7 @@ async fn test_docker_invoke_python() {
         path: "/2015-03-31/functions/docker-python-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let invoke_resp = p.dispatch(&invoke_ctx).await.unwrap();
     assert_eq!(invoke_resp.status_code, 200, "{}", body_str(&invoke_resp));
@@ -601,6 +604,7 @@ async fn test_docker_invoke_async() {
         path: "/2015-03-31/functions/async-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let resp = p.dispatch(&invoke_ctx).await.unwrap();
     assert_eq!(resp.status_code, 202);
@@ -653,6 +657,7 @@ def handler(event, context):
         path: "/2015-03-31/functions/timeout-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let resp = p.dispatch(&invoke_ctx).await.unwrap();
     // Should time out — 429 TooManyRequestsException or 500 ContainerError

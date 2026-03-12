@@ -33,6 +33,7 @@ fn make_ctx(
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params,
+        spooled_body: None,
     }
 }
 
@@ -54,15 +55,16 @@ fn make_ctx_json(
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     }
 }
 
 fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 fn body_json(resp: &openstack_service_framework::traits::DispatchResponse) -> serde_json::Value {
-    serde_json::from_slice(&resp.body).expect("valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("valid JSON")
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +93,7 @@ async fn test_sqs_multi_account_isolation() {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let create_a = provider.dispatch(&ctx_a).await.unwrap();
     assert_eq!(create_a.status_code, 200);
@@ -108,6 +111,7 @@ async fn test_sqs_multi_account_isolation() {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let create_b = provider.dispatch(&ctx_b).await.unwrap();
     assert_eq!(create_b.status_code, 200);
@@ -125,6 +129,7 @@ async fn test_sqs_multi_account_isolation() {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let list_a = provider.dispatch(&list_ctx_a).await.unwrap();
     let list_a_body = body_str(&list_a);
@@ -150,6 +155,7 @@ async fn test_sqs_multi_account_isolation() {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let list_b = provider.dispatch(&list_ctx_b).await.unwrap();
     let list_b_body = body_str(&list_b);
@@ -258,7 +264,7 @@ async fn test_dynamodb_multi_region_isolation() {
 async fn test_s3_multi_account_isolation() {
     use openstack_s3::S3Provider;
 
-    let provider = S3Provider::new();
+    let provider = S3Provider::new("/tmp/openstack-test-s3-multitenancy");
 
     // Account A creates a bucket
     let ctx_a = RequestContext {
@@ -272,6 +278,7 @@ async fn test_s3_multi_account_isolation() {
         path: "/account-a-bucket".to_string(),
         method: "PUT".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let create_a = provider.dispatch(&ctx_a).await.unwrap();
     assert_eq!(create_a.status_code, 200);
@@ -288,6 +295,7 @@ async fn test_s3_multi_account_isolation() {
         path: "/account-b-bucket".to_string(),
         method: "PUT".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let create_b = provider.dispatch(&ctx_b).await.unwrap();
     assert_eq!(create_b.status_code, 200);
@@ -304,6 +312,7 @@ async fn test_s3_multi_account_isolation() {
         path: "/".to_string(),
         method: "GET".to_string(),
         query_params: HashMap::new(),
+        spooled_body: None,
     };
     let list_a = provider.dispatch(&list_ctx_a).await.unwrap();
     let list_a_body = body_str(&list_a);

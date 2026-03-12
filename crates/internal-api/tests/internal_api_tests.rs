@@ -41,6 +41,7 @@ mod internal_api_tests {
             eager_service_loading: false,
             enable_config_updates: false,
             directories: Directories::from_env(),
+            body_spool_threshold_bytes: 1_048_576,
         }
     }
 

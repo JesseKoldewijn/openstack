@@ -12,6 +12,7 @@ openstack-state.workspace = true
 openstack-internal-api.workspace = true
 
 tokio.workspace = true
+tokio-util.workspace = true
 axum.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -26,3 +27,7 @@ serde_urlencoded.workspace = true
 bytes.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
+tempfile.workspace = true
+futures-core.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true

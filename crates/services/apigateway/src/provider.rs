@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
@@ -39,7 +39,7 @@ impl Default for ApiGatewayProvider {
 fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
         content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
@@ -48,7 +48,7 @@ fn json_ok(body: Value) -> DispatchResponse {
 fn json_created(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 201,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
         content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
@@ -57,13 +57,13 @@ fn json_created(body: Value) -> DispatchResponse {
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(
+        body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "message": message,
                 "code": code,
             }))
             .unwrap(),
-        ),
+        )),
         content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
@@ -198,7 +198,7 @@ impl ServiceProvider for ApiGatewayProvider {
                 store.stages.retain(|(aid, _), _| aid != &api_id);
                 Ok(DispatchResponse {
                     status_code: 202,
-                    body: Bytes::new(),
+                    body: ResponseBody::Buffered(Bytes::new()),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })

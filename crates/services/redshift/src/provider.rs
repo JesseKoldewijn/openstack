@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
@@ -45,7 +45,7 @@ fn xml_resp(action: &str, rid: &str, inner: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(xml.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
         content_type: "text/xml".to_string(),
         headers: Vec::new(),
     }
@@ -60,7 +60,7 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(xml.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
         content_type: "text/xml".to_string(),
         headers: Vec::new(),
     }

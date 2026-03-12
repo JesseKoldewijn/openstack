@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
@@ -53,7 +53,7 @@ impl Default for LambdaProvider {
 fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
         content_type: "application/x-amz-json-1.1".to_string(),
         headers: Vec::new(),
     }
@@ -62,7 +62,7 @@ fn json_ok(body: Value) -> DispatchResponse {
 fn json_ok_raw(body: String) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(body.into_bytes()),
+        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
         content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
@@ -71,13 +71,13 @@ fn json_ok_raw(body: String) -> DispatchResponse {
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(
+        body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "__type": code,
                 "message": message,
             }))
             .unwrap(),
-        ),
+        )),
         content_type: "application/x-amz-json-1.1".to_string(),
         headers: Vec::new(),
     }
@@ -301,7 +301,9 @@ impl ServiceProvider for LambdaProvider {
 
                 Ok(DispatchResponse {
                     status_code: 201,
-                    body: Bytes::from(serde_json::to_vec(&function_to_json(&func)).unwrap()),
+                    body: ResponseBody::Buffered(Bytes::from(
+                        serde_json::to_vec(&function_to_json(&func)).unwrap(),
+                    )),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })
@@ -387,7 +389,7 @@ impl ServiceProvider for LambdaProvider {
 
                 Ok(DispatchResponse {
                     status_code: 204,
-                    body: Bytes::new(),
+                    body: ResponseBody::Buffered(Bytes::new()),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })
@@ -609,7 +611,7 @@ impl ServiceProvider for LambdaProvider {
                     });
                     return Ok(DispatchResponse {
                         status_code: 202,
-                        body: Bytes::new(),
+                        body: ResponseBody::Buffered(Bytes::new()),
                         content_type: "application/json".to_string(),
                         headers: Vec::new(),
                     });
@@ -619,7 +621,7 @@ impl ServiceProvider for LambdaProvider {
                 if invocation_type == "DryRun" {
                     return Ok(DispatchResponse {
                         status_code: 204,
-                        body: Bytes::new(),
+                        body: ResponseBody::Buffered(Bytes::new()),
                         content_type: "application/json".to_string(),
                         headers: Vec::new(),
                     });
@@ -648,13 +650,13 @@ impl ServiceProvider for LambdaProvider {
                         error_message,
                     } => Ok(DispatchResponse {
                         status_code: 200,
-                        body: Bytes::from(
+                        body: ResponseBody::Buffered(Bytes::from(
                             serde_json::to_vec(&json!({
                                 "errorType": error_type,
                                 "errorMessage": error_message,
                             }))
                             .unwrap(),
-                        ),
+                        )),
                         content_type: "application/json".to_string(),
                         headers: vec![(
                             "X-Amz-Function-Error".to_string(),
@@ -723,7 +725,9 @@ impl ServiceProvider for LambdaProvider {
 
                 Ok(DispatchResponse {
                     status_code: 201,
-                    body: Bytes::from(serde_json::to_vec(&lv_json).unwrap()),
+                    body: ResponseBody::Buffered(Bytes::from(
+                        serde_json::to_vec(&lv_json).unwrap(),
+                    )),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })
@@ -847,7 +851,9 @@ impl ServiceProvider for LambdaProvider {
 
                 Ok(DispatchResponse {
                     status_code: 202,
-                    body: Bytes::from(serde_json::to_vec(&esm_to_json(&esm)).unwrap()),
+                    body: ResponseBody::Buffered(Bytes::from(
+                        serde_json::to_vec(&esm_to_json(&esm)).unwrap(),
+                    )),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })
@@ -979,7 +985,7 @@ impl ServiceProvider for LambdaProvider {
 
                 Ok(DispatchResponse {
                     status_code: 201,
-                    body: Bytes::from(
+                    body: ResponseBody::Buffered(Bytes::from(
                         serde_json::to_vec(&json!({
                             "Name": alias.name,
                             "AliasArn": alias.arn,
@@ -987,7 +993,7 @@ impl ServiceProvider for LambdaProvider {
                             "Description": alias.description,
                         }))
                         .unwrap(),
-                    ),
+                    )),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })
@@ -1084,7 +1090,7 @@ impl ServiceProvider for LambdaProvider {
                 }
                 Ok(DispatchResponse {
                     status_code: 204,
-                    body: Bytes::new(),
+                    body: ResponseBody::Buffered(Bytes::new()),
                     content_type: "application/json".to_string(),
                     headers: Vec::new(),
                 })
@@ -1141,7 +1147,7 @@ impl ServiceProvider for LambdaProvider {
             "GetPolicy" => Ok(json_ok(json!({ "Policy": "{}", "RevisionId": "" }))),
             "RemovePermission" => Ok(DispatchResponse {
                 status_code: 204,
-                body: Bytes::new(),
+                body: ResponseBody::Buffered(Bytes::new()),
                 content_type: "application/json".to_string(),
                 headers: Vec::new(),
             }),
