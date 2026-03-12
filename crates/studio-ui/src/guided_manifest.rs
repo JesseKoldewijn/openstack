@@ -550,15 +550,21 @@ mod tests {
         let err = parse_and_validate_manifest(input).expect_err("semantic lint must fail");
         match err {
             ManifestError::SemanticValidation { issues } => {
-                assert!(issues
-                    .iter()
-                    .any(|issue| issue.message.contains("unsupported expression source")));
-                assert!(issues
-                    .iter()
-                    .any(|issue| issue.message.contains("L1 flow must define cleanup steps")));
-                assert!(issues
-                    .iter()
-                    .any(|issue| issue.message.contains("at least one assertion")));
+                assert!(
+                    issues
+                        .iter()
+                        .any(|issue| issue.message.contains("unsupported expression source"))
+                );
+                assert!(
+                    issues
+                        .iter()
+                        .any(|issue| issue.message.contains("L1 flow must define cleanup steps"))
+                );
+                assert!(
+                    issues
+                        .iter()
+                        .any(|issue| issue.message.contains("at least one assertion"))
+                );
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -583,12 +589,16 @@ mod tests {
         let err = enforce_one_manifest_per_service(&services, &manifests).expect_err("must fail");
         match err {
             ManifestError::SemanticValidation { issues } => {
-                assert!(issues
-                    .iter()
-                    .any(|issue| issue.message.contains("duplicate manifest")));
-                assert!(issues
-                    .iter()
-                    .any(|issue| issue.message.contains("missing manifest")));
+                assert!(
+                    issues
+                        .iter()
+                        .any(|issue| issue.message.contains("duplicate manifest"))
+                );
+                assert!(
+                    issues
+                        .iter()
+                        .any(|issue| issue.message.contains("missing manifest"))
+                );
             }
             other => panic!("unexpected error: {other:?}"),
         }

@@ -439,7 +439,7 @@ fn is_pid_running(pid: i32) -> bool {
         if rc == 0 {
             return true;
         }
-        return std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(not(unix))]
     {
@@ -456,7 +456,7 @@ fn send_signal(pid: i32, signal: i32) -> Result<()> {
         if rc == 0 {
             return Ok(());
         }
-        return Err(std::io::Error::last_os_error().into());
+        Err(std::io::Error::last_os_error().into())
     }
     #[cfg(not(unix))]
     {

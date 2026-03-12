@@ -14,18 +14,26 @@ async fn guided_catalog_includes_protocol_representatives() {
 
     let body: serde_json::Value = response.json().await.unwrap();
     let services = body["services"].as_array().unwrap();
-    assert!(services
-        .iter()
-        .any(|s| s["service"] == "sqs" && s["protocol"] == "query"));
-    assert!(services
-        .iter()
-        .any(|s| s["service"] == "dynamodb" && s["protocol"] == "json_target"));
-    assert!(services
-        .iter()
-        .any(|s| s["service"] == "s3" && s["protocol"] == "rest_xml"));
-    assert!(services
-        .iter()
-        .any(|s| s["service"] == "lambda" && s["protocol"] == "rest_json"));
+    assert!(
+        services
+            .iter()
+            .any(|s| s["service"] == "sqs" && s["protocol"] == "query")
+    );
+    assert!(
+        services
+            .iter()
+            .any(|s| s["service"] == "dynamodb" && s["protocol"] == "json_target")
+    );
+    assert!(
+        services
+            .iter()
+            .any(|s| s["service"] == "s3" && s["protocol"] == "rest_xml")
+    );
+    assert!(
+        services
+            .iter()
+            .any(|s| s["service"] == "lambda" && s["protocol"] == "rest_json")
+    );
 
     harness.shutdown();
 }

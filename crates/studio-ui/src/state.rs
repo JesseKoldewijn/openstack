@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
     Light,
@@ -12,11 +14,19 @@ impl ThemeMode {
         }
     }
 
-    pub fn from_str(input: &str) -> Self {
+    pub fn from_storage_value(input: &str) -> Self {
         match input {
             "dark" => ThemeMode::Dark,
             _ => ThemeMode::Light,
         }
+    }
+}
+
+impl FromStr for ThemeMode {
+    type Err = core::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_storage_value(s))
     }
 }
 

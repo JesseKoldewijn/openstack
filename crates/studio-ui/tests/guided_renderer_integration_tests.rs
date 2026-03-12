@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use openstack_studio_ui::{
-    render_guided_flow, BindingContext, GuidedExecutionReport, GuidedExecutionState, GuidedFlow,
-    GuidedManifest, GuidedStep, NormalizedOperation, ProtocolClass, RenderedGuidedFlow,
+    BindingContext, GuidedExecutionReport, GuidedExecutionState, GuidedFlow, GuidedManifest,
+    GuidedStep, NormalizedOperation, ProtocolClass, RenderedGuidedFlow, render_guided_flow,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -116,14 +116,18 @@ fn load_fixture(path: &str) -> Fixture {
 fn assert_rendered(rendered: RenderedGuidedFlow, fixture: &Fixture) {
     assert_eq!(rendered.flow_id, "fixture-flow");
     assert_eq!(rendered.timeline.len(), fixture.steps.len());
-    assert!(rendered
-        .timeline
-        .iter()
-        .all(|item| item.status == "success"));
+    assert!(
+        rendered
+            .timeline
+            .iter()
+            .all(|item| item.status == "success")
+    );
     assert!(rendered.assertions.total >= fixture.steps.len());
     assert_eq!(rendered.cleanup.total, 0);
-    assert!(fixture
-        .steps
-        .iter()
-        .all(|step| !step.response.body.is_empty() || step.response.status == 200));
+    assert!(
+        fixture
+            .steps
+            .iter()
+            .all(|step| !step.response.body.is_empty() || step.response.status == 200)
+    );
 }

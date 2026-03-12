@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::guided_manifest::{CaptureBinding, FlowAssertion, GuidedFlow, NormalizedOperation};
 use crate::history::{InteractionEntry, InteractionHistory};
 use crate::protocol_adapters::{
-    execute_protocol_adapter, normalize_error, AdapterError, AdapterExecError, AdapterResponse,
+    AdapterError, AdapterExecError, AdapterResponse, execute_protocol_adapter, normalize_error,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

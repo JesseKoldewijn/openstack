@@ -2,9 +2,9 @@ use openstack_studio_ui::{ThemeMode, ThemeStore};
 
 #[test]
 fn theme_mode_roundtrip_string() {
-    assert_eq!(ThemeMode::from_str("light"), ThemeMode::Light);
-    assert_eq!(ThemeMode::from_str("dark"), ThemeMode::Dark);
-    assert_eq!(ThemeMode::from_str("unknown"), ThemeMode::Light);
+    assert_eq!(ThemeMode::from_storage_value("light"), ThemeMode::Light);
+    assert_eq!(ThemeMode::from_storage_value("dark"), ThemeMode::Dark);
+    assert_eq!(ThemeMode::from_storage_value("unknown"), ThemeMode::Light);
     assert_eq!(ThemeMode::Light.as_str(), "light");
     assert_eq!(ThemeMode::Dark.as_str(), "dark");
 }

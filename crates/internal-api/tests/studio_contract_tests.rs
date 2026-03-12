@@ -4,7 +4,7 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use openstack_config::{Config, Directories};
-use openstack_internal_api::{internal_api_router, ApiState};
+use openstack_internal_api::{ApiState, internal_api_router};
 use openstack_service_framework::ServicePluginManager;
 use serde_json::Value;
 use tokio::sync::broadcast;

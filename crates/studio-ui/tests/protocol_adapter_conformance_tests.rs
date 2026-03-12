@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use openstack_studio_ui::guided_manifest::{NormalizedOperation, ProtocolClass};
 use openstack_studio_ui::protocol_adapters::{
-    execute_protocol_adapter, normalize_error, AdapterResponse,
+    AdapterResponse, execute_protocol_adapter, normalize_error,
 };
 
 #[derive(Debug, serde::Deserialize)]

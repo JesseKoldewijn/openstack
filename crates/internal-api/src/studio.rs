@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use axum::Json;
 use openstack_aws_protocol::AwsProtocol;
 use openstack_service_framework::ServiceState;
 use serde::Deserialize;
