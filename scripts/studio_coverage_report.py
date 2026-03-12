@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
-"""Generate Studio service coverage summary for CI."""
+"""Generate Studio guided-flow coverage summary for CI."""
 
 import json
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-INPUT = ROOT / "crates" / "internal-api" / "src" / "studio.rs"
+INPUT = ROOT / "manifests" / "guided"
 OUTPUT = ROOT / "artifacts" / "studio_coverage_report.json"
 
 
 def main() -> int:
-    text = INPUT.read_text(encoding="utf-8")
     guided = []
-    for line in text.splitlines():
-        line = line.strip()
-        if "=> \"guided\"" not in line:
-            continue
-        for segment in line.split("|"):
-            segment = segment.strip()
-            if segment.startswith('"'):
-                parts = segment.split('"')
-                if len(parts) >= 3:
-                    guided.append(parts[1])
+    for path in sorted(INPUT.glob("*.guided.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        guided.append(
+            {
+                "service": payload.get("service", path.stem.replace(".guided", "")),
+                "schemaVersion": payload.get("schemaVersion"),
+                "protocol": payload.get("protocol"),
+                "flowCount": len(payload.get("flows", [])),
+            }
+        )
 
     report = {
-        "guided": sorted(guided),
-        "raw_or_other": "all other registered services",
+        "guided": guided,
+        "total_guided_services": len(guided),
         "source": str(INPUT.relative_to(ROOT)),
     }
 

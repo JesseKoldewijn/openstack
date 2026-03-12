@@ -1,0 +1,17 @@
+{
+  "service": "lambda",
+  "protocol": "rest_json",
+  "steps": [
+    {
+      "operation": {
+        "method": "POST",
+        "path": "/",
+        "body": "{\"FunctionName\":\"fixture-f\"}"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"FunctionArn\":\"arn:aws:lambda:function:fixture-f\"}"
+      }
+    }
+  ]
+}

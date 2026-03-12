@@ -79,4 +79,38 @@ mod studio_security_tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn guided_execution_endpoint_rejects_disallowed_method() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio-api/flows/execute")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn guided_execution_endpoint_rejects_oversized_payload() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let payload = vec![b'a'; 300 * 1024];
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/_localstack/studio-api/flows/execute")
+            .header("content-type", "application/json")
+            .body(Body::from(payload))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
 }

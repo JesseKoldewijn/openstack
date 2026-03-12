@@ -2393,6 +2393,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "openstack-aws-protocol",
  "openstack-config",
  "openstack-service-framework",
  "openstack-state",

@@ -59,6 +59,7 @@ const STUDIO_SPA: &str = r#"<!doctype html>
 const STUDIO_ASSET_JS: &str = "console.log('openstack studio shell');";
 
 const STUDIO_ASSET_CSS: &str = ":root{color-scheme:light dark}body{margin:0}";
+const STUDIO_GUIDED_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
 /// Adapter that converts `http_body_util::BodyStream<axum::body::Body>` into
 /// a `futures_core::Stream<Item = Result<Bytes, io::Error>>` suitable for
@@ -818,6 +819,23 @@ async fn handle_internal_api(
     _body: &Bytes,
     _state: &AppState,
 ) -> Response {
+    if is_studio_guided_execution_route(&path) {
+        if *method != Method::POST {
+            return (
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method not allowed for guided execution endpoint",
+            )
+                .into_response();
+        }
+        if _body.len() > STUDIO_GUIDED_MAX_PAYLOAD_BYTES {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "guided execution payload exceeds configured limit",
+            )
+                .into_response();
+        }
+    }
+
     let shutdown_tx = tokio::sync::broadcast::channel::<()>(1).0;
     let state = openstack_internal_api::ApiState::new(
         _state.config.clone(),
@@ -853,4 +871,9 @@ async fn handle_internal_api(
         Ok(resp) => resp,
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal API error").into_response(),
     }
+}
+
+fn is_studio_guided_execution_route(path: &str) -> bool {
+    path == "/_localstack/studio-api/flows/execute"
+        || path == "/_localstack/studio-api/flows/replay"
 }

@@ -1,21 +1,100 @@
-use axum::extract::State;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
+
+use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
+use openstack_aws_protocol::AwsProtocol;
 use openstack_service_framework::ServiceState;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::ApiState;
 
-fn support_tier(service: &str) -> &'static str {
-    match service {
-        "s3" | "sqs" => "guided",
-        _ => "raw",
+const GUIDED_MANIFEST_SCHEMA_VERSION: &str = "1.2";
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuidedManifestFile {
+    schema_version: String,
+    service: String,
+    protocol: String,
+    flows: Vec<serde_json::Value>,
+    #[serde(default)]
+    inputs: Vec<serde_json::Value>,
+}
+
+fn manifests_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("manifests")
+        .join("guided")
+}
+
+fn protocol_name_for_service(service: &str) -> &'static str {
+    match AwsProtocol::from_service(service) {
+        AwsProtocol::Query | AwsProtocol::Ec2 => "query",
+        AwsProtocol::Json => "json_target",
+        AwsProtocol::RestXml => "rest_xml",
+        AwsProtocol::RestJson => "rest_json",
+    }
+}
+
+fn default_inputs(service: &str) -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "resource_name",
+        "type": "string",
+        "required": true,
+        "description": format!("Resource name for {} guided flow", service)
+    })]
+}
+
+fn manifest_inventory() -> HashMap<String, GuidedManifestFile> {
+    let mut manifests = HashMap::new();
+    let Ok(entries) = fs::read_dir(manifests_root()) else {
+        return manifests;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.ends_with(".guided.json") {
+            continue;
+        }
+
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<GuidedManifestFile>(&source) else {
+            continue;
+        };
+        if parsed.schema_version != GUIDED_MANIFEST_SCHEMA_VERSION {
+            continue;
+        }
+
+        manifests.insert(parsed.service.clone(), parsed);
+    }
+
+    manifests
+}
+
+fn support_tier(service: &str, manifests: &HashMap<String, GuidedManifestFile>) -> &'static str {
+    if manifests.contains_key(service) {
+        "guided"
+    } else {
+        "raw"
     }
 }
 
 pub async fn get_studio_services(State(state): State<ApiState>) -> impl IntoResponse {
     let service_states = state.plugin_manager.service_states().await;
-    let services: Vec<serde_json::Value> = service_states
+    let manifests = manifest_inventory();
+
+    let services = service_states
         .into_iter()
         .map(|(name, svc_state)| {
             let status = match svc_state {
@@ -29,14 +108,12 @@ pub async fn get_studio_services(State(state): State<ApiState>) -> impl IntoResp
             json!({
                 "name": name,
                 "status": status,
-                "support_tier": support_tier(&name),
+                "support_tier": support_tier(&name, &manifests),
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    Json(json!({
-        "services": services,
-    }))
+    Json(json!({ "services": services }))
 }
 
 pub async fn get_studio_interaction_schema() -> impl IntoResponse {
@@ -57,5 +134,106 @@ pub async fn get_studio_interaction_schema() -> impl IntoResponse {
                 {"name": "body", "type": "string"}
             ]
         }
+    }))
+}
+
+pub async fn get_studio_flow_catalog(State(state): State<ApiState>) -> impl IntoResponse {
+    let manifests = manifest_inventory();
+    let services = state
+        .plugin_manager
+        .service_states()
+        .await
+        .into_iter()
+        .map(|(name, _)| {
+            let manifest = manifests.get(&name);
+            json!({
+                "service": name,
+                "manifest_version": GUIDED_MANIFEST_SCHEMA_VERSION,
+                "protocol": manifest
+                    .map(|item| item.protocol.as_str())
+                    .unwrap_or_else(|| protocol_name_for_service(&name)),
+                "flow_count": manifest.map(|item| item.flows.len()).unwrap_or(0),
+                "maturity": if manifest.is_some() { "l1" } else { "none" },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Json(json!({ "services": services }))
+}
+
+pub async fn get_studio_flow_definition(Path(service): Path<String>) -> impl IntoResponse {
+    let manifests = manifest_inventory();
+    let manifest = manifests.get(&service);
+
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({
+            "service": service,
+            "schema_version": GUIDED_MANIFEST_SCHEMA_VERSION,
+            "protocol": manifest
+                .map(|item| item.protocol.as_str())
+                .unwrap_or_else(|| protocol_name_for_service(&service)),
+            "flows": manifest
+                .map(|item| item.flows.clone())
+                .unwrap_or_default(),
+            "inputs": manifest
+                .map(|item| {
+                    if item.inputs.is_empty() {
+                        default_inputs(&service)
+                    } else {
+                        item.inputs.clone()
+                    }
+                })
+                .unwrap_or_else(|| default_inputs(&service)),
+        })),
+    )
+        .into_response()
+}
+
+pub async fn get_studio_flow_coverage(State(state): State<ApiState>) -> impl IntoResponse {
+    let service_states = state.plugin_manager.service_states().await;
+    let manifests = manifest_inventory();
+    let mut seen = HashSet::new();
+
+    let mut services = service_states
+        .into_iter()
+        .map(|(name, _)| {
+            seen.insert(name.clone());
+            let manifest = manifests.get(&name);
+            let total_flows = manifest.map(|item| item.flows.len()).unwrap_or(0);
+            json!({
+                "service": name,
+                "has_manifest": manifest.is_some(),
+                "l1_flows": if total_flows > 0 { 1 } else { 0 },
+                "total_flows": total_flows,
+                "quality": if total_flows > 0 { "meets_l1" } else { "missing" }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for (service, manifest) in &manifests {
+        if seen.contains(service) {
+            continue;
+        }
+        services.push(json!({
+            "service": service,
+            "has_manifest": true,
+            "l1_flows": 1,
+            "total_flows": manifest.flows.len(),
+            "quality": "meets_l1"
+        }));
+    }
+
+    services.sort_by(|a, b| {
+        a["service"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["service"].as_str().unwrap_or_default())
+    });
+
+    Json(json!({
+        "schema_version": GUIDED_MANIFEST_SCHEMA_VERSION,
+        "summary": "guided coverage by service",
+        "services": services,
     }))
 }

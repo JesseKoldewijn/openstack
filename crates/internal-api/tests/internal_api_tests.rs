@@ -8,7 +8,7 @@ mod internal_api_tests {
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use openstack_config::{Config, Directories};
-    use openstack_internal_api::{ApiState, internal_api_router};
+    use openstack_internal_api::{internal_api_router, ApiState};
     use openstack_service_framework::ServicePluginManager;
     use serde_json::Value;
     use tokio::sync::broadcast;
@@ -178,6 +178,18 @@ mod internal_api_tests {
         assert_eq!(body["studio"]["enabled"], true);
         assert_eq!(body["studio"]["base_path"], "/_localstack/studio");
         assert_eq!(body["studio"]["api_base_path"], "/_localstack/studio-api");
+        assert_eq!(
+            body["studio"]["guided_flow"]["manifest_schema_version"],
+            "1.2"
+        );
+        assert_eq!(
+            body["studio"]["guided_flow"]["catalog_endpoint"],
+            "/_localstack/studio-api/flows/catalog"
+        );
+        assert_eq!(
+            body["studio"]["guided_flow"]["coverage_endpoint"],
+            "/_localstack/studio-api/flows/coverage"
+        );
         assert!(body["daemon"]["managed"].is_boolean());
         assert!(body["daemon"]["pid"].is_number());
     }
@@ -253,6 +265,38 @@ mod internal_api_tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body["request"]["fields"].is_array());
         assert!(body["response"]["fields"].is_array());
+    }
+
+    #[tokio::test]
+    async fn studio_api_flow_catalog_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/flows/catalog").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["services"].is_array());
+    }
+
+    #[tokio::test]
+    async fn studio_api_flow_definition_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/flows/s3").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["service"], "s3");
+        assert!(body["flows"].is_array());
+    }
+
+    #[tokio::test]
+    async fn studio_api_flow_coverage_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/flows/coverage").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["services"].is_array());
+        assert!(body["schema_version"].is_string());
     }
 
     // ── 7.8  GET /_localstack/diagnose ────────────────────────────────────────

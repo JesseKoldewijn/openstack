@@ -237,6 +237,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Generate Studio coverage report
         run: python3 scripts/studio_coverage_report.py
+      - name: Enforce guided coverage gate
+        run: python3 scripts/studio_guided_coverage_gate.py
+
+  studio-manifest-validation:
+    name: Studio Manifest Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate guided manifest schema and semantics
+        run: cargo test -p openstack-studio-ui guided_manifest::tests -- --nocapture
 
   studio-performance-budget:
     name: Studio Asset Budget
@@ -1140,6 +1151,8 @@ jobs:
         test,
         verify-build-artifact,
         validate-harness-coverage,
+        studio-coverage,
+        studio-manifest-validation,
         parity-core,
         parity-all-services-full,
         benchmark-smoke-full,
@@ -1160,6 +1173,8 @@ jobs:
         test,
         verify-build-artifact,
         validate-harness-coverage,
+        studio-coverage,
+        studio-manifest-validation,
         parity-core,
         parity-all-services-fast,
         benchmark-smoke-fast,

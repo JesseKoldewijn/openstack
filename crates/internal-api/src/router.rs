@@ -1,4 +1,4 @@
-use axum::{Router, routing::get};
+use axum::{routing::get, Router};
 
 use crate::ApiState;
 
@@ -31,6 +31,18 @@ pub fn internal_api_router(state: ApiState) -> Router {
         .route(
             "/_localstack/studio-api/interactions/schema",
             get(crate::studio::get_studio_interaction_schema),
+        )
+        .route(
+            "/_localstack/studio-api/flows/catalog",
+            get(crate::studio::get_studio_flow_catalog),
+        )
+        .route(
+            "/_localstack/studio-api/flows/coverage",
+            get(crate::studio::get_studio_flow_coverage),
+        )
+        .route(
+            "/_localstack/studio-api/flows/{service}",
+            get(crate::studio::get_studio_flow_definition),
         )
         .with_state(state)
 }

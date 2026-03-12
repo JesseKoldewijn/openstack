@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::models::{InteractionSchema, StudioServicesResponse};
+use crate::models::{
+    FlowCatalogResponse, FlowCoverageResponse, FlowDefinitionResponse, InteractionSchema,
+    StudioServicesResponse,
+};
 
 #[derive(Debug, Clone)]
 pub struct StudioApiClient {
@@ -51,6 +54,24 @@ impl StudioApiClient {
             "{}/_localstack/studio-api/interactions/schema",
             self.base_url
         );
+        Ok(self.http.get(url).send().await?.json().await?)
+    }
+
+    pub async fn flow_catalog(&self) -> Result<FlowCatalogResponse, StudioApiError> {
+        let url = format!("{}/_localstack/studio-api/flows/catalog", self.base_url);
+        Ok(self.http.get(url).send().await?.json().await?)
+    }
+
+    pub async fn flow_definition(
+        &self,
+        service: &str,
+    ) -> Result<FlowDefinitionResponse, StudioApiError> {
+        let url = format!("{}/_localstack/studio-api/flows/{}", self.base_url, service);
+        Ok(self.http.get(url).send().await?.json().await?)
+    }
+
+    pub async fn flow_coverage(&self) -> Result<FlowCoverageResponse, StudioApiError> {
+        let url = format!("{}/_localstack/studio-api/flows/coverage", self.base_url);
         Ok(self.http.get(url).send().await?.json().await?)
     }
 

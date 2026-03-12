@@ -37,6 +37,14 @@ def main() -> int:
     benchmark_path = root / "tests" / "benchmark" / "scenarios" / "all-services-smoke.json"
     benchmark_services = sorted({item["service"] for item in load_json(benchmark_path)})
 
+    manifests_dir = root / "manifests" / "guided"
+    manifest_services = sorted(
+        {
+            load_json(path).get("service", path.stem.replace(".guided", ""))
+            for path in manifests_dir.glob("*.guided.json")
+        }
+    )
+
     failures = []
 
     if implemented != matrix_services:
@@ -53,6 +61,10 @@ def main() -> int:
     missing_benchmark = sorted(set(matrix_services) - set(benchmark_services))
     if missing_benchmark:
         failures.append(f"benchmark all-services-smoke missing services: {missing_benchmark}")
+
+    missing_manifests = sorted(set(matrix_services) - set(manifest_services))
+    if missing_manifests:
+        failures.append(f"guided manifests missing services: {missing_manifests}")
 
     if failures:
         print("Coverage validation failed:\n")

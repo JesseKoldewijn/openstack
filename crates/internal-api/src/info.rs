@@ -1,6 +1,6 @@
-use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
+use axum::Json;
 use serde_json::json;
 
 use crate::ApiState;
@@ -26,6 +26,11 @@ pub async fn get_info(State(state): State<ApiState>) -> impl IntoResponse {
             "enabled": true,
             "base_path": "/_localstack/studio",
             "api_base_path": "/_localstack/studio-api",
+            "guided_flow": {
+                "manifest_schema_version": "1.2",
+                "catalog_endpoint": "/_localstack/studio-api/flows/catalog",
+                "coverage_endpoint": "/_localstack/studio-api/flows/coverage"
+            }
         },
         "daemon": {
             "managed": std::env::var("OPENSTACK_DAEMON_CHILD").ok().as_deref() == Some("1"),

@@ -9,11 +9,11 @@ mod gateway_tests {
         Config, CorsConfig, Directories, LogLevel, ServicesConfig, SnapshotLoadStrategy,
         SnapshotSaveStrategy,
     };
-    use openstack_gateway::Gateway;
     use openstack_gateway::cors::CorsHandler;
     use openstack_gateway::sigv4::{
-        DEFAULT_ACCOUNT_ID, access_key_to_account_id, is_valid_region, parse_sigv4_auth,
+        access_key_to_account_id, is_valid_region, parse_sigv4_auth, DEFAULT_ACCOUNT_ID,
     };
+    use openstack_gateway::Gateway;
     use openstack_service_framework::ServicePluginManager;
     use tower::ServiceExt;
 
@@ -261,5 +261,33 @@ mod gateway_tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn aws_route_non_regression_with_studio_flow_catalog_present() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let studio_req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio-api/flows/catalog")
+            .body(Body::empty())
+            .unwrap();
+        let studio_resp = app.clone().oneshot(studio_req).await.unwrap();
+        assert_eq!(studio_resp.status(), StatusCode::OK);
+
+        let aws_req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef",
+            )
+            .body(Body::from(""))
+            .unwrap();
+        let aws_resp = app.oneshot(aws_req).await.unwrap();
+        assert_eq!(aws_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

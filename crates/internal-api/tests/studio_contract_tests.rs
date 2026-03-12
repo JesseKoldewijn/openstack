@@ -4,7 +4,7 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use openstack_config::{Config, Directories};
-use openstack_internal_api::{ApiState, internal_api_router};
+use openstack_internal_api::{internal_api_router, ApiState};
 use openstack_service_framework::ServicePluginManager;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -88,4 +88,37 @@ async fn studio_interaction_schema_contract_contains_fields() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["request"]["fields"].is_array());
     assert!(body["response"]["fields"].is_array());
+}
+
+#[tokio::test]
+async fn studio_flow_catalog_contract_contains_expected_fields() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/flows/catalog").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["services"].is_array());
+    if let Some(first) = body["services"].as_array().and_then(|x| x.first()) {
+        assert!(first.get("service").is_some());
+        assert!(first.get("manifest_version").is_some());
+        assert!(first.get("protocol").is_some());
+        assert!(first.get("flow_count").is_some());
+        assert!(first.get("maturity").is_some());
+    }
+}
+
+#[tokio::test]
+async fn studio_flow_definition_contract_is_service_specific() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/flows/s3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["service"], "s3");
+    assert!(body["flows"].is_array());
+}
+
+#[tokio::test]
+async fn studio_flow_coverage_contract_contains_metrics() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/flows/coverage").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["schema_version"].is_string());
+    assert!(body["services"].is_array());
 }
