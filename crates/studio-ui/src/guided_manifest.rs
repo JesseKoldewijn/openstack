@@ -396,7 +396,7 @@ fn check_interpolation_value(value: &str, path: &str, issues: &mut Vec<Validatio
 
         let token_end = token_start + end_rel;
         let expr = value[token_start..token_end].trim();
-        if let Err(message) = validate_expression(expr) {
+        if let Err(message) = validate_interpolation_expression(expr) {
             issues.push(ValidationIssue {
                 path: path.to_string(),
                 message,
@@ -407,7 +407,7 @@ fn check_interpolation_value(value: &str, path: &str, issues: &mut Vec<Validatio
     }
 }
 
-fn validate_expression(expr: &str) -> Result<(), String> {
+pub(crate) fn validate_interpolation_expression(expr: &str) -> Result<(), String> {
     if expr.is_empty() {
         return Err("empty interpolation expression".to_string());
     }
@@ -487,7 +487,9 @@ fn service_name_from_path(path: &str) -> Option<String> {
         return None;
     }
 
-    if !normalized.contains(GUIDED_MANIFEST_ROOT) {
+    let rooted = format!("/{GUIDED_MANIFEST_ROOT}/");
+    let prefixed = format!("{GUIDED_MANIFEST_ROOT}/");
+    if !(normalized.contains(&rooted) || normalized.starts_with(&prefixed)) {
         return None;
     }
 

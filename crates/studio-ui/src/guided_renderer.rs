@@ -58,11 +58,7 @@ pub fn render_guided_flow(
         })
         .collect::<Vec<_>>();
 
-    let total_assertions = flow
-        .steps
-        .iter()
-        .map(|step| step.assertions.len())
-        .sum::<usize>();
+    let total_assertions = flow.steps.len();
     let failed_assertions = report
         .map(|item| {
             item.outcomes
@@ -81,7 +77,14 @@ pub fn render_guided_flow(
                 .count()
         })
         .unwrap_or(0);
-    let cleanup_failed = cleanup_total.saturating_sub(cleanup_succeeded);
+    let cleanup_failed = report
+        .map(|item| {
+            item.cleanup
+                .iter()
+                .filter(|outcome| !outcome.success)
+                .count()
+        })
+        .unwrap_or(0);
     let captures = report.map(|item| item.captures.clone()).unwrap_or_default();
     let error_guidance = flow
         .steps

@@ -8,26 +8,30 @@ fn daemon_dir(root: &Path) -> std::path::PathBuf {
 
 fn write_pid(root: &Path, pid: i32) {
     let dir = daemon_dir(root);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("openstack.pid"), pid.to_string()).unwrap();
+    fs::create_dir_all(&dir).expect("failed to create daemon test directory for pid");
+    fs::write(dir.join("openstack.pid"), pid.to_string()).expect("failed to write pid file");
 }
 
 fn write_lock(root: &Path) {
     let dir = daemon_dir(root);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("openstack.lock"), "lock").unwrap();
+    fs::create_dir_all(&dir).expect("failed to create daemon test directory for lock");
+    fs::write(dir.join("openstack.lock"), "lock").expect("failed to write lock file");
 }
 
 fn write_meta(root: &Path, pid: i32, health_url: &str) {
     let dir = daemon_dir(root);
-    fs::create_dir_all(&dir).unwrap();
-    let meta = format!(
-        "{{\n  \"pid\": {},\n  \"started_at_utc\": \"2026-01-01T00:00:00Z\",\n  \"health_url\": \"{}\",\n  \"log_path\": \"{}\",\n  \"command\": \"openstack\"\n}}",
-        pid,
-        health_url,
-        dir.join("openstack.log").display()
-    );
-    fs::write(dir.join("openstack.meta.json"), meta).unwrap();
+    fs::create_dir_all(&dir).expect("failed to create daemon test directory for metadata");
+    let meta = serde_json::json!({
+        "pid": pid,
+        "started_at_utc": "2026-01-01T00:00:00Z",
+        "health_url": health_url,
+        "log_path": dir.join("openstack.log").to_string_lossy().to_string(),
+        "command": "openstack"
+    });
+    let meta_text =
+        serde_json::to_string_pretty(&meta).expect("failed to serialize daemon metadata json");
+    fs::write(dir.join("openstack.meta.json"), meta_text)
+        .expect("failed to write daemon metadata file");
 }
 
 fn run_openstack_with_data_dir(data_dir: &Path, args: &[&str]) -> std::process::Output {
@@ -36,7 +40,7 @@ fn run_openstack_with_data_dir(data_dir: &Path, args: &[&str]) -> std::process::
         .args(args)
         .env("LOCALSTACK_DATA_DIR", data_dir)
         .output()
-        .unwrap()
+        .expect("failed to run openstack command with given data dir")
 }
 
 #[test]

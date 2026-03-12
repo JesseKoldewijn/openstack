@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::PathBuf;
 
 use axum::Json;
@@ -16,7 +15,7 @@ const GUIDED_MANIFEST_SCHEMA_VERSION: &str = "1.2";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GuidedManifestFile {
+pub(crate) struct GuidedManifestFile {
     schema_version: String,
     service: String,
     protocol: String,
@@ -25,7 +24,7 @@ struct GuidedManifestFile {
     inputs: Vec<serde_json::Value>,
 }
 
-fn service_matrix_services() -> HashSet<String> {
+pub(crate) fn load_service_matrix_services() -> HashSet<String> {
     let matrix_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -33,7 +32,7 @@ fn service_matrix_services() -> HashSet<String> {
         .join("harness")
         .join("service-matrix.json");
 
-    let Ok(raw) = fs::read_to_string(matrix_path) else {
+    let Ok(raw) = std::fs::read_to_string(matrix_path) else {
         return HashSet::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -79,9 +78,9 @@ fn default_inputs(service: &str) -> Vec<serde_json::Value> {
     })]
 }
 
-fn manifest_inventory() -> HashMap<String, GuidedManifestFile> {
+pub(crate) fn load_manifest_inventory() -> HashMap<String, GuidedManifestFile> {
     let mut manifests = HashMap::new();
-    let Ok(entries) = fs::read_dir(manifests_root()) else {
+    let Ok(entries) = std::fs::read_dir(manifests_root()) else {
         return manifests;
     };
 
@@ -94,7 +93,7 @@ fn manifest_inventory() -> HashMap<String, GuidedManifestFile> {
             continue;
         }
 
-        let Ok(source) = fs::read_to_string(&path) else {
+        let Ok(source) = std::fs::read_to_string(&path) else {
             continue;
         };
         let Ok(parsed) = serde_json::from_str::<GuidedManifestFile>(&source) else {
@@ -110,7 +109,10 @@ fn manifest_inventory() -> HashMap<String, GuidedManifestFile> {
     manifests
 }
 
-fn support_tier(service: &str, manifests: &HashMap<String, GuidedManifestFile>) -> &'static str {
+pub(crate) fn support_tier(
+    service: &str,
+    manifests: &HashMap<String, GuidedManifestFile>,
+) -> &'static str {
     if manifests.contains_key(service) {
         "guided"
     } else {
@@ -118,9 +120,21 @@ fn support_tier(service: &str, manifests: &HashMap<String, GuidedManifestFile>) 
     }
 }
 
+fn l1_flow_count(manifest: &GuidedManifestFile) -> usize {
+    manifest
+        .flows
+        .iter()
+        .filter(|flow| {
+            flow.get("level")
+                .and_then(|level| level.as_str())
+                .is_some_and(|level| level.eq_ignore_ascii_case("l1"))
+        })
+        .count()
+}
+
 pub async fn get_studio_services(State(state): State<ApiState>) -> impl IntoResponse {
     let service_states = state.plugin_manager.service_states().await;
-    let manifests = manifest_inventory();
+    let manifests = &state.guided_manifest_inventory;
 
     let services = service_states
         .into_iter()
@@ -166,7 +180,7 @@ pub async fn get_studio_interaction_schema() -> impl IntoResponse {
 }
 
 pub async fn get_studio_flow_catalog(State(state): State<ApiState>) -> impl IntoResponse {
-    let manifests = manifest_inventory();
+    let manifests = &state.guided_manifest_inventory;
     let services = state
         .plugin_manager
         .service_states()
@@ -174,6 +188,7 @@ pub async fn get_studio_flow_catalog(State(state): State<ApiState>) -> impl Into
         .into_iter()
         .map(|(name, _)| {
             let manifest = manifests.get(&name);
+            let l1_flows = manifest.map(l1_flow_count).unwrap_or(0);
             json!({
                 "service": name,
                 "manifest_version": GUIDED_MANIFEST_SCHEMA_VERSION,
@@ -181,7 +196,7 @@ pub async fn get_studio_flow_catalog(State(state): State<ApiState>) -> impl Into
                     .map(|item| item.protocol.as_str())
                     .unwrap_or_else(|| protocol_name_for_service(&name)),
                 "flow_count": manifest.map(|item| item.flows.len()).unwrap_or(0),
-                "maturity": if manifest.is_some() { "l1" } else { "none" },
+                "maturity": if l1_flows > 0 { "l1" } else { "none" },
             })
         })
         .collect::<Vec<_>>();
@@ -189,9 +204,11 @@ pub async fn get_studio_flow_catalog(State(state): State<ApiState>) -> impl Into
     Json(json!({ "services": services }))
 }
 
-pub async fn get_studio_flow_definition(Path(service): Path<String>) -> impl IntoResponse {
-    let manifests = manifest_inventory();
-    let manifest = manifests.get(&service);
+pub async fn get_studio_flow_definition(
+    State(state): State<ApiState>,
+    Path(service): Path<String>,
+) -> impl IntoResponse {
+    let manifest = state.guided_manifest_inventory.get(&service);
 
     (
         axum::http::StatusCode::OK,
@@ -220,8 +237,8 @@ pub async fn get_studio_flow_definition(Path(service): Path<String>) -> impl Int
 
 pub async fn get_studio_flow_coverage(State(state): State<ApiState>) -> impl IntoResponse {
     let service_states = state.plugin_manager.service_states().await;
-    let manifests = manifest_inventory();
-    let matrix_services = service_matrix_services();
+    let manifests = &state.guided_manifest_inventory;
+    let matrix_services = &state.guided_service_matrix;
     let mut seen = HashSet::new();
 
     let mut services = service_states
@@ -230,29 +247,31 @@ pub async fn get_studio_flow_coverage(State(state): State<ApiState>) -> impl Int
             seen.insert(name.clone());
             let manifest = manifests.get(&name);
             let total_flows = manifest.map(|item| item.flows.len()).unwrap_or(0);
+            let l1_flows = manifest.map(l1_flow_count).unwrap_or(0);
             json!({
                 "service": name,
                 "has_manifest": manifest.is_some(),
-                "l1_flows": if total_flows > 0 { 1 } else { 0 },
+                "l1_flows": l1_flows,
                 "total_flows": total_flows,
-                "quality": if total_flows > 0 { "meets_l1" } else { "missing" }
+                "quality": if l1_flows > 0 { "meets_l1" } else { "missing" }
             })
         })
         .collect::<Vec<_>>();
 
-    for (service, manifest) in &manifests {
+    for (service, manifest) in manifests {
         if seen.contains(service) {
             continue;
         }
         if !matrix_services.is_empty() && !matrix_services.contains(service) {
             continue;
         }
+        let l1_flows = l1_flow_count(manifest);
         services.push(json!({
             "service": service,
             "has_manifest": true,
-            "l1_flows": 1,
+            "l1_flows": l1_flows,
             "total_flows": manifest.flows.len(),
-            "quality": "meets_l1"
+            "quality": if l1_flows > 0 { "meets_l1" } else { "missing" }
         }));
     }
 

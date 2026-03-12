@@ -185,6 +185,10 @@ fn capture_json_body(
     body: &str,
     capture_sources: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, AdapterExecError> {
+    if body.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+
     let payload: Value = serde_json::from_str(body).map_err(AdapterExecError::InvalidJsonBody)?;
     let mut captures = HashMap::new();
 
@@ -229,10 +233,15 @@ fn capture_json_body(
 }
 
 fn capture_xml_tag(body: &str, tag: &str) -> Option<String> {
-    let start_marker = format!("<{tag}>");
+    let start_marker = format!("<{tag}");
     let end_marker = format!("</{tag}>");
 
-    let start = body.find(&start_marker)? + start_marker.len();
+    let marker_pos = body.find(&start_marker)?;
+    let tag_close = body[marker_pos..].find('>')? + marker_pos;
+    if body[marker_pos..=tag_close].trim_end().ends_with("/>") {
+        return None;
+    }
+    let start = tag_close + 1;
     let end = body[start..].find(&end_marker)? + start;
     Some(body[start..end].to_string())
 }

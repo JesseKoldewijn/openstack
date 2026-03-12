@@ -28,7 +28,8 @@ struct FixtureOperation {
 #[derive(Debug, serde::Deserialize)]
 struct FixtureResponse {
     status: u16,
-    body: String,
+    #[serde(rename = "body")]
+    _body: String,
 }
 
 #[test]
@@ -44,7 +45,8 @@ fn renderer_behavior_across_protocol_class_fixtures() {
             "query" => ProtocolClass::Query,
             "json_target" => ProtocolClass::JsonTarget,
             "rest_xml" => ProtocolClass::RestXml,
-            _ => ProtocolClass::RestJson,
+            "rest_json" => ProtocolClass::RestJson,
+            other => panic!("unknown fixture protocol: {other}"),
         };
 
         let flow = GuidedFlow {
@@ -125,10 +127,6 @@ fn assert_rendered(rendered: RenderedGuidedFlow, fixture: &Fixture) {
     assert!(rendered.assertions.total >= fixture.steps.len());
     assert_eq!(rendered.cleanup.total, 0);
     assert!(rendered.error_guidance.is_empty());
-    assert!(
-        fixture
-            .steps
-            .iter()
-            .all(|step| !step.response.body.is_empty() || step.response.status == 200)
-    );
+    assert_eq!(rendered.assertions.failed, 0);
+    assert_eq!(rendered.assertions.passed, rendered.assertions.total);
 }

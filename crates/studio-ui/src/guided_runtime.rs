@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -111,19 +112,53 @@ pub fn run_guided_flow(
     binding_ctx: &mut BindingContext,
     retry_policy: RetryPolicy,
 ) -> GuidedExecutionReport {
+    run_guided_flow_internal(
+        flow,
+        protocol,
+        executor,
+        history,
+        binding_ctx,
+        retry_policy,
+        None,
+    )
+}
+
+fn run_guided_flow_internal(
+    flow: &GuidedFlow,
+    protocol: crate::guided_manifest::ProtocolClass,
+    executor: &mut dyn GuidedExecutor,
+    history: &mut InteractionHistory,
+    binding_ctx: &mut BindingContext,
+    retry_policy: RetryPolicy,
+    step_timeout_ms: Option<u64>,
+) -> GuidedExecutionReport {
     let mut state = GuidedExecutionState::Running;
     let mut outcomes = Vec::new();
     let mut cleanup = Vec::new();
-    let mut next_entry_id = 1u64;
 
     for step in &flow.steps {
-        let resolved_operation = resolve_operation(&step.operation, binding_ctx);
+        let resolved_operation = match resolve_operation(&step.operation, binding_ctx) {
+            Ok(operation) => operation,
+            Err(error) => {
+                state = GuidedExecutionState::Failed;
+                outcomes.push(StepOutcome {
+                    step_id: step.id.clone(),
+                    success: false,
+                    attempts: 0,
+                    status_code: None,
+                    error: Some(error),
+                });
+                break;
+            }
+        };
         let mut attempts = 0u8;
+        let max_attempts = retry_policy.max_attempts.max(1);
         let mut final_response = None;
         let mut final_error = None;
 
-        while attempts < retry_policy.max_attempts {
+        while attempts < max_attempts {
             attempts += 1;
+            let attempt_start = std::time::Instant::now();
             let response = match executor.execute(&resolved_operation) {
                 Ok(response) => response,
                 Err(_) => {
@@ -136,10 +171,21 @@ pub fn run_guided_flow(
                 }
             };
 
+            if let Some(timeout_ms) = step_timeout_ms
+                && attempt_start.elapsed().as_millis() > timeout_ms as u128
+            {
+                final_error = Some(AdapterError {
+                    code: "step_timeout".to_string(),
+                    message: format!("step exceeded timeout of {timeout_ms}ms"),
+                    retryable: false,
+                });
+                break;
+            }
+
             let normalized_error = normalize_error(protocol.clone(), &response);
             final_response = Some(response.clone());
             if let Some(error) = normalized_error {
-                if error.retryable && attempts < retry_policy.max_attempts {
+                if error.retryable && attempts < max_attempts {
                     continue;
                 }
                 final_error = Some(error);
@@ -180,7 +226,7 @@ pub fn run_guided_flow(
 
         if let Some(response) = final_response.as_ref() {
             history.push(InteractionEntry {
-                id: next_entry_id,
+                id: history.next_id(),
                 timestamp_unix_ms: 0,
                 service: "guided".to_string(),
                 status: response.status,
@@ -192,7 +238,6 @@ pub fn run_guided_flow(
                     body: resolved_operation.body.clone(),
                 },
             });
-            next_entry_id += 1;
         }
 
         let success = final_error.is_none();
@@ -235,8 +280,15 @@ pub fn run_guided_flow_with_policy(
     binding_ctx: &mut BindingContext,
     policy: ExecutionPolicy,
 ) -> GuidedExecutionReport {
-    let _timeout_ms = policy.step_timeout_ms;
-    run_guided_flow(flow, protocol, executor, history, binding_ctx, policy.retry)
+    run_guided_flow_internal(
+        flow,
+        protocol,
+        executor,
+        history,
+        binding_ctx,
+        policy.retry,
+        Some(policy.step_timeout_ms),
+    )
 }
 
 fn run_cleanup(
@@ -248,7 +300,16 @@ fn run_cleanup(
     let mut outcomes = Vec::new();
 
     for step in &flow.cleanup {
-        let operation = resolve_operation(&step.operation, binding_ctx);
+        let operation = match resolve_operation(&step.operation, binding_ctx) {
+            Ok(operation) => operation,
+            Err(_) => {
+                outcomes.push(CleanupOutcome {
+                    step_id: step.id.clone(),
+                    success: false,
+                });
+                continue;
+            }
+        };
         let success = executor
             .execute(&operation)
             .ok()
@@ -309,25 +370,28 @@ fn evaluate_assertions(
 fn resolve_operation(
     operation: &NormalizedOperation,
     binding_ctx: &BindingContext,
-) -> NormalizedOperation {
-    NormalizedOperation {
+) -> Result<NormalizedOperation, AdapterError> {
+    let mut headers = HashMap::new();
+    for (k, v) in &operation.headers {
+        headers.insert(k.clone(), interpolate_value(v, binding_ctx)?);
+    }
+
+    let mut query = HashMap::new();
+    for (k, v) in &operation.query {
+        query.insert(k.clone(), interpolate_value(v, binding_ctx)?);
+    }
+
+    Ok(NormalizedOperation {
         method: operation.method.clone(),
-        path: interpolate_value(&operation.path, binding_ctx),
-        headers: operation
-            .headers
-            .iter()
-            .map(|(k, v)| (k.clone(), interpolate_value(v, binding_ctx)))
-            .collect(),
-        query: operation
-            .query
-            .iter()
-            .map(|(k, v)| (k.clone(), interpolate_value(v, binding_ctx)))
-            .collect(),
+        path: interpolate_value(&operation.path, binding_ctx)?,
+        headers,
+        query,
         body: operation
             .body
             .as_ref()
-            .map(|body| interpolate_value(body, binding_ctx)),
-    }
+            .map(|body| interpolate_value(body, binding_ctx))
+            .transpose()?,
+    })
 }
 
 pub fn apply_capture_bindings(
@@ -345,27 +409,13 @@ pub fn apply_capture_bindings(
 }
 
 pub fn validate_expression(expr: &str) -> Result<(), String> {
-    if expr.is_empty() {
-        return Err("expression must not be empty".to_string());
-    }
-
-    if expr.contains(';') || expr.contains('`') || expr.contains("${") {
-        return Err("expression contains unsafe token".to_string());
-    }
-
-    if expr == "rand8()" || expr == "timestamp()" {
-        return Ok(());
-    }
-
-    if expr.starts_with("inputs.") || expr.starts_with("context.") || expr.starts_with("captures.")
-    {
-        return Ok(());
-    }
-
-    Err("unsupported expression source".to_string())
+    crate::guided_manifest::validate_interpolation_expression(expr)
 }
 
-pub fn interpolate_value(input: &str, binding_ctx: &BindingContext) -> String {
+pub fn interpolate_value(
+    input: &str,
+    binding_ctx: &BindingContext,
+) -> Result<String, AdapterError> {
     let mut output = String::new();
     let mut cursor = 0usize;
 
@@ -376,41 +426,84 @@ pub fn interpolate_value(input: &str, binding_ctx: &BindingContext) -> String {
         let expr_start = start + 2;
         let Some(end_rel) = input[expr_start..].find("}}") else {
             output.push_str(&input[start..]);
-            return output;
+            return Ok(output);
         };
         let end = expr_start + end_rel;
         let expr = input[expr_start..end].trim();
 
-        let value = resolve_expression(expr, binding_ctx).unwrap_or_default();
+        let value = resolve_expression(expr, binding_ctx)?;
         output.push_str(&value);
 
         cursor = end + 2;
     }
 
     output.push_str(&input[cursor..]);
-    output
+    Ok(output)
 }
 
-fn resolve_expression(expr: &str, binding_ctx: &BindingContext) -> Option<String> {
+fn resolve_expression(expr: &str, binding_ctx: &BindingContext) -> Result<String, AdapterError> {
     if expr == "rand8()" {
-        return Some("aaaaaaaa".to_string());
+        return Ok(generate_rand8());
     }
 
     if expr == "timestamp()" {
-        return Some("0".to_string());
+        return Ok(current_unix_timestamp().to_string());
     }
 
     if let Some(path) = expr.strip_prefix("inputs.") {
-        return binding_ctx.inputs.get(path).cloned();
+        return binding_ctx
+            .inputs
+            .get(path)
+            .cloned()
+            .ok_or_else(|| AdapterError {
+                code: "missing_binding".to_string(),
+                message: format!("missing input binding '{path}' for expression '{expr}'"),
+                retryable: false,
+            });
     }
     if let Some(path) = expr.strip_prefix("context.") {
-        return binding_ctx.context.get(path).cloned();
+        return binding_ctx
+            .context
+            .get(path)
+            .cloned()
+            .ok_or_else(|| AdapterError {
+                code: "missing_binding".to_string(),
+                message: format!("missing context binding '{path}' for expression '{expr}'"),
+                retryable: false,
+            });
     }
     if let Some(path) = expr.strip_prefix("captures.") {
-        return binding_ctx.captures.get(path).cloned();
+        return binding_ctx
+            .captures
+            .get(path)
+            .cloned()
+            .ok_or_else(|| AdapterError {
+                code: "missing_binding".to_string(),
+                message: format!("missing capture binding '{path}' for expression '{expr}'"),
+                retryable: false,
+            });
     }
 
-    None
+    Err(AdapterError {
+        code: "unsupported_expression".to_string(),
+        message: format!("unsupported expression '{expr}'"),
+        retryable: false,
+    })
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn generate_rand8() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or_default();
+    format!("{nanos:08x}")
 }
 
 fn extract_json_path(value: &Value, path: &str) -> Option<String> {
@@ -516,7 +609,8 @@ mod tests {
             .insert("bucket".to_string(), "my-bucket".to_string());
         ctx.captures.insert("id".to_string(), "abc123".to_string());
 
-        let value = interpolate_value("/{{inputs.bucket}}/{{captures.id}}", &ctx);
+        let value = interpolate_value("/{{inputs.bucket}}/{{captures.id}}", &ctx)
+            .expect("interpolation should resolve values");
         assert_eq!(value, "/my-bucket/abc123");
     }
 

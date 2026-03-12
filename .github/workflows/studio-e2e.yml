@@ -10,13 +10,14 @@ jobs:
   studio-e2e:
     name: Studio E2E
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: studio-e2e
-          key: studio-e2e-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run Studio crate tests
         run: cargo test -p openstack-studio-ui

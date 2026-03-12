@@ -20,6 +20,26 @@ async fn raw_request_serialization_path_builds_and_fails_cleanly() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn raw_request_rejects_invalid_method() {
+    let client = StudioApiClient::new("http://127.0.0.1:9");
+    let req = RawRequest {
+        method: "GET WITH SPACE".to_string(),
+        path: "/_localstack/studio-api/services".to_string(),
+        query: HashMap::new(),
+        headers: HashMap::new(),
+        body: None,
+    };
+
+    let result = client.execute_raw(&req).await;
+    assert!(matches!(
+        result,
+        Err(openstack_studio_ui::api::StudioApiError::InvalidRawMethod(
+            _
+        ))
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn studio_url_resolution_prefers_explicit_then_daemon_then_fallback() {
     let explicit = resolve_studio_url(
         Some("http://127.0.0.1:4566"),

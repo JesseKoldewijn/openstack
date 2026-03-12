@@ -24,6 +24,9 @@ pub struct ApiState {
     pub start_time: Arc<Instant>,
     /// Send to this channel to request a graceful shutdown / restart.
     pub shutdown_tx: broadcast::Sender<()>,
+    pub(crate) guided_service_matrix: std::collections::HashSet<String>,
+    pub(crate) guided_manifest_inventory:
+        std::collections::HashMap<String, crate::studio::GuidedManifestFile>,
 }
 
 impl ApiState {
@@ -32,12 +35,16 @@ impl ApiState {
         plugin_manager: ServicePluginManager,
         shutdown_tx: broadcast::Sender<()>,
     ) -> Self {
+        let guided_service_matrix = crate::studio::load_service_matrix_services();
+        let guided_manifest_inventory = crate::studio::load_manifest_inventory();
         Self {
             config,
             plugin_manager,
             session_id: uuid::Uuid::new_v4().to_string(),
             start_time: Arc::new(Instant::now()),
             shutdown_tx,
+            guided_service_matrix,
+            guided_manifest_inventory,
         }
     }
 }

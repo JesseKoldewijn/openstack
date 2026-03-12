@@ -5,6 +5,7 @@ use openstack_service_framework::ServiceState;
 use serde_json::json;
 
 use crate::ApiState;
+use crate::studio::support_tier;
 
 pub async fn get_plugins(State(state): State<ApiState>) -> impl IntoResponse {
     let service_states = state.plugin_manager.service_states().await;
@@ -29,10 +30,7 @@ pub async fn get_plugins(State(state): State<ApiState>) -> impl IntoResponse {
             json!({
                 "name": name,
                 "status": status_str,
-                "studio_support_tier": match name.as_str() {
-                    "s3" | "sqs" => "guided",
-                    _ => "raw",
-                },
+                "studio_support_tier": support_tier(name, &state.guided_manifest_inventory),
                 "startup_attempts": metric.map(|m| m.startup_attempts).unwrap_or(0),
                 "startup_wait_count": metric.map(|m| m.startup_wait_count).unwrap_or(0),
                 "last_startup_duration_ms": metric.map(|m| m.last_startup_duration_ms).unwrap_or(0),

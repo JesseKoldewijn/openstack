@@ -1,11 +1,13 @@
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info, warn};
 
 const DAEMON_CHILD_ENV: &str = "OPENSTACK_DAEMON_CHILD";
@@ -292,44 +294,50 @@ async fn daemon_start(config: &openstack_config::Config) -> Result<()> {
         remove_state_files(&paths).await?;
     }
 
-    OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&paths.lock)
-        .context("failed to create daemon lock file")?;
+    let lock_path = paths.lock.clone();
+    let log_path = paths.log.clone();
+    let pid = tokio::task::spawn_blocking(move || -> Result<i32> {
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+            .context("failed to create daemon lock file")?;
 
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&paths.log)
-        .context("failed to open daemon log file")?;
-    let err = log
-        .try_clone()
-        .context("failed to clone daemon log handle")?;
+        let exe = std::env::current_exe().context("failed to resolve current executable")?;
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .context("failed to open daemon log file")?;
+        let err = log
+            .try_clone()
+            .context("failed to clone daemon log handle")?;
 
-    let mut cmd = Command::new(exe);
-    cmd.env(DAEMON_CHILD_ENV, "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err));
+        let mut cmd = Command::new(exe);
+        cmd.env(DAEMON_CHILD_ENV, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(err));
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: setsid has no Rust-level invariants and is called in child before exec.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: setsid has no Rust-level invariants and is called in child before exec.
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
-    }
 
-    let child = cmd.spawn().context("failed to spawn daemon process")?;
-    let pid = child.id() as i32;
+        let child = cmd.spawn().context("failed to spawn daemon process")?;
+        Ok(child.id() as i32)
+    })
+    .await
+    .context("failed to join daemon spawn task")??;
 
     tokio::fs::write(&paths.pid, pid.to_string()).await?;
     let meta = DaemonMetadata {
@@ -444,18 +452,27 @@ async fn daemon_logs(config: &openstack_config::Config, follow: bool) -> Result<
         return Ok(());
     }
 
-    let mut offset = initial.len();
+    let mut offset = initial.len() as u64;
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        match tokio::fs::read_to_string(&paths.log).await {
-            Ok(content) => {
-                if content.len() > offset {
-                    print!("{}", &content[offset..]);
-                    offset = content.len();
-                }
-            }
+        let mut file = match tokio::fs::File::open(&paths.log).await {
+            Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::NotFound => break,
             Err(e) => return Err(e.into()),
+        };
+
+        if let Ok(meta) = file.metadata().await
+            && meta.len() < offset
+        {
+            offset = meta.len();
+        }
+
+        file.seek(SeekFrom::Start(offset)).await?;
+        let mut chunk = Vec::new();
+        let read = file.read_to_end(&mut chunk).await?;
+        if read > 0 {
+            print!("{}", String::from_utf8_lossy(&chunk));
+            offset += read as u64;
         }
     }
     Ok(())
@@ -463,7 +480,7 @@ async fn daemon_logs(config: &openstack_config::Config, follow: bool) -> Result<
 
 async fn recover_stale_state(paths: &DaemonPaths) -> Result<()> {
     let pid = read_pid(&paths.pid).await;
-    if pid.is_none() || !pid.is_some_and(is_pid_running) {
+    if !pid.is_some_and(is_pid_running) {
         remove_state_files(paths).await?;
     }
     Ok(())
@@ -487,7 +504,8 @@ async fn read_pid(path: &Path) -> Option<i32> {
 
 async fn read_meta(path: &Path) -> Result<DaemonMetadata> {
     let bytes = tokio::fs::read(path).await?;
-    Ok(serde_json::from_slice::<DaemonMetadata>(&bytes)?)
+    serde_json::from_slice::<DaemonMetadata>(&bytes)
+        .with_context(|| format!("failed to parse daemon metadata from {}", path.display()))
 }
 
 async fn is_health_ok(url: &str) -> bool {

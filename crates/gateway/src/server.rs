@@ -32,16 +32,16 @@ use crate::sigv4::{
 };
 
 const STUDIO_SPA: &str = r#"<!doctype html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>openstack studio</title>
-  <link rel=\"stylesheet\" href=\"/_localstack/studio/assets/app.css\" />
+  <link rel="stylesheet" href="/_localstack/studio/assets/app.css" />
 </head>
 <body>
-  <div id=\"studio-app\">Loading Studio dashboard...</div>
-  <script src=\"/_localstack/studio/assets/app.js\"></script>
+  <div id="studio-app">Loading Studio dashboard...</div>
+  <script src="/_localstack/studio/assets/app.js"></script>
 </body>
 </html>
 "#;
@@ -253,12 +253,16 @@ const STUDIO_GUIDED_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 /// `SpooledBody::write_from_stream()`.
 struct BodyStreamAdapter {
     inner: BodyStream<Body>,
+    bytes_read: usize,
+    max_bytes: Option<usize>,
 }
 
 impl BodyStreamAdapter {
-    fn new(body: Body) -> Self {
+    fn new(body: Body, max_bytes: Option<usize>) -> Self {
         Self {
             inner: BodyStream::new(body),
+            bytes_read: 0,
+            max_bytes,
         }
     }
 }
@@ -271,6 +275,13 @@ impl futures_core::Stream for BodyStreamAdapter {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(frame))) => {
                     if let Ok(data) = frame.into_data() {
+                        self.bytes_read = self.bytes_read.saturating_add(data.len());
+                        if self.max_bytes.is_some_and(|limit| self.bytes_read > limit) {
+                            return Poll::Ready(Some(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "guided execution payload exceeds configured limit",
+                            ))));
+                        }
                         return Poll::Ready(Some(Ok(data)));
                     }
                     // Skip non-data frames (trailers, etc.)
@@ -296,6 +307,7 @@ struct AppState {
     config: Config,
     plugin_manager: ServicePluginManager,
     cors: Arc<CorsHandler>,
+    internal_api_router: Router,
 }
 
 impl Gateway {
@@ -309,10 +321,18 @@ impl Gateway {
     /// Build the axum Router for this gateway (useful for testing).
     fn build_app(&self) -> Router {
         let cors = Arc::new(CorsHandler::new(&self.config));
+        let shutdown_tx = tokio::sync::broadcast::channel::<()>(1).0;
+        let internal_state = openstack_internal_api::ApiState::new(
+            self.config.clone(),
+            self.plugin_manager.clone(),
+            shutdown_tx,
+        );
+        let internal_api_router = openstack_internal_api::internal_api_router(internal_state);
         let app_state = AppState {
             config: self.config.clone(),
             plugin_manager: self.plugin_manager.clone(),
             cors,
+            internal_api_router,
         };
         Router::new()
             .fallback(handle_request)
@@ -416,11 +436,38 @@ async fn handle_request(
         }
     }
 
+    if is_studio_guided_execution_route(&path)
+        && headers
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|len| len > STUDIO_GUIDED_MAX_PAYLOAD_BYTES)
+    {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "guided execution payload exceeds configured limit",
+        )
+            .into_response();
+    }
+
+    let guided_limit = if is_studio_guided_execution_route(&path) {
+        Some(STUDIO_GUIDED_MAX_PAYLOAD_BYTES)
+    } else {
+        None
+    };
+
     // Stream the request body into a SpooledBody
     let threshold = state.config.body_spool_threshold_bytes;
     let mut spooled = SpooledBody::new(threshold);
-    let stream = BodyStreamAdapter::new(req.into_body());
+    let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
     if let Err(e) = spooled.write_from_stream(stream).await {
+        if e.kind() == io::ErrorKind::InvalidData {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "guided execution payload exceeds configured limit",
+            )
+                .into_response();
+        }
         error!("Failed to read request body: {}", e);
         return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
     }
@@ -619,13 +666,14 @@ async fn handle_request(
 }
 
 fn is_studio_spa_route(path: &str) -> bool {
-    path == "/_localstack/studio"
+    (path == "/_localstack/studio"
         || path == "/_localstack/studio/"
-        || path.starts_with("/_localstack/studio/")
+        || path.starts_with("/_localstack/studio/"))
+        && !path.starts_with("/_localstack/studio/assets/")
 }
 
 fn is_studio_asset_route(path: &str) -> bool {
-    path == "/_localstack/studio/assets/app.js" || path == "/_localstack/studio/assets/app.css"
+    path.starts_with("/_localstack/studio/assets/")
 }
 
 fn studio_spa_response() -> Response {
@@ -639,18 +687,31 @@ fn studio_spa_response() -> Response {
 }
 
 fn studio_asset_response(path: &str) -> Response {
-    let (content_type, body) = match path {
-        "/_localstack/studio/assets/app.js" => {
-            ("application/javascript; charset=utf-8", STUDIO_ASSET_JS)
-        }
-        "/_localstack/studio/assets/app.css" => ("text/css; charset=utf-8", STUDIO_ASSET_CSS),
-        _ => ("text/plain; charset=utf-8", "Not found"),
+    let (status, content_type, body, cache_control) = match path {
+        "/_localstack/studio/assets/app.js" => (
+            StatusCode::OK,
+            "application/javascript; charset=utf-8",
+            STUDIO_ASSET_JS,
+            "public, max-age=31536000, immutable",
+        ),
+        "/_localstack/studio/assets/app.css" => (
+            StatusCode::OK,
+            "text/css; charset=utf-8",
+            STUDIO_ASSET_CSS,
+            "public, max-age=31536000, immutable",
+        ),
+        _ => (
+            StatusCode::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            "Not found",
+            "no-cache",
+        ),
     };
 
     Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .header("content-type", content_type)
-        .header("cache-control", "public, max-age=31536000, immutable")
+        .header("cache-control", cache_control)
         .header("etag", "\"studio-asset-v1\"")
         .body(Body::from(body))
         .unwrap_or_default()
@@ -1023,14 +1084,6 @@ async fn handle_internal_api(
         }
     }
 
-    let shutdown_tx = tokio::sync::broadcast::channel::<()>(1).0;
-    let state = openstack_internal_api::ApiState::new(
-        _state.config.clone(),
-        _state.plugin_manager.clone(),
-        shutdown_tx,
-    );
-    let router = openstack_internal_api::internal_api_router(state);
-
     let uri = if _query_params.is_empty() {
         path
     } else {
@@ -1054,9 +1107,12 @@ async fn handle_internal_api(
         .unwrap_or_default();
 
     use tower::ServiceExt;
-    match router.oneshot(req).await {
+    match _state.internal_api_router.clone().oneshot(req).await {
         Ok(resp) => resp,
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal API error").into_response(),
+        Err(e) => {
+            error!(error = %e, "internal API router dispatch failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal API error").into_response()
+        }
     }
 }
 

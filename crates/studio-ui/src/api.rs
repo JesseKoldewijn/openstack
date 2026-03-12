@@ -18,6 +18,10 @@ pub struct StudioApiClient {
 pub enum StudioApiError {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("invalid raw request url: {0}")]
+    InvalidRawUrl(String),
+    #[error("invalid raw request method: {0}")]
+    InvalidRawMethod(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +98,14 @@ impl StudioApiClient {
 
     pub async fn services(&self) -> Result<StudioServicesResponse, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/services", self.base_url);
-        Ok(self.http.get(url).send().await?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn interaction_schema(&self) -> Result<InteractionSchema, StudioApiError> {
@@ -102,12 +113,26 @@ impl StudioApiClient {
             "{}/_localstack/studio-api/interactions/schema",
             self.base_url
         );
-        Ok(self.http.get(url).send().await?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn flow_catalog(&self) -> Result<FlowCatalogResponse, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/flows/catalog", self.base_url);
-        Ok(self.http.get(url).send().await?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn flow_definition(
@@ -115,16 +140,31 @@ impl StudioApiClient {
         service: &str,
     ) -> Result<FlowDefinitionResponse, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/flows/{}", self.base_url, service);
-        Ok(self.http.get(url).send().await?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn flow_coverage(&self) -> Result<FlowCoverageResponse, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/flows/coverage", self.base_url);
-        Ok(self.http.get(url).send().await?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn execute_raw(&self, request: &RawRequest) -> Result<RawResponse, StudioApiError> {
-        let mut url = reqwest::Url::parse(&format!("{}{}", self.base_url, request.path)).unwrap();
+        let mut url = reqwest::Url::parse(&format!("{}{}", self.base_url, request.path))
+            .map_err(|e| StudioApiError::InvalidRawUrl(e.to_string()))?;
         {
             let mut qp = url.query_pairs_mut();
             for (k, v) in &request.query {
@@ -132,7 +172,8 @@ impl StudioApiClient {
             }
         }
 
-        let method = request.method.parse().unwrap_or(reqwest::Method::GET);
+        let method = reqwest::Method::from_bytes(request.method.as_bytes())
+            .map_err(|_| StudioApiError::InvalidRawMethod(request.method.clone()))?;
         let mut req = self.http.request(method, url);
         for (k, v) in &request.headers {
             req = req.header(k, v);

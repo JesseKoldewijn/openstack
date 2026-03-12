@@ -60,13 +60,10 @@ mod internal_api_tests {
     fn make_state(config: Config) -> ApiState {
         let (shutdown_tx, _) = broadcast::channel(1);
         let plugin_manager = ServicePluginManager::new(config.clone());
-        ApiState {
-            config,
-            plugin_manager,
-            session_id: "test-session-id".to_string(),
-            start_time: Arc::new(Instant::now()),
-            shutdown_tx,
-        }
+        let mut state = ApiState::new(config, plugin_manager, shutdown_tx);
+        state.session_id = "test-session-id".to_string();
+        state.start_time = Arc::new(Instant::now());
+        state
     }
 
     async fn get_json(router: &axum::Router, path: &str) -> (StatusCode, Value) {
@@ -141,13 +138,9 @@ mod internal_api_tests {
         let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
         let config = test_config();
         let plugin_manager = ServicePluginManager::new(config.clone());
-        let state = ApiState {
-            config,
-            plugin_manager,
-            session_id: "test".to_string(),
-            start_time: Arc::new(Instant::now()),
-            shutdown_tx,
-        };
+        let mut state = ApiState::new(config, plugin_manager, shutdown_tx);
+        state.session_id = "test".to_string();
+        state.start_time = Arc::new(Instant::now());
         let router = internal_api_router(state);
 
         let req = Request::builder()

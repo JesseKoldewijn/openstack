@@ -44,13 +44,10 @@ fn test_config() -> Config {
 fn make_state(config: Config) -> ApiState {
     let (shutdown_tx, _) = broadcast::channel(1);
     let plugin_manager = ServicePluginManager::new(config.clone());
-    ApiState {
-        config,
-        plugin_manager,
-        session_id: "studio-contracts".to_string(),
-        start_time: Arc::new(Instant::now()),
-        shutdown_tx,
-    }
+    let mut state = ApiState::new(config, plugin_manager, shutdown_tx);
+    state.session_id = "studio-contracts".to_string();
+    state.start_time = Arc::new(Instant::now());
+    state
 }
 
 async fn get_json(router: &axum::Router, path: &str) -> (StatusCode, Value) {

@@ -20,9 +20,18 @@ pub struct InteractionHistory {
 impl InteractionHistory {
     pub fn new(max_entries: usize) -> Self {
         Self {
-            max_entries,
+            max_entries: std::cmp::max(1, max_entries),
             entries: VecDeque::new(),
         }
+    }
+
+    pub fn next_id(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|entry| entry.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
     }
 
     pub fn push(&mut self, entry: InteractionEntry) {

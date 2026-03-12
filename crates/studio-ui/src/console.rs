@@ -46,5 +46,6 @@ impl RawConsoleState {
         self.query = request.query.clone();
         self.headers = request.headers.clone();
         self.body = request.body.clone();
+        self.last_response = None;
     }
 }

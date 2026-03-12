@@ -138,7 +138,7 @@ impl ServiceWorkspaceState {
         let request = self.raw_console.to_request();
         let response = execute(&request);
 
-        let next_id = history.list().next().map(|entry| entry.id + 1).unwrap_or(1);
+        let next_id = history.next_id();
         history.push(crate::history::InteractionEntry {
             id: next_id,
             timestamp_unix_ms: 0,

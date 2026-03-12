@@ -54,8 +54,8 @@ mod studio_security_tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        // Should not hit whitelisted immutable asset route.
-        assert_eq!(resp.status(), StatusCode::OK);
+        // Unknown assets under the asset namespace should be explicit 404.
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_ne!(
             resp.headers()
                 .get("cache-control")

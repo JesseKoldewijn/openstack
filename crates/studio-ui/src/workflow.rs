@@ -51,6 +51,21 @@ impl GuidedWorkflow {
     }
 
     pub fn sqs_basic(queue_name: &str, message: &str) -> Self {
+        let create_queue_body = serde_urlencoded::to_string([
+            ("Action", "CreateQueue".to_string()),
+            ("QueueName", queue_name.to_string()),
+            ("Version", "2012-11-05".to_string()),
+        ])
+        .unwrap_or_default();
+        let queue_url = format!("https://sqs.us-east-1.amazonaws.com/000000000000/{queue_name}");
+        let send_message_body = serde_urlencoded::to_string([
+            ("Action", "SendMessage".to_string()),
+            ("QueueUrl", queue_url),
+            ("MessageBody", message.to_string()),
+            ("Version", "2012-11-05".to_string()),
+        ])
+        .unwrap_or_default();
+
         let create_queue = WorkflowStep {
             title: "Create queue".to_string(),
             request: RawRequest {
@@ -58,9 +73,7 @@ impl GuidedWorkflow {
                 path: "/".to_string(),
                 query: HashMap::new(),
                 headers: HashMap::new(),
-                body: Some(format!(
-                    "Action=CreateQueue&QueueName={queue_name}&Version=2012-11-05"
-                )),
+                body: Some(create_queue_body),
             },
         };
 
@@ -71,9 +84,7 @@ impl GuidedWorkflow {
                 path: "/".to_string(),
                 query: HashMap::new(),
                 headers: HashMap::new(),
-                body: Some(format!(
-                    "Action=SendMessage&QueueUrl={queue_name}&MessageBody={message}&Version=2012-11-05"
-                )),
+                body: Some(send_message_body),
             },
         };
 

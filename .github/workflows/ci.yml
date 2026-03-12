@@ -255,7 +255,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check Studio asset budget
-        run: scripts/check_studio_asset_budget.sh
+        run: bash scripts/check_studio_asset_budget.sh
 
   parity-core:
     name: Parity (core)

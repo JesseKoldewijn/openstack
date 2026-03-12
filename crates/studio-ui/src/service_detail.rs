@@ -30,7 +30,7 @@ pub fn build_service_detail_layout(
         service: service.to_string(),
         guided_panel: PanelState {
             title: "Guided Flow".to_string(),
-            visible: manifest.is_some(),
+            visible: selected_flow_id.is_some(),
         },
         raw_panel: PanelState {
             title: "Raw Interaction".to_string(),
