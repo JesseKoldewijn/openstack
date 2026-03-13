@@ -252,6 +252,8 @@ jobs:
   studio-performance-budget:
     name: Studio Asset Budget
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Check Studio asset budget

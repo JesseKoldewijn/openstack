@@ -376,6 +376,39 @@ fn lint_manifest_semantics(manifest: &GuidedManifest) -> Vec<ValidationIssue> {
                 );
             }
         }
+
+        for (cleanup_index, cleanup_step) in flow.cleanup.iter().enumerate() {
+            let cleanup_path = format!("{flow_path}.cleanup[{cleanup_index}]");
+            check_interpolation_value(
+                &cleanup_step.operation.path,
+                &format!("{cleanup_path}.operation.path"),
+                &mut issues,
+            );
+
+            for (name, value) in &cleanup_step.operation.headers {
+                check_interpolation_value(
+                    value,
+                    &format!("{cleanup_path}.operation.headers.{name}"),
+                    &mut issues,
+                );
+            }
+
+            for (name, value) in &cleanup_step.operation.query {
+                check_interpolation_value(
+                    value,
+                    &format!("{cleanup_path}.operation.query.{name}"),
+                    &mut issues,
+                );
+            }
+
+            if let Some(body) = &cleanup_step.operation.body {
+                check_interpolation_value(
+                    body,
+                    &format!("{cleanup_path}.operation.body"),
+                    &mut issues,
+                );
+            }
+        }
     }
 
     issues
@@ -453,6 +486,9 @@ fn parse_version(value: &str) -> Option<(u64, u64)> {
     let mut parts = value.split('.');
     let major = parts.next()?.parse::<u64>().ok()?;
     let minor = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
     Some((major, minor))
 }
 
@@ -477,7 +513,8 @@ fn require_string(
 
 fn service_name_from_path(path: &str) -> Option<String> {
     let normalized = path.replace('\\', "/");
-    let file_name = Path::new(&normalized).file_name()?.to_str()?;
+    let normalized_path = Path::new(&normalized);
+    let file_name = normalized_path.file_name()?.to_str()?;
     if !file_name.ends_with(GUIDED_MANIFEST_SUFFIX) {
         return None;
     }
@@ -487,9 +524,12 @@ fn service_name_from_path(path: &str) -> Option<String> {
         return None;
     }
 
-    let rooted = format!("/{GUIDED_MANIFEST_ROOT}/");
-    let prefixed = format!("{GUIDED_MANIFEST_ROOT}/");
-    if !(normalized.contains(&rooted) || normalized.starts_with(&prefixed)) {
+    let parent = normalized_path.parent()?;
+    let parent_normalized = parent.to_string_lossy().replace('\\', "/");
+    let guided_parent_suffix = format!("/{GUIDED_MANIFEST_ROOT}");
+    if parent_normalized != GUIDED_MANIFEST_ROOT
+        && !parent_normalized.ends_with(&guided_parent_suffix)
+    {
         return None;
     }
 
@@ -552,21 +592,15 @@ mod tests {
         let err = parse_and_validate_manifest(input).expect_err("semantic lint must fail");
         match err {
             ManifestError::SemanticValidation { issues } => {
-                assert!(
-                    issues
-                        .iter()
-                        .any(|issue| issue.message.contains("unsupported expression source"))
-                );
-                assert!(
-                    issues
-                        .iter()
-                        .any(|issue| issue.message.contains("L1 flow must define cleanup steps"))
-                );
-                assert!(
-                    issues
-                        .iter()
-                        .any(|issue| issue.message.contains("at least one assertion"))
-                );
+                assert!(issues
+                    .iter()
+                    .any(|issue| issue.message.contains("unsupported expression source")));
+                assert!(issues
+                    .iter()
+                    .any(|issue| issue.message.contains("L1 flow must define cleanup steps")));
+                assert!(issues
+                    .iter()
+                    .any(|issue| issue.message.contains("at least one assertion")));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -591,16 +625,12 @@ mod tests {
         let err = enforce_one_manifest_per_service(&services, &manifests).expect_err("must fail");
         match err {
             ManifestError::SemanticValidation { issues } => {
-                assert!(
-                    issues
-                        .iter()
-                        .any(|issue| issue.message.contains("duplicate manifest"))
-                );
-                assert!(
-                    issues
-                        .iter()
-                        .any(|issue| issue.message.contains("missing manifest"))
-                );
+                assert!(issues
+                    .iter()
+                    .any(|issue| issue.message.contains("duplicate manifest")));
+                assert!(issues
+                    .iter()
+                    .any(|issue| issue.message.contains("missing manifest")));
             }
             other => panic!("unexpected error: {other:?}"),
         }

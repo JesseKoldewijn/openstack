@@ -22,6 +22,7 @@ pub struct GuidedWorkflow {
 
 impl GuidedWorkflow {
     pub fn s3_basic(bucket: &str, key: &str, body: &str) -> Self {
+        let encoded_key = url_encode(key);
         let create_bucket = WorkflowStep {
             title: "Create bucket".to_string(),
             request: RawRequest {
@@ -37,7 +38,7 @@ impl GuidedWorkflow {
             title: "Put object".to_string(),
             request: RawRequest {
                 method: "PUT".to_string(),
-                path: format!("/{bucket}/{key}"),
+                path: format!("/{bucket}/{encoded_key}"),
                 query: HashMap::new(),
                 headers: HashMap::new(),
                 body: Some(body.to_string()),
@@ -72,7 +73,10 @@ impl GuidedWorkflow {
                 method: "POST".to_string(),
                 path: "/".to_string(),
                 query: HashMap::new(),
-                headers: HashMap::new(),
+                headers: HashMap::from([(
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded; charset=utf-8".to_string(),
+                )]),
                 body: Some(create_queue_body),
             },
         };
@@ -83,7 +87,10 @@ impl GuidedWorkflow {
                 method: "POST".to_string(),
                 path: "/".to_string(),
                 query: HashMap::new(),
-                headers: HashMap::new(),
+                headers: HashMap::from([(
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded; charset=utf-8".to_string(),
+                )]),
                 body: Some(send_message_body),
             },
         };
@@ -93,4 +100,16 @@ impl GuidedWorkflow {
             steps: vec![create_queue, send_message],
         }
     }
+}
+
+fn url_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }

@@ -430,8 +430,11 @@ pub fn interpolate_value(
 
         let expr_start = start + 2;
         let Some(end_rel) = input[expr_start..].find("}}") else {
-            output.push_str(&input[start..]);
-            return Ok(output);
+            return Err(AdapterError {
+                code: "malformed_interpolation".to_string(),
+                message: format!("unclosed interpolation expression in '{input}'"),
+                retryable: false,
+            });
         };
         let end = expr_start + end_rel;
         let expr = input[expr_start..end].trim();

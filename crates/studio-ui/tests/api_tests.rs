@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use openstack_studio_ui::api::{RawRequest, StudioApiClient, resolve_studio_url_with_timeout};
+use openstack_studio_ui::api::{
+    resolve_studio_url_with_timeout, RawRequest, StudioApiClient, StudioApiError,
+};
 
 #[tokio::test(flavor = "current_thread")]
 async fn raw_request_serialization_path_builds_and_fails_cleanly() {
@@ -16,7 +18,7 @@ async fn raw_request_serialization_path_builds_and_fails_cleanly() {
     // We only assert that request construction/path serialization is valid
     // and errors are surfaced through the typed result.
     let result = client.execute_raw(&req).await;
-    assert!(result.is_err());
+    assert!(matches!(result, Err(StudioApiError::Http(_))));
 }
 
 #[tokio::test(flavor = "current_thread")]

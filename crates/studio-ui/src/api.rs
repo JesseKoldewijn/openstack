@@ -99,9 +99,13 @@ fn strip_health_suffix(url: &str) -> String {
 
 impl StudioApiClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             base_url: base_url.into(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 

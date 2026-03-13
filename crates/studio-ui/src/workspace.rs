@@ -69,6 +69,10 @@ impl ServiceWorkspaceState {
         history: &mut InteractionHistory,
         retry_policy: RetryPolicy,
     ) -> Result<&GuidedExecutionReport, WorkspaceError> {
+        self.guided_state = GuidedUxState::Idle;
+        self.guided_report = None;
+        self.guided_render = None;
+
         if manifest.service != self.service {
             return Err(WorkspaceError::ServiceMismatch);
         }
