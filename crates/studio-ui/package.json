@@ -1,0 +1,11 @@
+{
+  "name": "openstack-studio-ui",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "tailwind:build": "tailwindcss -i ./src/styles/input.css -o ./dist/studio.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "^4.0.0"
+  }
+}

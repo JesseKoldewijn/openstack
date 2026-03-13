@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.2",
+  "service": "sns",
+  "protocol": "query",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create",
+          "title": "Create topic",
+          "operation": { "method": "POST", "path": "/", "body": "Action=CreateTopic&Name={{inputs.resource_name}}&Version=2010-03-31" },
+          "captures": [{ "name": "resource_name", "source": "inputs.resource_name" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete",
+          "title": "Delete topic",
+          "operation": { "method": "POST", "path": "/", "body": "Action=DeleteTopic&TopicArn={{captures.resource_name}}&Version=2010-03-31" },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}

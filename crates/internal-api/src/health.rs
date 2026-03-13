@@ -27,6 +27,11 @@ pub async fn get_health(State(state): State<ApiState>) -> impl IntoResponse {
         "edition": "community",
         "version": env!("CARGO_PKG_VERSION"),
         "services": services,
+        "daemon": {
+            "managed": std::env::var("OPENSTACK_DAEMON_CHILD").ok().as_deref() == Some("1"),
+            "status": "running",
+            "pid": std::process::id(),
+        }
     });
     Json(body)
 }

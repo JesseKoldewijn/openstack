@@ -60,13 +60,10 @@ mod internal_api_tests {
     fn make_state(config: Config) -> ApiState {
         let (shutdown_tx, _) = broadcast::channel(1);
         let plugin_manager = ServicePluginManager::new(config.clone());
-        ApiState {
-            config,
-            plugin_manager,
-            session_id: "test-session-id".to_string(),
-            start_time: Arc::new(Instant::now()),
-            shutdown_tx,
-        }
+        let mut state = ApiState::new(config, plugin_manager, shutdown_tx);
+        state.session_id = "test-session-id".to_string();
+        state.start_time = Arc::new(Instant::now());
+        state
     }
 
     async fn get_json(router: &axum::Router, path: &str) -> (StatusCode, Value) {
@@ -141,13 +138,9 @@ mod internal_api_tests {
         let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
         let config = test_config();
         let plugin_manager = ServicePluginManager::new(config.clone());
-        let state = ApiState {
-            config,
-            plugin_manager,
-            session_id: "test".to_string(),
-            start_time: Arc::new(Instant::now()),
-            shutdown_tx,
-        };
+        let mut state = ApiState::new(config, plugin_manager, shutdown_tx);
+        state.session_id = "test".to_string();
+        state.start_time = Arc::new(Instant::now());
         let router = internal_api_router(state);
 
         let req = Request::builder()
@@ -175,6 +168,23 @@ mod internal_api_tests {
         assert!(body["version"].is_string());
         assert_eq!(body["session_id"], "test-session-id");
         assert!(body["uptime"].is_number());
+        assert_eq!(body["studio"]["enabled"], true);
+        assert_eq!(body["studio"]["base_path"], "/_localstack/studio");
+        assert_eq!(body["studio"]["api_base_path"], "/_localstack/studio-api");
+        assert_eq!(
+            body["studio"]["guided_flow"]["manifest_schema_version"],
+            "1.2"
+        );
+        assert_eq!(
+            body["studio"]["guided_flow"]["catalog_endpoint"],
+            "/_localstack/studio-api/flows/catalog"
+        );
+        assert_eq!(
+            body["studio"]["guided_flow"]["coverage_endpoint"],
+            "/_localstack/studio-api/flows/coverage"
+        );
+        assert!(body["daemon"]["managed"].is_boolean());
+        assert!(body["daemon"]["pid"].is_number());
     }
 
     // ── 7.6  GET /_localstack/init ────────────────────────────────────────────
@@ -213,7 +223,73 @@ mod internal_api_tests {
             assert!(first.get("startup_attempts").is_some());
             assert!(first.get("startup_wait_count").is_some());
             assert!(first.get("last_startup_duration_ms").is_some());
+            assert!(first.get("studio_support_tier").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn health_includes_daemon_metadata() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["daemon"]["managed"].is_boolean());
+        assert_eq!(body["daemon"]["status"], "running");
+        assert!(body["daemon"]["pid"].is_number());
+    }
+
+    #[tokio::test]
+    async fn studio_api_services_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/services").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["services"].is_array());
+    }
+
+    #[tokio::test]
+    async fn studio_api_interaction_schema_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/interactions/schema").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["request"]["fields"].is_array());
+        assert!(body["response"]["fields"].is_array());
+    }
+
+    #[tokio::test]
+    async fn studio_api_flow_catalog_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/flows/catalog").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["services"].is_array());
+    }
+
+    #[tokio::test]
+    async fn studio_api_flow_definition_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/flows/s3").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["service"], "s3");
+        assert!(body["flows"].is_array());
+    }
+
+    #[tokio::test]
+    async fn studio_api_flow_coverage_returns_contract_shape() {
+        let state = make_state(test_config());
+        let router = internal_api_router(state);
+
+        let (status, body) = get_json(&router, "/_localstack/studio-api/flows/coverage").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["services"].is_array());
+        assert!(body["schema_version"].is_string());
     }
 
     // ── 7.8  GET /_localstack/diagnose ────────────────────────────────────────

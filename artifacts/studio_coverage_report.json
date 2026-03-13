@@ -1,0 +1,158 @@
+{
+  "guided": [
+    {
+      "service": "acm",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "apigateway",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "cloudformation",
+      "schemaVersion": "1.2",
+      "protocol": "query",
+      "flowCount": 1
+    },
+    {
+      "service": "cloudwatch",
+      "schemaVersion": "1.2",
+      "protocol": "json_target",
+      "flowCount": 1
+    },
+    {
+      "service": "dynamodb",
+      "schemaVersion": "1.2",
+      "protocol": "json_target",
+      "flowCount": 1
+    },
+    {
+      "service": "ec2",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "ecr",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "events",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "firehose",
+      "schemaVersion": "1.2",
+      "protocol": "json_target",
+      "flowCount": 1
+    },
+    {
+      "service": "iam",
+      "schemaVersion": "1.2",
+      "protocol": "query",
+      "flowCount": 1
+    },
+    {
+      "service": "kinesis",
+      "schemaVersion": "1.2",
+      "protocol": "json_target",
+      "flowCount": 1
+    },
+    {
+      "service": "kms",
+      "schemaVersion": "1.2",
+      "protocol": "json_target",
+      "flowCount": 1
+    },
+    {
+      "service": "lambda",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "opensearch",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "redshift",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "route53",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "s3",
+      "schemaVersion": "1.2",
+      "protocol": "rest_xml",
+      "flowCount": 1
+    },
+    {
+      "service": "secretsmanager",
+      "schemaVersion": "1.2",
+      "protocol": "json_target",
+      "flowCount": 1
+    },
+    {
+      "service": "ses",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "sns",
+      "schemaVersion": "1.2",
+      "protocol": "query",
+      "flowCount": 1
+    },
+    {
+      "service": "sqs",
+      "schemaVersion": "1.2",
+      "protocol": "query",
+      "flowCount": 1
+    },
+    {
+      "service": "ssm",
+      "schemaVersion": "1.2",
+      "protocol": "json_target",
+      "flowCount": 1
+    },
+    {
+      "service": "states",
+      "schemaVersion": "1.2",
+      "protocol": "rest_json",
+      "flowCount": 1
+    },
+    {
+      "service": "sts",
+      "schemaVersion": "1.2",
+      "protocol": "query",
+      "flowCount": 1
+    }
+  ],
+  "total_guided_services": 24,
+  "total_supported_services": 24,
+  "protocol_counts": {
+    "rest_json": 11,
+    "query": 5,
+    "json_target": 7,
+    "rest_xml": 1
+  },
+  "missing_services": [],
+  "source": "manifests/guided"
+}

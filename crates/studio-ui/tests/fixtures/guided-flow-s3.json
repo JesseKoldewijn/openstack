@@ -1,0 +1,16 @@
+{
+  "service": "s3",
+  "protocol": "rest_xml",
+  "steps": [
+    {
+      "operation": {
+        "method": "PUT",
+        "path": "/fixture-bucket"
+      },
+      "response": {
+        "status": 200,
+        "body": ""
+      }
+    }
+  ]
+}

@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+default-members = [
+    "crates/openstack",
+]
 members = [
     "crates/openstack",
     "crates/config",
@@ -33,6 +36,7 @@ members = [
     "crates/services/ecr",
     "crates/services/opensearch",
     "crates/services/redshift",
+    "crates/studio-ui",
     "crates/tests/integration",
 ]
 
@@ -134,6 +138,7 @@ openstack-acm = { path = "crates/services/acm" }
 openstack-ecr = { path = "crates/services/ecr" }
 openstack-opensearch = { path = "crates/services/opensearch" }
 openstack-redshift = { path = "crates/services/redshift" }
+openstack-studio-ui = { path = "crates/studio-ui" }
 
 [workspace.lints.rust]
 unused_imports = "warn"

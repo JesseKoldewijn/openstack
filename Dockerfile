@@ -23,6 +23,7 @@ COPY crates/aws-protocol/Cargo.toml       crates/aws-protocol/Cargo.toml
 COPY crates/service-framework/Cargo.toml  crates/service-framework/Cargo.toml
 COPY crates/state/Cargo.toml              crates/state/Cargo.toml
 COPY crates/internal-api/Cargo.toml       crates/internal-api/Cargo.toml
+COPY crates/studio-ui/Cargo.toml          crates/studio-ui/Cargo.toml
 COPY crates/dns/Cargo.toml                crates/dns/Cargo.toml
 COPY crates/services/s3/Cargo.toml            crates/services/s3/Cargo.toml
 COPY crates/services/sqs/Cargo.toml           crates/services/sqs/Cargo.toml

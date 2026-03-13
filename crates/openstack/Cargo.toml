@@ -15,6 +15,7 @@ openstack-internal-api.workspace = true
 openstack-dns.workspace = true
 openstack-service-framework.workspace = true
 openstack-state.workspace = true
+openstack-studio-ui.workspace = true
 
 # Services
 openstack-s3.workspace = true
@@ -46,3 +47,14 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+libc = "0.2"
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+assert_cmd = "2"
+predicates = "3"
+openstack-studio-ui.workspace = true

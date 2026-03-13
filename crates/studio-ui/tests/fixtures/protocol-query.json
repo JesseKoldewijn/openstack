@@ -1,0 +1,15 @@
+{
+  "protocol": "query",
+  "operation": {
+    "method": "POST",
+    "path": "/",
+    "body": "Action=CreateQueue&QueueName=q1&Version=2012-11-05"
+  },
+  "response": {
+    "status": 200,
+    "body": "<CreateQueueResponse><QueueUrl>https://example/q1</QueueUrl></CreateQueueResponse>"
+  },
+  "captures": {
+    "queue_url": "QueueUrl"
+  }
+}

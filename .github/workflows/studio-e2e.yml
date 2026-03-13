@@ -1,0 +1,26 @@
+name: Studio E2E
+
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: ["main", "develop"]
+
+jobs:
+  studio-e2e:
+    name: Studio E2E
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: studio-e2e
+
+      - name: Run Studio crate tests
+        run: cargo test -p openstack-studio-ui
+
+      - name: Run Studio integration E2E scenarios
+        run: cargo test -p openstack-integration-tests --test studio_e2e_tests

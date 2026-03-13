@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.2",
+  "service": "sts",
+  "protocol": "query",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "identity",
+          "title": "Get caller identity",
+          "operation": { "method": "POST", "path": "/", "body": "Action=GetCallerIdentity&Version=2011-06-15" },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "noop",
+          "title": "No-op cleanup",
+          "operation": { "method": "POST", "path": "/", "body": "Action=GetCallerIdentity&Version=2011-06-15" },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}

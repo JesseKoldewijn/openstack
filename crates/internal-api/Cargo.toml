@@ -8,6 +8,7 @@ license.workspace = true
 openstack-config.workspace = true
 openstack-service-framework.workspace = true
 openstack-state.workspace = true
+openstack-aws-protocol.workspace = true
 
 tokio.workspace = true
 axum.workspace = true

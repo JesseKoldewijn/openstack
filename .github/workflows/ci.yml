@@ -107,6 +107,25 @@ jobs:
             echo "| OS | \\`${{ matrix.os }}\\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  studio-ui-gates:
+    name: Studio UI Gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-studio-ui
+          key: studio-ui-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run Studio crate tests
+        run: cargo test -p openstack-studio-ui
+      - name: Run Studio integration E2E tests
+        run: cargo test -p openstack-integration-tests --test studio_e2e_tests
+        env:
+          SKIP_DOCKER_TESTS: "1"
+
   build:
     name: Build (release)
     runs-on: ubuntu-latest
@@ -212,6 +231,39 @@ jobs:
             echo "|---|---|"
             echo "| Result | \\`${{ job.status }}\\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  studio-coverage:
+    name: Studio Coverage Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Studio coverage report
+        run: python3 scripts/studio_coverage_report.py
+      - name: Enforce guided coverage gate
+        run: python3 scripts/studio_guided_coverage_gate.py
+
+  studio-manifest-validation:
+    name: Studio Manifest Validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate guided manifest schema and semantics
+        run: cargo test -p openstack-studio-ui guided_manifest::tests -- --nocapture
+
+  studio-performance-budget:
+    name: Studio Asset Budget
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Studio asset budget
+        run: bash scripts/check_studio_asset_budget.sh
 
   parity-core:
     name: Parity (core)
@@ -1107,6 +1159,10 @@ jobs:
         test,
         verify-build-artifact,
         validate-harness-coverage,
+        studio-coverage,
+        studio-manifest-validation,
+        studio-ui-gates,
+        studio-performance-budget,
         parity-core,
         parity-all-services-full,
         benchmark-smoke-full,
@@ -1127,6 +1183,10 @@ jobs:
         test,
         verify-build-artifact,
         validate-harness-coverage,
+        studio-coverage,
+        studio-manifest-validation,
+        studio-ui-gates,
+        studio-performance-budget,
         parity-core,
         parity-all-services-fast,
         benchmark-smoke-fast,

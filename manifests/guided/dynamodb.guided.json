@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.2",
+  "service": "dynamodb",
+  "protocol": "json_target",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create",
+          "title": "Create table",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": {"x-amz-target": "DynamoDB_20120810.CreateTable", "content-type": "application/x-amz-json-1.0"},
+            "body": "{\"TableName\":\"{{inputs.resource_name}}\",\"KeySchema\":[],\"AttributeDefinitions\":[],\"BillingMode\":\"PAY_PER_REQUEST\"}"
+          },
+          "captures": [{"name":"resource_name","source":"inputs.resource_name"}],
+          "assertions": [{"kind":"status","target":"status","expected":"200"}]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete",
+          "title": "Delete table",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": {"x-amz-target": "DynamoDB_20120810.DeleteTable", "content-type": "application/x-amz-json-1.0"},
+            "body": "{\"TableName\":\"{{captures.resource_name}}\"}"
+          },
+          "assertions": [{"kind":"status","target":"status","expected":"200"}]
+        }
+      ]
+    }
+  ]
+}

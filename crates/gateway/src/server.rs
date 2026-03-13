@@ -20,6 +20,8 @@ use openstack_config::Config;
 use openstack_service_framework::traits::ResponseBody;
 use openstack_service_framework::{ServicePluginManager, SpooledBody};
 use openstack_state::StateManager;
+use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -29,17 +31,238 @@ use crate::sigv4::{
     DEFAULT_ACCESS_KEY, DEFAULT_REGION, access_key_to_account_id, is_valid_region, parse_sigv4_auth,
 };
 
+const STUDIO_SPA: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>openstack studio</title>
+  <link rel="stylesheet" href="/_localstack/studio/assets/app.css" />
+</head>
+<body>
+  <div id="studio-app">Loading Studio dashboard...</div>
+  <script src="/_localstack/studio/assets/app.js"></script>
+</body>
+</html>
+"#;
+
+const STUDIO_ASSET_JS: &str = r#"(function () {
+  const root = document.getElementById('studio-app');
+  if (!root) return;
+
+  const state = {
+    services: [],
+    flowCatalog: [],
+    flowCoverage: [],
+    selectedService: null,
+    flowDefinition: null,
+    history: [],
+    raw: { method: 'GET', path: '/_localstack/health', body: '' },
+    response: null,
+  };
+
+  function esc(v) {
+    return String(v ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  async function getJson(path) {
+    const r = await fetch(path, { headers: { 'accept': 'application/json' } });
+    if (!r.ok) throw new Error(path + ' failed: ' + r.status);
+    return r.json();
+  }
+
+  function mergeServiceData() {
+    const byFlow = new Map(state.flowCatalog.map((x) => [x.service, x]));
+    const byCoverage = new Map(state.flowCoverage.map((x) => [x.service, x]));
+    return state.services.map((s) => {
+      const flow = byFlow.get(s.name) || { protocol: 'unknown', flow_count: 0, maturity: 'none' };
+      const coverage = byCoverage.get(s.name) || { quality: 'unknown', l1_flows: 0 };
+      return {
+        name: s.name,
+        status: s.status,
+        tier: s.support_tier,
+        protocol: flow.protocol,
+        flows: flow.flow_count,
+        quality: coverage.quality,
+      };
+    });
+  }
+
+  function render() {
+    const cards = mergeServiceData();
+    const selected = state.selectedService;
+    const selectedCard = cards.find((c) => c.name === selected);
+
+    root.innerHTML = `
+      <div class=\"studio-layout\">
+        <header class=\"studio-header\">
+          <h1>OpenStack Studio</h1>
+          <p>Service dashboard for guided and raw operations</p>
+        </header>
+        <main class=\"studio-grid\">
+          <section class=\"studio-panel\">
+            <h2>Services</h2>
+            <div class=\"service-list\">
+              ${cards.map((c) => `
+                <button class=\"service-card ${selected === c.name ? 'active' : ''}\" data-service=\"${esc(c.name)}\">
+                  <strong>${esc(c.name)}</strong>
+                  <span>Status: ${esc(c.status)}</span>
+                  <span>Tier: ${esc(c.tier)}</span>
+                  <span>Protocol: ${esc(c.protocol)}</span>
+                  <span>Flows: ${esc(c.flows)}</span>
+                  <span>Coverage: ${esc(c.quality)}</span>
+                </button>
+              `).join('')}
+            </div>
+          </section>
+          <section class=\"studio-panel\">
+            <h2>Service Detail ${selectedCard ? '(' + esc(selectedCard.name) + ')' : ''}</h2>
+            ${selected ? renderDetail() : '<p>Select a service to run guided or raw operations.</p>'}
+          </section>
+          <section class=\"studio-panel\">
+            <h2>History</h2>
+            <div class=\"history-list\">
+              ${state.history.length === 0 ? '<p>No interactions yet.</p>' : state.history.map((h, i) =>
+                `<button class=\"history-item\" data-history=\"${i}\">${esc(h.service)} - ${esc(h.method)} ${esc(h.path)} (${esc(h.status)})</button>`
+              ).join('')}
+            </div>
+          </section>
+        </main>
+      </div>
+    `;
+
+    root.querySelectorAll('[data-service]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        state.selectedService = btn.getAttribute('data-service');
+        try {
+          state.flowDefinition = await getJson('/_localstack/studio-api/flows/' + state.selectedService);
+        } catch (e) {
+          state.flowDefinition = { service: state.selectedService, flows: [], inputs: [] };
+        }
+        render();
+      });
+    });
+
+    root.querySelectorAll('[data-history]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.getAttribute('data-history'));
+        const item = state.history[idx];
+        if (!item) return;
+        state.raw.method = item.method;
+        state.raw.path = item.path;
+        state.raw.body = item.body || '';
+        render();
+      });
+    });
+
+    const rawRun = root.querySelector('[data-run-raw]');
+    if (rawRun) rawRun.addEventListener('click', runRaw);
+    const flowRun = root.querySelector('[data-run-flow]');
+    if (flowRun) flowRun.addEventListener('click', runGuided);
+  }
+
+  function renderDetail() {
+    const flow = state.flowDefinition;
+    return `
+      <div class=\"detail-grid\">
+        <div>
+          <h3>Guided Flow</h3>
+          <p>Flows available: ${esc(flow && flow.flows ? flow.flows.length : 0)}</p>
+          <button data-run-flow ${!flow || !flow.flows || flow.flows.length === 0 ? 'disabled' : ''}>Run first guided flow</button>
+        </div>
+        <div>
+          <h3>Raw Request</h3>
+          <label>Method <input id=\"raw-method\" value=\"${esc(state.raw.method)}\"/></label>
+          <label>Path <input id=\"raw-path\" value=\"${esc(state.raw.path)}\"/></label>
+          <label>Body <textarea id=\"raw-body\">${esc(state.raw.body)}</textarea></label>
+          <button data-run-raw>Run raw request</button>
+          ${state.response ? `<pre>${esc(JSON.stringify(state.response, null, 2))}</pre>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  async function runRaw() {
+    const methodInput = document.getElementById('raw-method');
+    const pathInput = document.getElementById('raw-path');
+    const bodyInput = document.getElementById('raw-body');
+    state.raw.method = (methodInput && methodInput.value || 'GET').toUpperCase();
+    state.raw.path = (pathInput && pathInput.value || '/_localstack/health');
+    state.raw.body = bodyInput ? bodyInput.value : '';
+
+    const opts = { method: state.raw.method, headers: {} };
+    if (state.raw.body) opts.body = state.raw.body;
+    const r = await fetch(state.raw.path, opts);
+    const text = await r.text();
+    state.response = { status: r.status, body: text };
+    state.history.unshift({
+      service: state.selectedService || 'raw',
+      method: state.raw.method,
+      path: state.raw.path,
+      body: state.raw.body,
+      status: r.status,
+    });
+    state.history = state.history.slice(0, 20);
+    render();
+  }
+
+  async function runGuided() {
+    if (!state.flowDefinition || !state.flowDefinition.flows || state.flowDefinition.flows.length === 0) return;
+    const firstFlow = state.flowDefinition.flows[0];
+    for (const step of (firstFlow.steps || [])) {
+      const op = step.operation || {};
+      const method = (op.method || 'GET').toUpperCase();
+      const path = (op.path || '/').replace('{{inputs.resource_name}}', 'studio-resource');
+      const body = op.body || undefined;
+      const r = await fetch(path, { method, body });
+      state.history.unshift({
+        service: state.selectedService || 'guided',
+        method,
+        path,
+        body: body || '',
+        status: r.status,
+      });
+    }
+    state.history = state.history.slice(0, 20);
+    render();
+  }
+
+  async function bootstrap() {
+    const [services, flowCatalog, flowCoverage] = await Promise.all([
+      getJson('/_localstack/studio-api/services'),
+      getJson('/_localstack/studio-api/flows/catalog'),
+      getJson('/_localstack/studio-api/flows/coverage'),
+    ]);
+    state.services = services.services || [];
+    state.flowCatalog = flowCatalog.services || [];
+    state.flowCoverage = flowCoverage.services || [];
+    render();
+  }
+
+  bootstrap().catch((err) => {
+    root.innerHTML = '<pre>Studio dashboard failed to load: ' + esc(err.message || String(err)) + '</pre>';
+  });
+})();
+"#;
+
+const STUDIO_ASSET_CSS: &str = r#":root{color-scheme:light dark;--bg:#0f172a;--fg:#e2e8f0;--card:#1e293b;--muted:#94a3b8;--accent:#22c55e}*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,sans-serif;background:linear-gradient(120deg,#0f172a,#111827);color:var(--fg)}.studio-layout{max-width:1200px;margin:0 auto;padding:20px}.studio-header h1{margin:0}.studio-header p{color:var(--muted)}.studio-grid{display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:16px}.studio-panel{background:color-mix(in oklab,var(--card) 92%,black);border:1px solid #334155;border-radius:12px;padding:12px;min-height:260px}.service-list{display:grid;gap:8px}.service-card{display:grid;text-align:left;gap:2px;padding:8px;border:1px solid #334155;background:#0b1220;color:var(--fg);border-radius:8px;cursor:pointer}.service-card.active{border-color:var(--accent)}.detail-grid{display:grid;gap:12px}label{display:grid;gap:6px;margin:6px 0}input,textarea{width:100%;background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px}button{background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.history-list{display:grid;gap:8px}.history-item{text-align:left}pre{white-space:pre-wrap;overflow:auto;background:#0b1220;padding:8px;border-radius:8px}@media(max-width:1024px){.studio-grid{grid-template-columns:1fr}}"#;
+const STUDIO_GUIDED_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
+
 /// Adapter that converts `http_body_util::BodyStream<axum::body::Body>` into
 /// a `futures_core::Stream<Item = Result<Bytes, io::Error>>` suitable for
 /// `SpooledBody::write_from_stream()`.
 struct BodyStreamAdapter {
     inner: BodyStream<Body>,
+    bytes_read: usize,
+    max_bytes: Option<usize>,
 }
 
 impl BodyStreamAdapter {
-    fn new(body: Body) -> Self {
+    fn new(body: Body, max_bytes: Option<usize>) -> Self {
         Self {
             inner: BodyStream::new(body),
+            bytes_read: 0,
+            max_bytes,
         }
     }
 }
@@ -52,6 +275,13 @@ impl futures_core::Stream for BodyStreamAdapter {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(frame))) => {
                     if let Ok(data) = frame.into_data() {
+                        self.bytes_read = self.bytes_read.saturating_add(data.len());
+                        if self.max_bytes.is_some_and(|limit| self.bytes_read > limit) {
+                            return Poll::Ready(Some(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "guided execution payload exceeds configured limit",
+                            ))));
+                        }
                         return Poll::Ready(Some(Ok(data)));
                     }
                     // Skip non-data frames (trailers, etc.)
@@ -69,6 +299,7 @@ impl futures_core::Stream for BodyStreamAdapter {
 pub struct Gateway {
     config: Config,
     plugin_manager: ServicePluginManager,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 /// Shared application state passed to all axum handlers.
@@ -77,25 +308,43 @@ struct AppState {
     config: Config,
     plugin_manager: ServicePluginManager,
     cors: Arc<CorsHandler>,
+    internal_api_router: Router,
 }
 
 impl Gateway {
     pub fn new(config: Config, plugin_manager: ServicePluginManager) -> Self {
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             config,
             plugin_manager,
+            shutdown_tx,
         }
     }
 
     /// Build the axum Router for this gateway (useful for testing).
     fn build_app(&self) -> Router {
         let cors = Arc::new(CorsHandler::new(&self.config));
+        let internal_state = openstack_internal_api::ApiState::new(
+            self.config.clone(),
+            self.plugin_manager.clone(),
+            self.shutdown_tx.clone(),
+        );
+        let internal_api_router = openstack_internal_api::internal_api_router(internal_state);
         let app_state = AppState {
             config: self.config.clone(),
             plugin_manager: self.plugin_manager.clone(),
             cors,
+            internal_api_router,
         };
-        Router::new().fallback(handle_request).with_state(app_state)
+        Router::new()
+            .fallback(handle_request)
+            .layer(ServiceBuilder::new().layer(CompressionLayer::new()))
+            .with_state(app_state)
+    }
+
+    #[doc(hidden)]
+    pub fn build_app_for_tests(&self) -> Router {
+        self.build_app()
     }
 
     /// Run the gateway using a pre-bound listener and an external shutdown signal.
@@ -110,10 +359,15 @@ impl Gateway {
             self.plugin_manager.start_all().await;
         }
         let app = self.build_app();
+        let mut api_shutdown = self.shutdown_tx.subscribe();
         tokio::select! {
             result = axum::serve(listener, app) => { result?; }
             _ = &mut shutdown => {
                 info!("Shutdown signal received");
+                self.plugin_manager.stop_all().await;
+            }
+            _ = api_shutdown.recv() => {
+                info!("Shutdown requested via internal API");
                 self.plugin_manager.stop_all().await;
             }
         }
@@ -130,6 +384,7 @@ impl Gateway {
         }
 
         let app = self.build_app();
+        let mut api_shutdown = self.shutdown_tx.subscribe();
 
         // Bind to all configured addresses
         let addrs = config.gateway_listen.clone();
@@ -146,8 +401,14 @@ impl Gateway {
         }
 
         // Wait for shutdown signal
-        tokio::signal::ctrl_c().await?;
-        info!("Shutdown signal received");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Shutdown signal received");
+            }
+            _ = api_shutdown.recv() => {
+                info!("Shutdown requested via internal API");
+            }
+        }
 
         // Save state on shutdown
         state_manager.save_on_shutdown().await?;
@@ -189,11 +450,38 @@ async fn handle_request(
         }
     }
 
+    if is_studio_guided_execution_route(&path)
+        && headers
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|len| len > STUDIO_GUIDED_MAX_PAYLOAD_BYTES)
+    {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "guided execution payload exceeds configured limit",
+        )
+            .into_response();
+    }
+
+    let guided_limit = if is_studio_guided_execution_route(&path) {
+        Some(STUDIO_GUIDED_MAX_PAYLOAD_BYTES)
+    } else {
+        None
+    };
+
     // Stream the request body into a SpooledBody
     let threshold = state.config.body_spool_threshold_bytes;
     let mut spooled = SpooledBody::new(threshold);
-    let stream = BodyStreamAdapter::new(req.into_body());
+    let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
     if let Err(e) = spooled.write_from_stream(stream).await {
+        if e.kind() == io::ErrorKind::InvalidData {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "guided execution payload exceeds configured limit",
+            )
+                .into_response();
+        }
         error!("Failed to read request body: {}", e);
         return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
     }
@@ -219,7 +507,16 @@ async fn handle_request(
         return response;
     }
 
-    // Internal API routes go to the internal API handler
+    // Studio SPA routes are resolved before generic AWS inference.
+    if is_studio_asset_route(&path) {
+        return studio_asset_response(&path);
+    }
+
+    if is_studio_spa_route(&path) {
+        return studio_spa_response();
+    }
+
+    // Internal API routes go to the internal API handler.
     if path.starts_with("/_localstack/") {
         return handle_internal_api(
             path,
@@ -380,6 +677,58 @@ async fn handle_request(
     );
 
     response
+}
+
+fn is_studio_spa_route(path: &str) -> bool {
+    (path == "/_localstack/studio"
+        || path == "/_localstack/studio/"
+        || path.starts_with("/_localstack/studio/"))
+        && !path.starts_with("/_localstack/studio/assets/")
+}
+
+fn is_studio_asset_route(path: &str) -> bool {
+    path.starts_with("/_localstack/studio/assets/")
+}
+
+fn studio_spa_response() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("cache-control", "no-cache")
+        .header("etag", "\"studio-shell-v1\"")
+        .body(Body::from(STUDIO_SPA))
+        .unwrap_or_default()
+}
+
+fn studio_asset_response(path: &str) -> Response {
+    let (status, content_type, body, cache_control) = match path {
+        "/_localstack/studio/assets/app.js" => (
+            StatusCode::OK,
+            "application/javascript; charset=utf-8",
+            STUDIO_ASSET_JS,
+            "public, max-age=31536000, immutable",
+        ),
+        "/_localstack/studio/assets/app.css" => (
+            StatusCode::OK,
+            "text/css; charset=utf-8",
+            STUDIO_ASSET_CSS,
+            "public, max-age=31536000, immutable",
+        ),
+        _ => (
+            StatusCode::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            "Not found",
+            "no-cache",
+        ),
+    };
+
+    Response::builder()
+        .status(status)
+        .header("content-type", content_type)
+        .header("cache-control", cache_control)
+        .header("etag", "\"studio-asset-v1\"")
+        .body(Body::from(body))
+        .unwrap_or_default()
 }
 
 #[allow(clippy::result_large_err)]
@@ -732,26 +1081,56 @@ async fn handle_internal_api(
     _body: &Bytes,
     _state: &AppState,
 ) -> Response {
-    // Delegate to the internal-api crate
-    // For now, handle the most critical endpoints inline
-    match path.as_str() {
-        "/_localstack/health" if method == Method::HEAD => StatusCode::OK.into_response(),
-        "/_localstack/health" => {
-            let body = serde_json::json!({
-                "edition": "community",
-                "version": env!("CARGO_PKG_VERSION"),
-                "services": {}
-            });
-            axum::Json(body).into_response()
+    if is_studio_guided_execution_route(&path) {
+        if *method != Method::POST {
+            return (
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method not allowed for guided execution endpoint",
+            )
+                .into_response();
         }
-        "/_localstack/info" => {
-            let body = serde_json::json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "edition": "community",
-                "is_license_activated": false,
-            });
-            axum::Json(body).into_response()
+        if _body.len() > STUDIO_GUIDED_MAX_PAYLOAD_BYTES {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "guided execution payload exceeds configured limit",
+            )
+                .into_response();
         }
-        _ => (StatusCode::NOT_FOUND, format!("Unknown endpoint: {}", path)).into_response(),
     }
+
+    let uri = if _query_params.is_empty() {
+        path
+    } else {
+        let query = serde_urlencoded::to_string(_query_params).unwrap_or_default();
+        format!("{}?{}", path, query)
+    };
+
+    let mut req_builder = axum::http::Request::builder()
+        .method(method.clone())
+        .uri(uri);
+    for (k, v) in _headers {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::header::HeaderName::from_bytes(k.as_bytes()),
+            axum::http::header::HeaderValue::from_str(v),
+        ) {
+            req_builder = req_builder.header(name, value);
+        }
+    }
+    let req = req_builder
+        .body(Body::from(_body.clone()))
+        .unwrap_or_default();
+
+    use tower::ServiceExt;
+    match _state.internal_api_router.clone().oneshot(req).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            error!(error = %e, "internal API router dispatch failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal API error").into_response()
+        }
+    }
+}
+
+fn is_studio_guided_execution_route(path: &str) -> bool {
+    path == "/_localstack/studio-api/flows/execute"
+        || path == "/_localstack/studio-api/flows/replay"
 }

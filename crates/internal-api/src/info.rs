@@ -21,6 +21,20 @@ pub async fn get_info(State(state): State<ApiState>) -> impl IntoResponse {
         "system": {
             "platform": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
+        },
+        "studio": {
+            "enabled": true,
+            "base_path": "/_localstack/studio",
+            "api_base_path": "/_localstack/studio-api",
+            "guided_flow": {
+                "manifest_schema_version": "1.2",
+                "catalog_endpoint": "/_localstack/studio-api/flows/catalog",
+                "coverage_endpoint": "/_localstack/studio-api/flows/coverage"
+            }
+        },
+        "daemon": {
+            "managed": std::env::var("OPENSTACK_DAEMON_CHILD").ok().as_deref() == Some("1"),
+            "pid": std::process::id(),
         }
     });
     Json(body)
