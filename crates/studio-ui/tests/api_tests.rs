@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use openstack_studio_ui::api::{
-    resolve_studio_url_with_timeout, RawRequest, StudioApiClient, StudioApiError,
+    RawRequest, StudioApiClient, StudioApiError, resolve_studio_url_with_timeout,
 };
 
 #[tokio::test(flavor = "current_thread")]
