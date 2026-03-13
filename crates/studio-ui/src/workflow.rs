@@ -22,12 +22,13 @@ pub struct GuidedWorkflow {
 
 impl GuidedWorkflow {
     pub fn s3_basic(bucket: &str, key: &str, body: &str) -> Self {
+        let encoded_bucket = url_encode(bucket);
         let encoded_key = url_encode(key);
         let create_bucket = WorkflowStep {
             title: "Create bucket".to_string(),
             request: RawRequest {
                 method: "PUT".to_string(),
-                path: format!("/{bucket}"),
+                path: format!("/{encoded_bucket}"),
                 query: HashMap::new(),
                 headers: HashMap::new(),
                 body: None,
@@ -38,7 +39,7 @@ impl GuidedWorkflow {
             title: "Put object".to_string(),
             request: RawRequest {
                 method: "PUT".to_string(),
-                path: format!("/{bucket}/{encoded_key}"),
+                path: format!("/{encoded_bucket}/{encoded_key}"),
                 query: HashMap::new(),
                 headers: HashMap::new(),
                 body: Some(body.to_string()),

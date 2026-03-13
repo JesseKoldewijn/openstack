@@ -110,6 +110,8 @@ jobs:
   studio-ui-gates:
     name: Studio UI Gates
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -233,6 +235,8 @@ jobs:
   studio-coverage:
     name: Studio Coverage Report
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Generate Studio coverage report
@@ -243,6 +247,8 @@ jobs:
   studio-manifest-validation:
     name: Studio Manifest Validation
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

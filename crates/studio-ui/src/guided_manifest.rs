@@ -89,9 +89,11 @@ pub enum ManifestError {
     InvalidSchemaDocument(serde_json::Error),
     #[error("manifest is invalid JSON: {0}")]
     InvalidManifestJson(serde_json::Error),
-    #[error("manifest structural validation failed")]
+    #[error("manifest data is invalid: {0}")]
+    InvalidManifestData(serde_json::Error),
+    #[error("manifest structural validation failed: {issues:?}")]
     StructuralValidation { issues: Vec<ValidationIssue> },
-    #[error("manifest semantic lint failed")]
+    #[error("manifest semantic lint failed: {issues:?}")]
     SemanticValidation { issues: Vec<ValidationIssue> },
     #[error(
         "unsupported manifest schema version '{manifest_version}' for runtime '{runtime_version}'"
@@ -120,7 +122,7 @@ pub fn parse_and_validate_manifest(source: &str) -> Result<GuidedManifest, Manif
     }
 
     let manifest: GuidedManifest =
-        serde_json::from_value(value).map_err(ManifestError::InvalidManifestJson)?;
+        serde_json::from_value(value).map_err(ManifestError::InvalidManifestData)?;
     check_schema_compatibility(&manifest.schema_version, SUPPORTED_SCHEMA_VERSION)?;
 
     let semantic_issues = lint_manifest_semantics(&manifest);
@@ -305,6 +307,59 @@ fn validate_manifest_structure(value: &Value) -> Vec<ValidationIssue> {
                             path: format!("{flow_path}.steps"),
                             message: "is required".to_string(),
                         }),
+                    }
+
+                    match flow_obj.get("cleanup") {
+                        Some(cleanup) if cleanup.is_array() => {
+                            if let Some(step_items) = cleanup.as_array() {
+                                for (step_index, step) in step_items.iter().enumerate() {
+                                    let step_path = format!("{flow_path}.cleanup[{step_index}]");
+                                    let Some(step_obj) = step.as_object() else {
+                                        issues.push(ValidationIssue {
+                                            path: step_path,
+                                            message: "step must be an object".to_string(),
+                                        });
+                                        continue;
+                                    };
+
+                                    require_string(step_obj, "id", &step_path, &mut issues);
+                                    require_string(step_obj, "title", &step_path, &mut issues);
+
+                                    match step_obj.get("operation") {
+                                        Some(op) if op.is_object() => {
+                                            if let Some(op_obj) = op.as_object() {
+                                                let op_path = format!("{step_path}.operation");
+                                                require_string(
+                                                    op_obj,
+                                                    "method",
+                                                    &op_path,
+                                                    &mut issues,
+                                                );
+                                                require_string(
+                                                    op_obj,
+                                                    "path",
+                                                    &op_path,
+                                                    &mut issues,
+                                                );
+                                            }
+                                        }
+                                        Some(_) => issues.push(ValidationIssue {
+                                            path: format!("{step_path}.operation"),
+                                            message: "must be an object".to_string(),
+                                        }),
+                                        None => issues.push(ValidationIssue {
+                                            path: format!("{step_path}.operation"),
+                                            message: "is required".to_string(),
+                                        }),
+                                    }
+                                }
+                            }
+                        }
+                        Some(_) => issues.push(ValidationIssue {
+                            path: format!("{flow_path}.cleanup"),
+                            message: "must be an array".to_string(),
+                        }),
+                        None => {}
                     }
                 }
             }
@@ -616,6 +671,7 @@ mod tests {
     fn schema_compatibility_rules_follow_major_minor_contract() {
         assert!(check_schema_compatibility("1.0", "1.2").is_ok());
         assert!(check_schema_compatibility("1.2", "1.2").is_ok());
+        assert!(check_schema_compatibility("1.2.3", "1.2").is_err());
         assert!(check_schema_compatibility("1.3", "1.2").is_err());
         assert!(check_schema_compatibility("2.0", "1.2").is_err());
     }
@@ -644,5 +700,13 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn one_manifest_per_service_rejects_nested_manifest_paths() {
+        let services = vec!["s3".to_string()];
+        let manifests = vec!["manifests/guided/nested/s3.guided.json".to_string()];
+
+        assert!(enforce_one_manifest_per_service(&services, &manifests).is_err());
     }
 }

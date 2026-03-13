@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -40,6 +41,8 @@ pub struct GuidedExecutionReport {
     pub cleanup: Vec<CleanupOutcome>,
     pub captures: HashMap<String, String>,
 }
+
+static RAND_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryPolicy {
@@ -511,7 +514,9 @@ fn generate_rand8() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.subsec_nanos())
         .unwrap_or_default();
-    format!("{nanos:08x}")
+    let counter = RAND_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mixed = nanos ^ counter;
+    format!("{mixed:08x}")
 }
 
 fn extract_json_path(value: &Value, path: &str) -> Option<String> {
