@@ -233,5 +233,11 @@ async fn test_get_secret_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body_str(&resp).contains("ResourceNotFoundException"));
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "ResourceNotFoundException");
+    assert_eq!(
+        payload["Message"],
+        "Secrets Manager can't find the specified secret."
+    );
 }

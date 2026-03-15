@@ -271,6 +271,21 @@ impl ServiceProvider for CloudFormationProvider {
                 let template_body = str_param(ctx, "TemplateBody").unwrap_or("{}");
                 let template: Value = serde_json::from_str(template_body).unwrap_or(json!({}));
 
+                let has_resources = template
+                    .get("Resources")
+                    .and_then(|value| value.as_object())
+                    .map(|resources| !resources.is_empty())
+                    .unwrap_or(false);
+                if !has_resources {
+                    return Ok(xml_error(
+                        "ValidationError",
+                        &format!(
+                            "Unable to create stack \"{stack_name}\": No updates are to be performed."
+                        ),
+                        400,
+                    ));
+                }
+
                 // Parse parameters
                 let mut parameters: HashMap<String, String> = HashMap::new();
                 // Parameters come as Parameters.member.N.ParameterKey / ParameterValue

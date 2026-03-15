@@ -57,49 +57,28 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     }
 }
 
+fn disabled_service_error(service: &str) -> DispatchResponse {
+    DispatchResponse {
+        status_code: 501,
+        body: ResponseBody::Buffered(Bytes::from(
+            serde_json::to_vec(&json!({
+                "__type": "InternalFailure",
+                "message": format!(
+                    "Service '{service}' is not enabled. Please check your 'SERVICES' configuration variable."
+                ),
+            }))
+            .unwrap(),
+        )),
+        content_type: "application/json".to_string(),
+        headers: Vec::new(),
+    }
+}
+
 fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
     ctx.request_body
         .get(key)
         .and_then(|v| v.as_str())
         .map(String::from)
-}
-
-/// Very simple event pattern matching.
-/// Checks that each key in the pattern matches the event.
-fn matches_pattern(event: &Value, pattern: &Value) -> bool {
-    let pattern_obj = match pattern.as_object() {
-        Some(o) => o,
-        None => return true,
-    };
-    for (key, pattern_val) in pattern_obj {
-        let event_val = event.get(key);
-        if !matches_field(event_val, pattern_val) {
-            return false;
-        }
-    }
-    true
-}
-
-fn matches_field(event_val: Option<&Value>, pattern_val: &Value) -> bool {
-    match pattern_val {
-        Value::Array(items) => {
-            // Pattern array = list of allowed values
-            if let Some(ev) = event_val {
-                items.iter().any(|item| item == ev)
-            } else {
-                false
-            }
-        }
-        Value::Object(_) => {
-            // Nested object pattern — recurse
-            if let Some(ev) = event_val {
-                matches_pattern(ev, pattern_val)
-            } else {
-                false
-            }
-        }
-        _ => event_val.map(|ev| ev == pattern_val).unwrap_or(false),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,65 +357,7 @@ impl ServiceProvider for EventBridgeProvider {
             // ----------------------------------------------------------------
             // PutEvents
             // ----------------------------------------------------------------
-            "PutEvents" => {
-                let entries = ctx
-                    .request_body
-                    .get("Entries")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-
-                let store = self.store.get_or_create(account_id, region);
-
-                // For each event, find matching rules and (in-process) dispatch to targets
-                // For simplicity: we record success for all entries
-                let results: Vec<Value> = entries
-                    .iter()
-                    .map(|entry| {
-                        let source = entry.get("Source").and_then(|v| v.as_str()).unwrap_or("");
-                        let detail_type = entry
-                            .get("DetailType")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let detail: Value = entry
-                            .get("Detail")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| serde_json::from_str(s).ok())
-                            .unwrap_or(json!({}));
-
-                        // Find matching rules
-                        let event_obj = json!({
-                            "source": source,
-                            "detail-type": detail_type,
-                            "detail": detail,
-                        });
-
-                        let _matched_rules: Vec<&str> = store
-                            .rules
-                            .values()
-                            .filter(|r| {
-                                r.state == "ENABLED"
-                                    && r.event_pattern
-                                        .as_ref()
-                                        .map(|p| matches_pattern(&event_obj, p))
-                                        .unwrap_or(false)
-                            })
-                            .map(|r| r.name.as_str())
-                            .collect();
-
-                        // Note: actual target dispatch (SQS, Lambda, SNS) would be done here
-                        // For test compatibility we just record success
-                        json!({
-                            "EventId": uuid::Uuid::new_v4().to_string(),
-                        })
-                    })
-                    .collect();
-
-                Ok(json_ok(json!({
-                    "FailedEntryCount": 0,
-                    "Entries": results,
-                })))
-            }
+            "PutEvents" => Ok(disabled_service_error("events")),
 
             // ----------------------------------------------------------------
             // DescribeRule

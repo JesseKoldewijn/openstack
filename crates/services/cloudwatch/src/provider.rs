@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -58,6 +59,57 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     }
 }
 
+fn is_query_protocol_request(ctx: &RequestContext) -> bool {
+    ctx.headers
+        .get("content-type")
+        .map(|value| value.starts_with("application/x-www-form-urlencoded"))
+        .unwrap_or(false)
+        || ctx.query_params.contains_key("Action")
+        || ctx.raw_body.starts_with(b"Action=")
+}
+
+fn query_ok(action: &str, inner: &str) -> DispatchResponse {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><{action}Response xmlns=\"http://monitoring.amazonaws.com/doc/2010-08-01/\">{inner}<ResponseMetadata><RequestId>{}</RequestId></ResponseMetadata></{action}Response>",
+        Uuid::new_v4()
+    );
+    DispatchResponse {
+        status_code: 200,
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: "text/xml".to_string(),
+        headers: Vec::new(),
+    }
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn query_metric_data(ctx: &RequestContext) -> Vec<Value> {
+    let mut members: BTreeMap<usize, serde_json::Map<String, Value>> = BTreeMap::new();
+    for (key, value) in &ctx.query_params {
+        if let Some(rest) = key.strip_prefix("MetricData.member.") {
+            let mut parts = rest.splitn(2, '.');
+            let Some(index) = parts.next().and_then(|s| s.parse::<usize>().ok()) else {
+                continue;
+            };
+            let Some(field) = parts.next() else {
+                continue;
+            };
+            members
+                .entry(index)
+                .or_default()
+                .insert(field.to_string(), Value::String(value.clone()));
+        }
+    }
+    members.into_values().map(Value::Object).collect()
+}
+
 fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
     ctx.request_body
         .get(key)
@@ -93,13 +145,20 @@ impl ServiceProvider for CloudWatchProvider {
                     None => return Ok(json_error("ValidationError", "Namespace is required", 400)),
                 };
                 let mut store = self.store.get_or_create(account_id, region);
-                if let Some(data) = ctx
+                let metric_data = if let Some(data) = ctx
                     .request_body
                     .get("MetricData")
                     .and_then(|v| v.as_array())
                 {
+                    data.to_vec()
+                } else if is_query_protocol_request(ctx) {
+                    query_metric_data(ctx)
+                } else {
+                    Vec::new()
+                };
+                if !metric_data.is_empty() {
                     let now = Utc::now();
-                    for datum in data {
+                    for datum in &metric_data {
                         let metric_name = datum
                             .get("MetricName")
                             .and_then(|v| v.as_str())
@@ -134,7 +193,11 @@ impl ServiceProvider for CloudWatchProvider {
                         });
                     }
                 }
-                Ok(json_ok(json!({})))
+                if is_query_protocol_request(ctx) {
+                    Ok(query_ok("PutMetricData", ""))
+                } else {
+                    Ok(json_ok(json!({})))
+                }
             }
 
             // ----------------------------------------------------------------
@@ -170,7 +233,34 @@ impl ServiceProvider for CloudWatchProvider {
                     })
                     .collect();
 
-                Ok(json_ok(json!({ "Metrics": metrics })))
+                if is_query_protocol_request(ctx) {
+                    let metrics_xml = metrics
+                        .iter()
+                        .map(|metric| {
+                            let namespace = metric
+                                .get("Namespace")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let metric_name = metric
+                                .get("MetricName")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            format!(
+                                "<member><Namespace>{}</Namespace><MetricName>{}</MetricName></member>",
+                                xml_escape(namespace),
+                                xml_escape(metric_name)
+                            )
+                        })
+                        .collect::<String>();
+                    Ok(query_ok(
+                        "ListMetrics",
+                        &format!(
+                            "<ListMetricsResult><Metrics>{metrics_xml}</Metrics></ListMetricsResult>"
+                        ),
+                    ))
+                } else {
+                    Ok(json_ok(json!({ "Metrics": metrics })))
+                }
             }
 
             // ----------------------------------------------------------------
@@ -208,10 +298,63 @@ impl ServiceProvider for CloudWatchProvider {
                     vec![]
                 };
 
-                Ok(json_ok(json!({
-                    "Label": metric_name,
-                    "Datapoints": datapoints,
-                })))
+                if is_query_protocol_request(ctx) {
+                    let datapoints_xml = datapoints
+                        .iter()
+                        .map(|datapoint| {
+                            let timestamp = datapoint
+                                .get("Timestamp")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let sample_count = datapoint
+                                .get("SampleCount")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            let sum = datapoint.get("Sum").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let average = datapoint
+                                .get("Average")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            let minimum = datapoint
+                                .get("Minimum")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            let maximum = datapoint
+                                .get("Maximum")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            let unit = datapoint.get("Unit").and_then(|v| v.as_str()).unwrap_or("None");
+                            format!(
+                                "<member><Timestamp>{}</Timestamp><SampleCount>{}</SampleCount><Sum>{}</Sum><Average>{}</Average><Minimum>{}</Minimum><Maximum>{}</Maximum><Unit>{}</Unit></member>",
+                                xml_escape(timestamp),
+                                sample_count,
+                                sum,
+                                average,
+                                minimum,
+                                maximum,
+                                xml_escape(unit)
+                            )
+                        })
+                        .collect::<String>();
+                    let datapoints_fragment = if datapoints_xml.is_empty() {
+                        "<Datapoints />".to_string()
+                    } else {
+                        format!("<Datapoints>{datapoints_xml}</Datapoints>")
+                    };
+                    Ok(query_ok(
+                        "GetMetricStatistics",
+                        &format!(
+                            "<GetMetricStatisticsResult>{}<Label>{}</Label></GetMetricStatisticsResult>",
+                            datapoints_fragment,
+                            xml_escape(&metric_name)
+                        ),
+                    ))
+                } else {
+                    Ok(json_ok(json!({
+                        "Label": metric_name,
+                        "Datapoints": datapoints,
+                    })))
+                }
             }
 
             // ----------------------------------------------------------------

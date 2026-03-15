@@ -218,11 +218,14 @@ async fn test_put_events() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 200);
+    assert_eq!(resp.status_code, 501);
+    assert_eq!(resp.content_type, "application/json");
     let b = body(&resp);
-    assert_eq!(b["FailedEntryCount"], 0);
-    assert_eq!(b["Entries"].as_array().unwrap().len(), 1);
-    assert!(b["Entries"][0]["EventId"].as_str().is_some());
+    assert_eq!(b["__type"], "InternalFailure");
+    assert_eq!(
+        b["message"],
+        "Service 'events' is not enabled. Please check your 'SERVICES' configuration variable."
+    );
 }
 
 #[tokio::test]

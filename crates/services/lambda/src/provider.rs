@@ -74,11 +74,12 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
         body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "__type": code,
-                "message": message,
+                "Message": message,
+                "Type": "User",
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }
@@ -327,7 +328,9 @@ impl ServiceProvider for LambdaProvider {
                     }))),
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Function not found: {function_name}"),
+                        &format!(
+                            "Function not found: arn:aws:lambda:{region}:{account_id}:function:{function_name}"
+                        ),
                         404,
                     )),
                 }

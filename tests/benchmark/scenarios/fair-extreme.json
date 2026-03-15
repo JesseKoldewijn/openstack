@@ -5,6 +5,7 @@
     "service": "s3",
     "scenario_class": "performance",
     "load_tier": "extreme",
+    "scenario_role": "write",
     "protocol": "rest-xml",
     "setup": [
       {
@@ -33,6 +34,13 @@
     },
     "cleanup": [
       {
+        "id": "s3-delete-object",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-object", "--bucket", "{{bucket}}", "--key", "heavy-1gb-{{run_id}}.bin"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
         "id": "s3-delete-bucket",
         "protocol": "rest-xml",
         "command": ["s3api", "delete-bucket", "--bucket", "{{bucket}}"],
@@ -51,6 +59,7 @@
     "service": "s3",
     "scenario_class": "performance",
     "load_tier": "extreme",
+    "scenario_role": "write",
     "protocol": "rest-xml",
     "setup": [
       {
@@ -79,6 +88,13 @@
     },
     "cleanup": [
       {
+        "id": "s3-delete-object",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-object", "--bucket", "{{bucket}}", "--key", "heavy-5gb-{{run_id}}.bin"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
         "id": "s3-delete-bucket",
         "protocol": "rest-xml",
         "command": ["s3api", "delete-bucket", "--bucket", "{{bucket}}"],
@@ -97,6 +113,7 @@
     "service": "s3",
     "scenario_class": "performance",
     "load_tier": "extreme",
+    "scenario_role": "write",
     "protocol": "rest-xml",
     "setup": [
       {
@@ -124,6 +141,13 @@
       "capture_json": null
     },
     "cleanup": [
+      {
+        "id": "s3-delete-object",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-object", "--bucket", "{{bucket}}", "--key", "heavy-10gb-{{run_id}}.bin"],
+        "expect_success": true,
+        "capture_json": null
+      },
       {
         "id": "s3-delete-bucket",
         "protocol": "rest-xml",

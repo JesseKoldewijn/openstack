@@ -57,7 +57,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.0".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }

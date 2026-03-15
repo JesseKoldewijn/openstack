@@ -140,6 +140,14 @@ async fn test_get_function_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 404);
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "ResourceNotFoundException");
+    assert_eq!(payload["Type"], "User");
+    assert_eq!(
+        payload["Message"],
+        "Function not found: arn:aws:lambda:us-east-1:000000000000:function:no-such-func"
+    );
 }
 
 #[tokio::test]

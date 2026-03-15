@@ -128,6 +128,37 @@ def build_markdown(report_dir: str, include_gate: bool) -> str:
             )
         )
 
+    lines.extend(["", "Lane status diagnostics:", ""])
+    lines.extend([
+        "| Lane | Status | Reason | Persistence modes | Missing runtime evidence |",
+        "|---|---|---|---|---|",
+    ])
+    for lane, label in LANES:
+        report = load_latest_report(report_dir, lane)
+        if report is None:
+            lines.append(f"| {label} | missing-report | n/a | n/a | n/a |")
+            continue
+        summary = report.get("summary", {})
+        runtime = report.get("runtime", {})
+        runtime_gaps = summary.get("missing_runtime_evidence", {}) or {}
+        runtime_text = ", ".join(
+            f"{target}={reason}" for target, reason in sorted(runtime_gaps.items())
+        ) or "none"
+        persistence_text = "OS={os}, LS={ls}, eq={eq}".format(
+            os=runtime.get("openstack_persistence_mode", "unknown"),
+            ls=runtime.get("localstack_persistence_mode", "unknown"),
+            eq=runtime.get("persistence_mode_equivalent", "unknown"),
+        )
+        lines.append(
+            "| {label} | {status} | {reason} | {persistence_text} | {runtime_text} |".format(
+                label=label,
+                status=summary.get("lane_status", "unknown"),
+                reason=summary.get("lane_status_reason", "") or "-",
+                persistence_text=persistence_text,
+                runtime_text=runtime_text,
+            )
+        )
+
     for label, report in lane_reports:
         per_service = report.get("summary", {}).get("per_service", {})
         lines.extend(["", f"### {label} Per-Service"])

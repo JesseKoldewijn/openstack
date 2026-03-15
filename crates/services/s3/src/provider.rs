@@ -64,7 +64,7 @@ fn xml_response(status: u16, xml: String) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: "application/xml".to_string(),
         headers: Vec::new(),
     }
 }
@@ -75,6 +75,17 @@ fn s3_error(code: &str, message: &str, status: u16) -> DispatchResponse {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <Error><Code>{code}</Code><Message>{message}</Message></Error>"
+        ),
+    )
+}
+
+fn s3_bucket_error(code: &str, message: &str, bucket: &str, status: u16) -> DispatchResponse {
+    xml_response(
+        status,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<Error><Code>{code}</Code><Message>{message}</Message><RequestId>00000000-0000-0000-0000-000000000000</RequestId><BucketName>{}</BucketName></Error>",
+            escape_xml(bucket)
         ),
     )
 }
@@ -226,7 +237,14 @@ fn handle_get_bucket_location(store: &S3Store, ctx: &RequestContext) -> Dispatch
 
     let b = match store.get_bucket(&bucket) {
         Some(b) => b,
-        None => return s3_error("NoSuchBucket", "The specified bucket does not exist", 404),
+        None => {
+            return s3_bucket_error(
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+                &bucket,
+                404,
+            );
+        }
     };
 
     // us-east-1 is represented as empty string in the XML

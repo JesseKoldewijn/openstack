@@ -44,6 +44,16 @@ async fn main() -> anyhow::Result<()> {
         report.summary.localstack_error_count
     );
     println!(
+        "lane status: {:?}{}",
+        report.summary.lane_status,
+        report
+            .summary
+            .lane_status_reason
+            .as_ref()
+            .map(|reason| format!(" ({reason})"))
+            .unwrap_or_default()
+    );
+    println!(
         "required role coverage gaps: {}",
         report.summary.missing_required_role_count
     );
@@ -96,6 +106,17 @@ async fn main() -> anyhow::Result<()> {
                 "memory diagnostics: missing targets={}",
                 memory.missing_targets.join(",")
             );
+            if !memory.missing_target_reasons.is_empty() {
+                println!(
+                    "memory missing-target reasons: {}",
+                    memory
+                        .missing_target_reasons
+                        .iter()
+                        .map(|(target, reason)| format!("{target}={reason}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
     }
     if let Some(startup) = &report.startup_summary {

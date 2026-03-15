@@ -55,7 +55,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }
@@ -206,7 +206,7 @@ impl ServiceProvider for FirehoseProvider {
                 match store.streams.get(&stream_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Delivery stream {stream_name} not found"),
+                        &format!("Firehose {stream_name} under account {account_id} not found."),
                         400,
                     )),
                     Some(s) => Ok(json_ok(json!({
@@ -254,7 +254,7 @@ impl ServiceProvider for FirehoseProvider {
                 match store.streams.get_mut(&stream_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Delivery stream {stream_name} not found"),
+                        &format!("Firehose {stream_name} under account {account_id} not found."),
                         400,
                     )),
                     Some(s) => {

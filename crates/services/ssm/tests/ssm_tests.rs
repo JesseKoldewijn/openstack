@@ -218,7 +218,10 @@ async fn test_delete_parameter() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body_str(&resp).contains("ParameterNotFound"));
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "ParameterNotFound");
+    assert_eq!(payload["message"], "Parameter /del not found.");
 }
 
 #[tokio::test]

@@ -120,7 +120,7 @@ def lane_metrics(report: Dict[str, Any]) -> Dict[str, Optional[float]]:
     runtime = report.get("runtime", {})
     execution_driver = runtime.get("execution_driver")
 
-    if execution_driver and execution_driver != "direct-http":
+    if execution_driver and execution_driver != "native-http":
         return {
             "p95": None,
             "p99": None,
@@ -186,9 +186,9 @@ def evaluate_gate(
         failures.append(f"lane {lane}: benchmark run uses non-equivalent persistence modes")
         failure_category = failure_category or "mode_mismatch"
 
-    if execution_driver != "direct-http":
+    if execution_driver != "native-http":
         failures.append(
-            f"lane {lane}: benchmark run must use execution_driver=direct-http for isolated backend comparison"
+            f"lane {lane}: benchmark run must use execution_driver=native-http for isolated backend comparison"
         )
         failure_category = failure_category or "execution_driver_mismatch"
 
@@ -422,7 +422,7 @@ def format_markdown(result: Dict[str, Any], baseline_run_id: Optional[str]) -> s
 
     remediation = {
         "mode_mismatch": "align PARITY_OPENSTACK_PERSISTENCE_MODE and PARITY_LOCALSTACK_PERSISTENCE_MODE for the lane",
-        "execution_driver_mismatch": "set PARITY_BENCHMARK_EXECUTION_DRIVER=direct-http for required benchmark lanes",
+        "execution_driver_mismatch": "use the native HTTP benchmark driver for required benchmark lanes",
         "class_envelope_breach": "reduce latency/memory or increase throughput for breached services, then re-run required lane",
         "persistence_quality_failure": "fix persistence lifecycle behavior (save/load/recovery) for failing scenarios and re-run parity + benchmark lanes",
         "missing_service_class": "define service class for unclassified service in benchmark classification map",
@@ -568,7 +568,7 @@ class BenchmarkRegressionGateTests(unittest.TestCase):
     def _report(self, p95: float, p99: float, throughput: float, perf: int = 5, skipped: int = 0) -> Dict[str, Any]:
         return {
             "runtime": {
-                "execution_driver": "direct-http",
+                "execution_driver": "native-http",
             },
             "summary": {
                 "performance_scenarios": perf,

@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Benchmark metrics collection and comparison
-The system SHALL capture benchmark metrics for each scenario and target, SHALL compute comparative metrics between openstack and LocalStack, and SHALL emit service-level optimization summaries suitable for remediation tracking.
+The system SHALL capture benchmark metrics for each scenario and target using native HTTP execution, SHALL compute comparative metrics between openstack and LocalStack, and SHALL emit service-level optimization summaries suitable for remediation tracking.
 
 #### Scenario: Per-scenario metrics are captured
 - **WHEN** a benchmark scenario completes
@@ -15,8 +15,12 @@ The system SHALL capture benchmark metrics for each scenario and target, SHALL c
 - **WHEN** a benchmark run summary is emitted
 - **THEN** the report SHALL include per-service comparison aggregates that can be used to track remediation progress over time
 
+#### Scenario: Client process overhead is excluded from benchmark transport
+- **WHEN** benchmark measurements are collected for supported native scenarios
+- **THEN** the execution path SHALL NOT include spawned AWS CLI process overhead in measured operation timing
+
 ### Requirement: Profile-based all-services benchmark coverage
-The system SHALL support benchmark execution profiles that include broad all-services realistic coverage and deeper workloads for selected high-impact services, and SHALL maintain valid write and read performance scenarios for each supported service in required broad coverage lanes.
+The system SHALL support benchmark execution profiles that include broad all-services realistic coverage and deeper workloads for selected high-impact services, and SHALL maintain valid native HTTP write and read performance scenarios for each supported service in required broad coverage lanes across the 24 services listed in `README.md`. Each profile SHALL resolve to an intentional scenario set, and required broad coverage lanes SHALL maintain valid write and read performance scenarios for each supported service or an explicit machine-readable exclusion.
 
 #### Scenario: All-services realistic profile covers enabled service set
 - **WHEN** the all-services realistic benchmark profile is requested
@@ -34,8 +38,16 @@ The system SHALL support benchmark execution profiles that include broad all-ser
 - **WHEN** all-services benchmark lanes run
 - **THEN** each supported service SHALL have valid realistic performance scenario coverage for required write/read roles or an explicit machine-readable exclusion reason
 
+#### Scenario: Every configured profile resolves to scenarios or explicit diagnostics
+- **WHEN** a benchmark profile such as `fair-high` or `fair-extreme` is requested
+- **THEN** the harness SHALL either execute its resolved scenarios or emit an explicit machine-readable configuration or skip diagnostic instead of failing as an empty implicit profile
+
+#### Scenario: README service baseline remains visible during migration
+- **WHEN** a broad all-services benchmark lane completes
+- **THEN** the report SHALL account for each service listed in `README.md`, including services that currently require follow-up due to missing native transport support or invalid workload semantics
+
 ### Requirement: Dual-target benchmark execution
-The system SHALL execute each benchmark scenario against both openstack and LocalStack targets using equivalent request inputs and benchmark configuration. Benchmark execution SHALL include explicit persistence-mode metadata and SHALL reject non-equivalent mode comparisons for interpretable performance claims. In CI-managed runtime mode, benchmark runs SHALL consume a deterministic run-scoped OpenStack runtime image reference rather than a floating image tag.
+The system SHALL execute each benchmark scenario against both openstack and LocalStack targets using equivalent native HTTP request inputs and benchmark configuration. Benchmark execution SHALL include explicit persistence-mode metadata, SHALL reject non-equivalent mode comparisons for interpretable performance claims, and in CI-managed runtime mode SHALL consume a deterministic run-scoped OpenStack runtime image reference rather than a floating image tag.
 
 #### Scenario: Equivalent scenario workload is executed on both targets
 - **WHEN** a benchmark scenario is selected for execution
@@ -53,8 +65,12 @@ The system SHALL execute each benchmark scenario against both openstack and Loca
 - **WHEN** benchmark execution starts in CI-managed runtime mode
 - **THEN** the harness SHALL launch OpenStack benchmark targets using the immutable runtime image reference produced for that workflow run and SHALL NOT resolve the image from a floating `latest` tag
 
+#### Scenario: AWS CLI is not required for benchmark execution
+- **WHEN** a benchmark lane is executed with supported native translators available
+- **THEN** the harness SHALL execute benchmark workloads without spawning AWS CLI processes
+
 ### Requirement: Reproducibility and fairness controls
-The system SHALL provide benchmark execution controls that improve reproducibility and reduce biased comparisons.
+The system SHALL provide benchmark execution controls that improve reproducibility and reduce biased comparisons. Scenario contracts SHALL keep warmup, setup, and measured operations semantically valid across both targets.
 
 #### Scenario: Warmup is excluded from measured results
 - **WHEN** a scenario defines warmup iterations
@@ -64,12 +80,32 @@ The system SHALL provide benchmark execution controls that improve reproducibili
 - **WHEN** benchmark configuration specifies iteration count and concurrency level
 - **THEN** the harness SHALL apply those settings identically for both targets during measured execution
 
+#### Scenario: Warmup does not poison measured write operations
+- **WHEN** a write scenario uses create-or-mutate operations that can fail on duplicate or already-consumed state
+- **THEN** the harness SHALL ensure warmup and measured iterations remain semantically valid rather than converting the measured phase into guaranteed failure
+
+#### Scenario: Target-specific identifiers are not hardcoded into shared scenarios
+- **WHEN** a benchmark scenario requires resource identifiers such as queue URLs, topic ARNs, or service-generated names
+- **THEN** the scenario SHALL derive those identifiers from setup outputs or run-context expansion rather than embedding LocalStack-specific endpoint shapes in the measured command
+
 ### Requirement: Machine-readable benchmark reporting
-The system SHALL emit benchmark reports in a machine-readable format suitable for automation and trend analysis, and SHALL publish readable consolidated CI summaries across benchmark lanes. Reports SHALL include per-service class, persistence mode, and lane interpretability fields.
+The system SHALL emit benchmark reports in a machine-readable format suitable for automation and trend analysis, and SHALL publish readable consolidated CI summaries across benchmark lanes. Reports SHALL include per-service class, persistence mode, and lane interpretability fields, and SHALL distinguish product/runtime behavior gaps from harness limitations, configuration defects, and unsound scenario contracts.
 
 #### Scenario: Benchmark report is written to disk
 - **WHEN** a benchmark run completes
 - **THEN** the harness SHALL write a JSON report containing run metadata, profile name, per-scenario metrics, and aggregate summary metrics
+
+#### Scenario: Missing runtime evidence remains explicit
+- **WHEN** a benchmark lane cannot collect runtime evidence such as memory RSS for one target
+- **THEN** the report SHALL record the missing target explicitly rather than implying full observability coverage
+
+#### Scenario: In-process runtime limitations are classified explicitly
+- **WHEN** OpenStack runs in-process and container-based memory inspection is unavailable
+- **THEN** the benchmark report SHALL classify the missing memory evidence as an explicit runtime-observability limitation rather than a silent omission or generic product failure
+
+#### Scenario: Invalid scenario reason distinguishes contract defects
+- **WHEN** a scenario is invalidated due to unsound setup, missing seeded state, or non-portable target-specific identifiers
+- **THEN** the report SHALL record a machine-readable invalid reason that distinguishes scenario-contract defects from product behavior failures
 
 #### Scenario: CI can publish benchmark artifacts
 - **WHEN** benchmark mode is executed in CI

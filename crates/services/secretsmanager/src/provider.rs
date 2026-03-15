@@ -49,11 +49,11 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
         body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "__type": code,
-                "message": message,
+                "Message": message,
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }
@@ -174,7 +174,7 @@ impl ServiceProvider for SecretsManagerProvider {
                 match secret {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Secret {secret_id} not found"),
+                        "Secrets Manager can't find the specified secret.",
                         400,
                     )),
                     Some(s) if s.deleted => Ok(json_error(

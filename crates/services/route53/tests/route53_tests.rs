@@ -273,3 +273,22 @@ async fn test_list_resource_record_sets() {
     assert!(body.contains("10.0.0.1"));
     assert!(body.contains("example.com"));
 }
+
+#[tokio::test]
+async fn test_list_resource_record_sets_missing_zone_returns_no_such_hosted_zone() {
+    let p = Route53Provider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListResourceRecordSets",
+            "",
+            "/2013-04-01/hostedzone/Z1D633PJN98FT9/rrset",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    assert_eq!(resp.content_type, "text/xml");
+    let body = body_str(&resp);
+    assert!(body.contains("<Code>NoSuchHostedZone</Code>"));
+    assert!(body.contains("<Message>No hosted zone found with ID: Z1D633PJN98FT9</Message>"));
+}

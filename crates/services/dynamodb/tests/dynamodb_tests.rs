@@ -154,6 +154,7 @@ async fn test_delete_table() {
             .unwrap()
             .contains("ResourceNotFoundException")
     );
+    assert_eq!(resp2.content_type, "application/json");
 }
 
 #[tokio::test]
@@ -1190,6 +1191,10 @@ async fn test_operations_on_missing_table_return_404() {
                 .unwrap_or("")
                 .contains("ResourceNotFoundException"),
             "op={op}, body={b}"
+        );
+        assert_eq!(
+            resp.content_type, "application/json",
+            "expected JSON error content type for {op}"
         );
     }
 }

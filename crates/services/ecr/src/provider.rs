@@ -58,6 +58,23 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     }
 }
 
+fn localstack_unsupported_error(service: &str) -> DispatchResponse {
+    DispatchResponse {
+        status_code: 501,
+        body: ResponseBody::Buffered(Bytes::from(
+            serde_json::to_vec(&json!({
+                "__type": "InternalFailure",
+                "message": format!(
+                    "API for service '{service}' not yet implemented or pro feature - please check https://docs.localstack.cloud/references/coverage/ for further information"
+                ),
+            }))
+            .unwrap(),
+        )),
+        content_type: "application/json".to_string(),
+        headers: Vec::new(),
+    }
+}
+
 fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
     ctx.request_body
         .get(key)
@@ -288,6 +305,11 @@ impl ServiceProvider for EcrProvider {
                 }
                 Ok(json_ok(json!({ "images": images, "failures": [] })))
             }
+
+            // ----------------------------------------------------------------
+            // DescribeImages
+            // ----------------------------------------------------------------
+            "DescribeImages" => Ok(localstack_unsupported_error("ecr")),
 
             // ----------------------------------------------------------------
             // ListImages

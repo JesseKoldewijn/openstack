@@ -215,6 +215,12 @@ async fn test_describe_key_not_found() {
         .dispatch(&make_ctx("DescribeKey", json!({ "KeyId": "nonexistent" })))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 404);
-    assert!(body_str(&resp).contains("NotFoundException"));
+    assert_eq!(resp.status_code, 400);
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "NotFoundException");
+    assert_eq!(
+        payload["message"],
+        "Key 'arn:aws:kms:us-east-1:000000000000:key/nonexistent' does not exist"
+    );
 }

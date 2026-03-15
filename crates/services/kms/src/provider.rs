@@ -54,7 +54,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }
@@ -147,8 +147,10 @@ impl ServiceProvider for KmsProvider {
                 match store.resolve_key(&key_id) {
                     None => Ok(json_error(
                         "NotFoundException",
-                        &format!("Invalid keyId {key_id}"),
-                        404,
+                        &format!(
+                            "Key 'arn:aws:kms:{region}:{account_id}:key/{key_id}' does not exist"
+                        ),
+                        400,
                     )),
                     Some(k) => Ok(json_ok(json!({ "KeyMetadata": key_metadata(k) }))),
                 }

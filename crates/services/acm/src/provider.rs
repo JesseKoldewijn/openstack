@@ -53,7 +53,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }
@@ -150,7 +150,7 @@ impl ServiceProvider for AcmProvider {
                 match store.certificates.get(&arn) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Certificate {arn} not found"),
+                        &format!("Certificate with arn {arn} not found in account {account_id}"),
                         400,
                     )),
                     Some(c) => Ok(json_ok(json!({ "Certificate": cert_detail(c) }))),

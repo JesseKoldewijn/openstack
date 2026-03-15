@@ -16,7 +16,6 @@ env:
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
   PARITY_DOCKER_NETWORK_MODE: bridge
-  AWS_CLI_PATH: /home/runner/.local/bin/aws
 
 jobs:
   prepare-openstack-runtime-image:
@@ -74,30 +73,6 @@ jobs:
         with:
           shared-key: ci-benchmark-deep
           key: benchmark-deep-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
-        run: |
-          set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
-          fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-          aws --version
       - name: Load deterministic OpenStack runtime image
         if: env.ACT != 'true'
         uses: actions/download-artifact@v4
@@ -134,8 +109,6 @@ jobs:
       - name: Preflight benchmark environment
         run: |
           set -euo pipefail
-          command -v aws
-          aws --version
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run benchmark fairness high profile

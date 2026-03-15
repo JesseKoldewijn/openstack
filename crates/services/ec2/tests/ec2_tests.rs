@@ -247,6 +247,25 @@ async fn test_run_instances() {
 }
 
 #[tokio::test]
+async fn test_terminate_missing_instance_returns_not_found() {
+    let p = Ec2Provider::new();
+    let mut params = HashMap::new();
+    params.insert(
+        "InstanceId.1".to_string(),
+        "i-1234567890abcdef0".to_string(),
+    );
+
+    let resp = p
+        .dispatch(&make_ctx("TerminateInstances", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("InvalidInstanceID.NotFound"));
+    assert!(body.contains("The instance ID 'i-1234567890abcdef0' does not exist"));
+}
+
+#[tokio::test]
 async fn test_describe_instances() {
     let p = Ec2Provider::new();
     // Run an instance

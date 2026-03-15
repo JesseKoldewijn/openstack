@@ -43,6 +43,15 @@ fn json_ok(body: Value) -> DispatchResponse {
     }
 }
 
+fn json_ok_text_plain(body: Value) -> DispatchResponse {
+    DispatchResponse {
+        status_code: 200,
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        content_type: "text/plain; charset=utf-8".to_string(),
+        headers: Vec::new(),
+    }
+}
+
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
@@ -54,6 +63,18 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             .unwrap(),
         )),
         content_type: "application/json".to_string(),
+        headers: Vec::new(),
+    }
+}
+
+fn xml_error(code: &str, message: &str, status: u16, extra: &str) -> DispatchResponse {
+    let body = format!(
+        "<?xml version='1.0' encoding='utf-8'?>\n<Error><Code>{code}</Code><Message>{message}</Message>{extra}</Error>"
+    );
+    DispatchResponse {
+        status_code: status,
+        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
+        content_type: "application/xml".to_string(),
         headers: Vec::new(),
     }
 }
@@ -171,10 +192,18 @@ impl ServiceProvider for OpenSearchProvider {
                             "Deleted": true,
                         }
                     }))),
-                    None => Ok(json_error(
-                        "ResourceNotFoundException",
-                        &format!("Domain {domain_name} not found"),
-                        409,
+                    None => Ok(xml_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                        &format!(
+                            "<RequestId>00000000-0000-0000-0000-000000000000</RequestId><BucketName>{}</BucketName>",
+                            ctx.path
+                                .trim_start_matches('/')
+                                .split('/')
+                                .next()
+                                .unwrap_or("")
+                        ),
                     )),
                 }
             }
@@ -201,25 +230,46 @@ impl ServiceProvider for OpenSearchProvider {
                             }
                         }
                     }))),
-                    None => Ok(json_error(
-                        "ResourceNotFoundException",
-                        &format!("Domain {domain_name} not found"),
-                        409,
+                    None => Ok(xml_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                        &format!(
+                            "<RequestId>00000000-0000-0000-0000-000000000000</RequestId><BucketName>{}</BucketName>",
+                            ctx.path
+                                .trim_start_matches('/')
+                                .split('/')
+                                .next()
+                                .unwrap_or("")
+                        ),
                     )),
                 }
             }
 
             // ----------------------------------------------------------------
-            // ListDomainNames  GET /2021-01-01/opensearch/domain
+            // ListDomainNames  GET /2021-01-01/domain
             // ----------------------------------------------------------------
             "ListDomainNames" => {
                 let store = self.store.get_or_create(account_id, region);
-                let domains: Vec<Value> = store
+                let mut domain_names = store
                     .domains
                     .values()
-                    .map(|d| json!({ "DomainName": d.domain_name }))
-                    .collect();
-                Ok(json_ok(json!({ "DomainNames": domains })))
+                    .map(|domain| {
+                        json!({
+                            "DomainName": domain.domain_name,
+                            "EngineType": "OpenSearch",
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                domain_names.sort_by(|left, right| {
+                    left["DomainName"]
+                        .as_str()
+                        .cmp(&right["DomainName"].as_str())
+                });
+
+                Ok(json_ok_text_plain(json!({
+                    "DomainNames": domain_names,
+                })))
             }
 
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),

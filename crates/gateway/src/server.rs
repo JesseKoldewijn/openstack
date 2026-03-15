@@ -603,7 +603,7 @@ async fn handle_request(
                         "Service '{}' is not enabled. Please check your 'SERVICES' configuration variable.",
                         svc
                     ),
-                    500,
+                    501,
                 ),
                 DispatchError::ServiceUnavailable(msg) => ("ServiceUnavailable", msg.clone(), 503),
                 DispatchError::ProviderError(msg) => ("InternalFailure", msg.clone(), 500),
@@ -823,7 +823,7 @@ fn detect_service(
 ) -> String {
     // 1. Authorization header credential scope (highest priority)
     if let Some(svc) = service_from_auth {
-        return svc.to_lowercase();
+        return normalize_service_name(svc);
     }
 
     // 2. Host header: sqs.us-east-1.localhost.localstack.cloud
@@ -876,6 +876,13 @@ fn detect_service(
     }
 
     "unknown".to_string()
+}
+
+fn normalize_service_name(service: &str) -> String {
+    match service.to_ascii_lowercase().as_str() {
+        "es" => "opensearch".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn service_from_query_action(
@@ -979,6 +986,8 @@ fn service_from_target(target: &str) -> Option<String> {
             "secretsmanager" => "secretsmanager",
             "ssm" => "ssm",
             "cloudwatch" => "cloudwatch",
+            "awsevents" | "events" => "events",
+            "amazonec2containerregistry" | "ecr" => "ecr",
             "sns" => "sns",
             "amazonsqs" | "sqs" => "sqs",
             "awssecuritytokenservice" | "sts" => "sts",
@@ -1067,6 +1076,67 @@ fn parse_operation_and_params(
 /// Extract operation name from REST path + method.
 /// The actual operation mapping is done per-service in the provider.
 fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value) -> String {
+    if path == "/2021-01-01/opensearch/domain" {
+        return match method {
+            "POST" => "CreateDomain".to_string(),
+            "GET" => "ListDomainNames".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path == "/2021-01-01/domain" {
+        return match method {
+            "GET" => "ListDomainNames".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path.starts_with("/2021-01-01/opensearch/domain/") {
+        return match method {
+            "GET" => "DescribeDomain".to_string(),
+            "DELETE" => "DeleteDomain".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path == "/2013-04-01/hostedzone" {
+        return match method {
+            "POST" => "CreateHostedZone".to_string(),
+            "GET" => "ListHostedZones".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path.starts_with("/2013-04-01/hostedzone/") {
+        if path.ends_with("/rrset") {
+            return match method {
+                "GET" => "ListResourceRecordSets".to_string(),
+                "POST" => "ChangeResourceRecordSets".to_string(),
+                _ => format!("{}:{}", method, path),
+            };
+        }
+        return match method {
+            "DELETE" => "DeleteHostedZone".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path.starts_with("/2015-03-31/functions/") {
+        let suffix = path.trim_start_matches("/2015-03-31/functions/");
+        if suffix.ends_with("/code") && method == "PUT" {
+            return "UpdateFunctionCode".to_string();
+        }
+        if suffix.ends_with("/invocations") && method == "POST" {
+            return "Invoke".to_string();
+        }
+        if method == "GET" {
+            return "GetFunction".to_string();
+        }
+        if method == "DELETE" {
+            return "DeleteFunction".to_string();
+        }
+        if method == "PUT" {
+            return "UpdateFunctionConfiguration".to_string();
+        }
+    }
+    if path == "/2015-03-31/functions/" && method == "GET" {
+        return "ListFunctions".to_string();
+    }
     // For REST protocols, the operation is inferred by the service provider
     // We store method + path in the params for the provider to use
     format!("{}:{}", method, path)

@@ -123,6 +123,9 @@ async fn test_get_rest_api_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 404);
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "NotFoundException");
+    assert_eq!(payload["message"], "Invalid Rest API Id specified");
 }
 
 #[tokio::test]

@@ -175,15 +175,22 @@ async fn test_add_tags() {
 #[tokio::test]
 async fn test_describe_not_found() {
     let p = AcmProvider::new();
+    let missing_arn = "arn:aws:acm:us-east-1:000000000000:certificate/nonexistent";
     let resp = p
         .dispatch(&make_ctx(
             "DescribeCertificate",
             json!({
-                "CertificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/nonexistent",
+                "CertificateArn": missing_arn,
             }),
         ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body_str(&resp).contains("ResourceNotFoundException"));
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "ResourceNotFoundException");
+    assert_eq!(
+        payload["message"],
+        format!("Certificate with arn {missing_arn} not found in account 000000000000")
+    );
 }

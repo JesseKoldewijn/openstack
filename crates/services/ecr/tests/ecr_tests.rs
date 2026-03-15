@@ -25,6 +25,10 @@ fn body_json(resp: &openstack_service_framework::traits::DispatchResponse) -> Va
     serde_json::from_slice(resp.body.as_bytes()).expect("valid JSON")
 }
 
+fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -218,4 +222,24 @@ async fn test_batch_get_image_by_tag() {
     let images = b["images"].as_array().unwrap();
     assert_eq!(images.len(), 1);
     assert_eq!(images[0]["repositoryName"], "batch-repo");
+}
+
+#[tokio::test]
+async fn test_describe_images_returns_localstack_unsupported_shape() {
+    let p = EcrProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeImages",
+            json!({ "repositoryName": "missing-repository" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 501, "{}", body_str(&resp));
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body_json(&resp);
+    assert_eq!(payload["__type"], "InternalFailure");
+    assert_eq!(
+        payload["message"],
+        "API for service 'ecr' not yet implemented or pro feature - please check https://docs.localstack.cloud/references/coverage/ for further information"
+    );
 }

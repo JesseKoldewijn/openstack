@@ -91,17 +91,17 @@ fn req_id() -> String {
 fn user_xml(u: &IamUser) -> String {
     format!(
         "<User>\
-<UserId>{}</UserId>\
-<UserName>{}</UserName>\
-<Arn>{}</Arn>\
 <Path>{}</Path>\
+<UserName>{}</UserName>\
+<UserId>{}</UserId>\
+<Arn>{}</Arn>\
 <CreateDate>{}</CreateDate>\
 </User>",
-        u.user_id,
-        u.user_name,
-        u.arn,
         u.path,
-        u.created.format("%Y-%m-%dT%H:%M:%SZ"),
+        u.user_name,
+        u.user_id,
+        u.arn,
+        u.created.format("%Y-%m-%dT%H:%M:%S%.6fZ"),
     )
 }
 
@@ -213,10 +213,13 @@ impl ServiceProvider for IamProvider {
                     ));
                 }
                 let user = IamUser {
-                    user_id: format!(
-                        "AIDA{}",
-                        &Uuid::new_v4().to_string().replace('-', "")[..16].to_uppercase()
-                    ),
+                    user_id: Uuid::new_v4()
+                        .to_string()
+                        .replace('-', "")
+                        .chars()
+                        .take(20)
+                        .collect::<String>()
+                        .to_lowercase(),
                     arn: format!("arn:aws:iam::{account_id}:user{path}{name}"),
                     user_name: name.clone(),
                     path,
@@ -280,10 +283,12 @@ impl ServiceProvider for IamProvider {
                 let store = self.store.get_or_create(account_id, region);
                 let mut users: Vec<String> = store.users.values().map(user_xml).collect();
                 users.sort();
-                let inner = format!(
-                    "<Users>{}</Users><IsTruncated>false</IsTruncated>",
-                    users.join("")
-                );
+                let users_fragment = if users.is_empty() {
+                    "<Users />".to_string()
+                } else {
+                    format!("<Users>{}</Users>", users.join(""))
+                };
+                let inner = format!("{users_fragment}<IsTruncated>false</IsTruncated>");
                 Ok(xml_resp("ListUsers", &rid, &inner))
             }
 

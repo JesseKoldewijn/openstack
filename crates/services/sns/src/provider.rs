@@ -245,7 +245,7 @@ fn handle_get_topic_attributes(
     };
     let topic = match store.get_topic(&arn) {
         Some(t) => t,
-        None => return sns_error("NotFound", "Topic not found", 404),
+        None => return sns_error("NotFound", "Topic does not exist", 404),
     };
 
     let sub_count = store.list_subscriptions_by_topic(&arn).len();

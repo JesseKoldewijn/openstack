@@ -150,7 +150,12 @@ impl ServiceProvider for SesProvider {
                     .keys()
                     .map(|id| format!("<member>{id}</member>"))
                     .collect();
-                let inner = format!("<Identities>{members}</Identities>");
+                let identities = if members.is_empty() {
+                    "<Identities />".to_string()
+                } else {
+                    format!("<Identities>{members}</Identities>")
+                };
+                let inner = identities;
                 Ok(xml_resp("ListIdentities", &rid, &inner))
             }
 

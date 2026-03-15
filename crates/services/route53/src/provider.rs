@@ -299,6 +299,13 @@ impl ServiceProvider for Route53Provider {
                     .to_string();
 
                 let store = self.store.get_or_create(account_id, ROUTE53_REGION);
+                if !store.zones.contains_key(&zone_id) {
+                    return Ok(xml_error(
+                        "NoSuchHostedZone",
+                        &format!("No hosted zone found with ID: {zone_id}"),
+                        404,
+                    ));
+                }
                 let rrsets_xml: String = store
                     .records
                     .iter()

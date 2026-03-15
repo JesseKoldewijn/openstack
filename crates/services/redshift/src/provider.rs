@@ -194,7 +194,7 @@ impl ServiceProvider for RedshiftProvider {
                     }
                     None => Ok(xml_error(
                         "ClusterNotFound",
-                        &format!("Cluster {cluster_id} not found"),
+                        &format!("Cluster {cluster_id} not found."),
                         400,
                     )),
                 }

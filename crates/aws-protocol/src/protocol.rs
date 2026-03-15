@@ -20,10 +20,11 @@ impl AwsProtocol {
     pub fn from_service(service: &str) -> Self {
         match service {
             "s3" => AwsProtocol::RestXml,
-            "sqs" | "sns" | "iam" | "sts" | "cloudformation" => AwsProtocol::Query,
+            "sqs" | "sns" | "iam" | "sts" | "cloudformation" | "redshift" | "cloudwatch"
+            | "ses" => AwsProtocol::Query,
             "ec2" => AwsProtocol::Ec2,
-            "dynamodb" | "kinesis" | "firehose" | "secretsmanager" | "ssm" | "kms"
-            | "cloudwatch" => AwsProtocol::Json,
+            "dynamodb" | "kinesis" | "firehose" | "secretsmanager" | "ssm" | "kms" | "acm"
+            | "ecr" | "events" | "states" => AwsProtocol::Json,
             _ => AwsProtocol::RestJson,
         }
     }

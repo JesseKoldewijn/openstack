@@ -173,6 +173,21 @@ async fn test_get_bucket_location() {
     assert!(body.contains("LocationConstraint"));
 }
 
+#[tokio::test]
+async fn test_get_bucket_location_missing_bucket_matches_localstack_shape() {
+    let provider = new_provider().await;
+    let mut qp = HashMap::new();
+    qp.insert("location".to_string(), String::new());
+    let ctx = make_ctx_with_query("GET", "/missing-bucket", b"", qp);
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 404);
+    assert_eq!(resp.content_type, "application/xml");
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
+    assert!(body.contains("<Code>NoSuchBucket</Code>"));
+    assert!(body.contains("<Message>The specified bucket does not exist</Message>"));
+    assert!(body.contains("<BucketName>missing-bucket</BucketName>"));
+}
+
 // ---------------------------------------------------------------------------
 // Object operations
 // ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }
@@ -317,7 +317,9 @@ impl ServiceProvider for KinesisProvider {
                 match store.streams.get_mut(&stream_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Stream {stream_name} not found"),
+                        &format!(
+                            "Stream arn arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
+                        ),
                         400,
                     )),
                     Some(s) => {
@@ -380,7 +382,9 @@ impl ServiceProvider for KinesisProvider {
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
-                            &format!("Stream {stream_name} not found"),
+                            &format!(
+                                "Stream arn arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
+                            ),
                             400,
                         ));
                     }

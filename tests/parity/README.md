@@ -13,7 +13,6 @@ The parity harness compares behavior between openstack and LocalStack for the sa
 
 Requirements:
 
-- `aws` CLI available
 - Docker available (unless `PARITY_LOCALSTACK_ENDPOINT` is provided)
 
 Run core profile:
@@ -50,15 +49,16 @@ Optional overrides:
 
 Reports are written to `target/parity-reports/*.json` plus per-profile latest snapshots (`<profile>-latest.json`).
 
-Parity reports now include persistence mode metadata (`openstack_persistence_mode`, `localstack_persistence_mode`, `persistence_mode_equivalent`) and persistence failure-class rollups under `summary.persistence_failure_classes`.
+Parity reports now include persistence mode metadata (`openstack_persistence_mode`, `localstack_persistence_mode`, `persistence_mode_equivalent`), persistence failure-class rollups under `summary.persistence_failure_classes`, and per-scenario native coverage indicators (`native_coverage_status`, `follow_up_required`) so README-listed services that still need native HTTP follow-up remain visible.
 
 ## Triage Workflow
 
 1. Run parity profile and inspect report mismatch entries.
 2. Classify mismatch:
-   - regression in openstack
-   - upstream LocalStack behavior change
-   - acceptable difference
+    - regression in openstack
+    - upstream LocalStack behavior change
+    - acceptable difference
+    - native HTTP follow-up required
 3. For acceptable differences, add an explicit entry in `tests/parity/known_differences.json` with:
    - `id`, `service`, `scenario_id`, `step_id`, `path`
    - `rationale`, `owner`, `reviewer`

@@ -59,8 +59,8 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
         status_code: status,
         body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
+                "__type": code,
                 "message": message,
-                "code": code,
             }))
             .unwrap(),
         )),
@@ -85,6 +85,30 @@ fn short_id() -> String {
     Uuid::new_v4().to_string()[..8].to_string()
 }
 
+fn canonical_operation(ctx: &RequestContext) -> &str {
+    match (ctx.method.as_str(), ctx.path.as_str()) {
+        ("GET", path)
+            if path.starts_with("/restapis/") && !path[1 + "restapis/".len()..].contains('/') =>
+        {
+            "GetRestApi"
+        }
+        ("GET", "/restapis") => "GetRestApis",
+        ("POST", "/restapis") => "CreateRestApi",
+        ("DELETE", path)
+            if path.starts_with("/restapis/") && !path[1 + "restapis/".len()..].contains('/') =>
+        {
+            "DeleteRestApi"
+        }
+        ("GET", path) if path.ends_with("/resources") => "GetResources",
+        ("POST", path) if path.contains("/resources/") => "CreateResource",
+        ("PUT", path) if path.ends_with("/integration") => "PutIntegration",
+        ("PUT", path) if path.contains("/methods/") => "PutMethod",
+        ("POST", path) if path.ends_with("/deployments") => "CreateDeployment",
+        ("GET", path) if path.ends_with("/stages") => "GetStages",
+        _ => ctx.operation.as_str(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ServiceProvider
 // ---------------------------------------------------------------------------
@@ -98,12 +122,13 @@ impl ServiceProvider for ApiGatewayProvider {
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
         let region = &ctx.region;
         let account_id = &ctx.account_id;
+        let op = canonical_operation(ctx);
 
         // API Gateway uses REST paths. The operation is derived from method + path.
         // The gateway layer sets ctx.operation based on path pattern matching.
         // We support the standard API Gateway V1 management API operations.
 
-        match ctx.operation.as_str() {
+        match op {
             // ----------------------------------------------------------------
             // CreateRestApi  POST /restapis
             // ----------------------------------------------------------------
@@ -175,7 +200,7 @@ impl ServiceProvider for ApiGatewayProvider {
                     )),
                     None => Ok(json_error(
                         "NotFoundException",
-                        "Invalid API identifier specified",
+                        "Invalid Rest API Id specified",
                         404,
                     )),
                 }

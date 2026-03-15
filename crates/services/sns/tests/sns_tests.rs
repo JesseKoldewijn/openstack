@@ -155,6 +155,23 @@ async fn test_get_topic_attributes() {
 }
 
 #[tokio::test]
+async fn test_get_topic_attributes_missing_topic_matches_localstack_message() {
+    let provider = SnsProvider::new();
+    let body = form_body(&[
+        ("Action", "GetTopicAttributes"),
+        (
+            "TopicArn",
+            "arn:aws:sns:us-east-1:000000000000:missing-topic",
+        ),
+    ]);
+    let resp = provider.dispatch(&make_ctx(&body)).await.unwrap();
+    assert_eq!(resp.status_code, 404);
+    let xml = body_str(&resp);
+    assert!(xml.contains("<Code>NotFound</Code>"));
+    assert!(xml.contains("<Message>Topic does not exist</Message>"));
+}
+
+#[tokio::test]
 async fn test_set_topic_attributes() {
     let provider = SnsProvider::new();
     let arn = create_topic(&provider, "settable-topic").await;

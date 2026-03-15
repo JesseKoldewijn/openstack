@@ -23,7 +23,6 @@ Legacy profile aliases still exist for compatibility:
 
 Requirements:
 
-- `aws` CLI available
 - Docker available (unless `PARITY_LOCALSTACK_ENDPOINT` is provided)
 
 Fair low core profile:
@@ -59,7 +58,6 @@ Optional overrides:
 - `PARITY_BENCHMARK_RUNTIME_MODE=symmetric-docker`
 - `PARITY_BENCHMARK_EXECUTION_ORDER=alternating`
 - `PARITY_BENCHMARK_LANE_MODE=harness-influenced|low-overhead`
-- `PARITY_BENCHMARK_EXECUTION_DRIVER=aws-cli|direct-http`
 - `PARITY_DOCKER_CPU_LIMIT=2`
 - `PARITY_DOCKER_MEMORY_LIMIT=4g`
 - `PARITY_DOCKER_NETWORK_MODE=bridge`
@@ -149,11 +147,11 @@ Pre-requisites:
 Suggested local simulation commands:
 
 ```bash
-# Non-main PR benchmark lane (fair-low)
+# Non-main PR benchmark lane (fair-low-core)
 act pull_request -W .github/workflows/ci.yml -j benchmark-smoke-fast \
   --env GH_TOKEN="$GH_TOKEN"
 
-# Main PR benchmark lane (fair-medium)
+# Main PR benchmark lane (fair-medium-core)
 act pull_request -W .github/workflows/ci.yml -j benchmark-smoke-full \
   --env GH_TOKEN="$GH_TOKEN"
 
@@ -197,9 +195,11 @@ See also: `docs/act-benchmark-validation.md` for the full local workflow simulat
 - `results[*].comparison` includes openstack-vs-localstack deltas and ratios for latency and throughput.
 - `summary` provides aggregate error totals, scenario class counts, skipped count, and average ratios across performance (non-skipped) scenarios only.
 - `summary.valid_performance_scenarios`, `summary.invalid_performance_scenarios`, `summary.lane_interpretable`, and `summary.invalid_reasons` provide benchmark signal-quality diagnostics.
-- `summary.missing_required_role_count` provides lane-level count of missing required service role coverage.
+- `summary.missing_required_role_count` provides lane-level count of missing required service role coverage after explicit exclusions are applied.
 - `summary.per_service` provides per-service execution class, durability class, scenario counts, skipped counts, average p95/p99/throughput ratios, and class-envelope breach diagnostics.
 - `summary.per_service[*].required_roles`, `summary.per_service[*].covered_roles`, `summary.per_service[*].missing_roles`, and `summary.per_service[*].role_exclusions` provide realistic write/read coverage diagnostics.
+- `summary.per_service[*].role_exclusions[*]` stores `reason_code` and `rationale` for auditable exclusions (for example fair-core `sts` write-role treatment).
+- `summary.missing_runtime_evidence` surfaces lane-level observability gaps such as `runtime-observability-limitation` for in-process OpenStack RSS collection.
 - `runtime.openstack_persistence_mode`, `runtime.localstack_persistence_mode`, and `runtime.persistence_mode_equivalent` capture mode-equivalence metadata.
 - `scripts/benchmark_report_consolidated.py` can generate a single consolidated markdown report across fairness lanes, including optional gate verdicts (`--include-gate`).
 
@@ -223,8 +223,7 @@ cargo build --release --bin openstack
 - Use the same profile and environment settings when comparing runs.
 - Warmup iterations are excluded from measured metrics by design.
 - Shared CI runners introduce noise; trend comparisons should prefer repeated runs or scheduled baselines.
-- `PARITY_BENCHMARK_EXECUTION_DRIVER=aws-cli` includes client process overhead in every operation.
-- `PARITY_BENCHMARK_EXECUTION_DRIVER=direct-http` removes AWS CLI process overhead and better isolates openstack-vs-localstack backend behavior for core list/call scenarios.
+- Benchmarks now use the native HTTP execution path by default, removing AWS CLI process overhead from measured operations.
 
 ## Lane Modes
 

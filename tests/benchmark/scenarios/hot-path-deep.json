@@ -1,10 +1,11 @@
 [
   {
-    "id": "s3-put-large-object",
+    "id": "s3-put-readme-payload-burst",
     "profile": "hot-path-deep",
     "service": "s3",
     "scenario_class": "performance",
     "load_tier": "high",
+    "scenario_role": "write",
     "protocol": "rest-xml",
     "setup": [
       {
@@ -16,7 +17,7 @@
       }
     ],
     "operation": {
-      "id": "s3-put-object-large",
+      "id": "s3-put-object-readme-payload",
       "protocol": "rest-xml",
       "command": [
         "s3api",
@@ -32,6 +33,13 @@
       "capture_json": null
     },
     "cleanup": [
+      {
+        "id": "s3-delete-object",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-object", "--bucket", "{{bucket}}", "--key", "large-{{run_id}}.txt"],
+        "expect_success": true,
+        "capture_json": null
+      },
       {
         "id": "s3-delete-bucket",
         "protocol": "rest-xml",
@@ -68,7 +76,7 @@
         "sqs",
         "send-message",
         "--queue-url",
-        "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/{{queue}}",
+        "{{queue_url}}",
         "--message-body",
         "deep-{{run_id}}"
       ],
@@ -83,7 +91,7 @@
           "sqs",
           "delete-queue",
           "--queue-url",
-          "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/{{queue}}"
+          "{{queue_url}}"
         ],
         "expect_success": true,
         "capture_json": null
@@ -100,7 +108,7 @@
     "service": "dynamodb",
     "scenario_class": "performance",
     "load_tier": "high",
-    "protocol": "json",
+    "protocol": "query-xml",
     "setup": [
       {
         "id": "ddb-create-table",
@@ -137,7 +145,7 @@
     ],
     "operation": {
       "id": "ddb-get-item-hot",
-      "protocol": "json",
+      "protocol": "query-xml",
       "command": [
         "dynamodb",
         "get-item",

@@ -38,7 +38,7 @@ fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }
@@ -53,7 +53,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }
@@ -448,8 +448,8 @@ impl ServiceProvider for StepFunctionsProvider {
                     }))),
                     None => Ok(json_error(
                         "StateMachineDoesNotExist",
-                        &format!("State machine {arn} not found"),
-                        404,
+                        &format!("State Machine Does Not Exist: '{arn}'"),
+                        400,
                     )),
                 }
             }

@@ -53,7 +53,8 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <Response><Errors><Error>\
 <Code>{code}</Code><Message>{message}</Message>\
-</Error></Errors></Response>"
+</Error></Errors><RequestID>{}</RequestID></Response>",
+        req_id()
     );
     DispatchResponse {
         status_code: status,
@@ -412,8 +413,8 @@ impl ServiceProvider for Ec2Provider {
                     let mut result = Vec::new();
                     loop {
                         let key = format!("InstanceId.{idx}");
-                        if let Some(id) = ctx.query_params.get(&key) {
-                            result.push(id.clone());
+                        if let Some(id) = str_param(ctx, &key) {
+                            result.push(id.to_string());
                         } else {
                             break;
                         }
@@ -422,6 +423,15 @@ impl ServiceProvider for Ec2Provider {
                     result
                 };
                 let mut store = self.store.get_or_create(account_id, region);
+                for id in &ids {
+                    if !store.instances.contains_key(id) {
+                        return Ok(xml_error(
+                            "InvalidInstanceID.NotFound",
+                            &format!("The instance ID '{id}' does not exist"),
+                            400,
+                        ));
+                    }
+                }
                 for id in &ids {
                     if let Some(inst) = store.instances.get_mut(id) {
                         inst.state = "terminated".to_string();

@@ -52,7 +52,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: "application/json".to_string(),
         headers: Vec::new(),
     }
 }
@@ -149,7 +149,7 @@ impl ServiceProvider for SsmProvider {
                 match store.parameters.get(&name) {
                     None => Ok(json_error(
                         "ParameterNotFound",
-                        &format!("Parameter {name} not found"),
+                        &format!("Parameter {name} not found."),
                         400,
                     )),
                     Some(p) => Ok(json_ok(json!({ "Parameter": param_to_json(p) }))),

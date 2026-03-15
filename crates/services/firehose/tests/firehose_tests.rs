@@ -194,3 +194,23 @@ async fn test_duplicate_stream_fails() {
     let b = body(&resp);
     assert!(b["__type"].as_str().unwrap().contains("ResourceInUse"));
 }
+
+#[tokio::test]
+async fn test_describe_missing_stream_matches_localstack_shape() {
+    let p = FirehoseProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeDeliveryStream",
+            json!({ "DeliveryStreamName": "missing-stream" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    assert_eq!(resp.content_type, "application/json");
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
+    assert_eq!(
+        b["message"],
+        "Firehose missing-stream under account 000000000000 not found."
+    );
+}
