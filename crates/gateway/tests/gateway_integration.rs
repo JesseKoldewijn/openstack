@@ -2,19 +2,19 @@
 
 #[cfg(test)]
 mod gateway_tests {
-    use axum::body::to_bytes;
     use axum::body::Body;
+    use axum::body::to_bytes;
     use axum::http::{HeaderMap, HeaderValue, Method};
     use axum::http::{Request, StatusCode};
     use openstack_config::{
         Config, CorsConfig, Directories, LogLevel, ServicesConfig, SnapshotLoadStrategy,
         SnapshotSaveStrategy,
     };
+    use openstack_gateway::Gateway;
     use openstack_gateway::cors::CorsHandler;
     use openstack_gateway::sigv4::{
-        access_key_to_account_id, is_valid_region, parse_sigv4_auth, DEFAULT_ACCOUNT_ID,
+        DEFAULT_ACCOUNT_ID, access_key_to_account_id, is_valid_region, parse_sigv4_auth,
     };
-    use openstack_gateway::Gateway;
     use openstack_service_framework::ServicePluginManager;
     use tower::ServiceExt;
 
