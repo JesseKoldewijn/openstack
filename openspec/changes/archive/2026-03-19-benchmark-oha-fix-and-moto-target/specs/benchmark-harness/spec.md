@@ -1,7 +1,4 @@
-## Purpose
-TBD
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Benchmark metrics collection and comparison
 The system SHALL capture benchmark metrics for each scenario and target using native HTTP execution via `oha` with `--output-format json`, SHALL extract latency percentiles from `latencyPercentiles.p50`, `latencyPercentiles.p95`, `latencyPercentiles.p99` and throughput from `summary.requestsPerSec` in oha's JSON output, SHALL compute comparative metrics between openstack and all active comparison targets (LocalStack and/or moto), and SHALL emit service-level optimization summaries suitable for remediation tracking.
@@ -25,25 +22,6 @@ The system SHALL capture benchmark metrics for each scenario and target using na
 #### Scenario: oha is invoked with correct output format flag
 - **WHEN** the harness runs oha to benchmark an operation
 - **THEN** the harness SHALL pass `--output-format json` (not `--json`) to oha and SHALL extract p50 from `.latencyPercentiles.p50`, p95 from `.latencyPercentiles.p95`, p99 from `.latencyPercentiles.p99`, and throughput from `.summary.requestsPerSec`
-
-### Requirement: Profile-based all-services benchmark coverage
-The system SHALL support three benchmark execution profiles (smoke, standard, deep) that control service scope and load parameters. All profiles that include a service SHALL exercise at least one write and one read operation for that service.
-
-#### Scenario: Smoke profile covers core services with light load
-- **WHEN** the smoke benchmark profile is requested
-- **THEN** the harness SHALL execute benchmark operations for the 8 core parity services with reduced request count and concurrency
-
-#### Scenario: Standard profile covers all services with medium load
-- **WHEN** the standard benchmark profile is requested
-- **THEN** the harness SHALL execute benchmark operations for all 24 services with moderate request count and concurrency
-
-#### Scenario: Deep profile covers all services with heavy load
-- **WHEN** the deep benchmark profile is requested
-- **THEN** the harness SHALL execute benchmark operations for all 24 services with high request count and increased concurrency
-
-#### Scenario: Every benchmarked service includes write and read operations
-- **WHEN** any profile runs
-- **THEN** each included service SHALL have at least one write/mutate operation and one read/query/list operation benchmarked
 
 ### Requirement: Dual-target benchmark execution
 The system SHALL execute each benchmark scenario against openstack and all active comparison targets (LocalStack and/or moto as determined by `--targets`) using equivalent native HTTP request inputs and benchmark configuration. A `bench_targets()` function SHALL iterate over all active targets, invoking the bench function for each. Benchmark execution SHALL include explicit persistence-mode metadata, SHALL reject non-equivalent mode comparisons for interpretable performance claims, and in CI-managed runtime mode SHALL consume a deterministic run-scoped OpenStack runtime image reference rather than a floating image tag.
@@ -72,16 +50,16 @@ The system SHALL execute each benchmark scenario against openstack and all activ
 - **WHEN** a benchmark lane is executed with supported native translators available
 - **THEN** the harness SHALL execute benchmark workloads without spawning AWS CLI processes
 
-### Requirement: Reproducibility and fairness controls
-The system SHALL provide benchmark execution controls that improve reproducibility. Request count and concurrency SHALL be configurable and applied identically to both targets.
+### Requirement: Symmetric benchmark runtime for dual-target comparison
+The benchmark system SHALL execute openstack and all active comparison targets in equivalent containerized runtime environments for comparative benchmark runs.
 
-#### Scenario: Same request count and concurrency applied to both targets
-- **WHEN** benchmark configuration specifies request count and concurrency
-- **THEN** the harness SHALL apply those settings identically for both targets during execution
+#### Scenario: All active targets run with equivalent resource constraints
+- **WHEN** a fairness-mode benchmark run is started
+- **THEN** openstack and each active comparison target SHALL each run in Docker with identical configured CPU and memory limits before scenarios are executed
 
-#### Scenario: Each service seeds its own prerequisite resources
-- **WHEN** a service benchmark section begins
-- **THEN** the script SHALL create prerequisite resources before measured operations and handle seed failures gracefully
+#### Scenario: Benchmark run records fairness runtime metadata
+- **WHEN** a fairness-mode benchmark run completes
+- **THEN** the benchmark report SHALL include target runtime metadata including container image/tag, CPU limit, memory limit, and network mode for each active target
 
 ### Requirement: Machine-readable benchmark reporting
 The system SHALL emit benchmark reports in a machine-readable format suitable for automation and trend analysis, and SHALL publish readable consolidated CI summaries across benchmark lanes. Reports SHALL include per-service class, persistence mode, and lane interpretability fields, and SHALL distinguish product/runtime behavior gaps from harness limitations, configuration defects, and unsound scenario contracts.
@@ -117,14 +95,3 @@ The system SHALL emit benchmark reports in a machine-readable format suitable fo
 #### Scenario: Summary includes class and mode context
 - **WHEN** consolidated reporting is generated
 - **THEN** each required lane summary SHALL include service class and persistence mode context for interpreted metrics
-
-### Requirement: Symmetric benchmark runtime for dual-target comparison
-The benchmark system SHALL execute openstack and all active comparison targets in equivalent containerized runtime environments for comparative benchmark runs.
-
-#### Scenario: All active targets run with equivalent resource constraints
-- **WHEN** a fairness-mode benchmark run is started
-- **THEN** openstack and each active comparison target SHALL each run in Docker with identical configured CPU and memory limits before scenarios are executed
-
-#### Scenario: Benchmark run records fairness runtime metadata
-- **WHEN** a fairness-mode benchmark run completes
-- **THEN** the benchmark report SHALL include target runtime metadata including container image/tag, CPU limit, memory limit, and network mode for each active target

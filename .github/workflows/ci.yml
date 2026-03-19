@@ -17,6 +17,7 @@ env:
   PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
+  PARITY_MOTO_IMAGE: motoserver/moto:latest
   PARITY_DOCKER_NETWORK_MODE: bridge
 
 permissions:
@@ -562,6 +563,7 @@ jobs:
           set -euo pipefail
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
+          docker pull "$PARITY_MOTO_IMAGE"
       - name: Install oha
         run: |
           set -euo pipefail
@@ -621,6 +623,7 @@ jobs:
           set -euo pipefail
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
+          docker pull "$PARITY_MOTO_IMAGE"
       - name: Install oha
         run: |
           set -euo pipefail
@@ -788,6 +791,7 @@ jobs:
           merge-multiple: true
           path: artifacts/parity
       - name: Download benchmark artifacts
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: benchmark-*-report

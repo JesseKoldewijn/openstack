@@ -7,6 +7,7 @@ on:
 
 env:
   PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+  PARITY_MOTO_IMAGE: motoserver/moto:latest
   PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
@@ -101,6 +102,7 @@ jobs:
           set -euo pipefail
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
+          docker pull "$PARITY_MOTO_IMAGE"
       - name: Install oha
         run: |
           set -euo pipefail
