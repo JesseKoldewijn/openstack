@@ -14,6 +14,15 @@ use tracing::{debug, warn};
 use crate::object_store::{ObjectFileStore, ObjectLocation};
 use crate::store::{ObjectDataRef, S3Store};
 
+/// Objects whose byte count is at or below this threshold are stored
+/// inline in the in-memory store (`ObjectDataRef::Inline`) rather than
+/// being written to the filesystem.  This eliminates all disk I/O on the
+/// hot GET/HEAD/LIST paths for the vast majority of emulator workloads.
+///
+/// Objects above the threshold are still written to disk and streamed
+/// from disk on reads, which is appropriate for large blobs.
+const INLINE_OBJECT_THRESHOLD: u64 = 256 * 1024; // 256 KiB
+
 pub struct S3Provider {
     store: Arc<AccountRegionBundle<S3Store>>,
     /// Path for S3 object file storage.
@@ -323,23 +332,29 @@ async fn handle_put_object_async(
     let etag = format!("\"{}\"", hex::encode(md5::compute(&body_bytes).0));
     let size = body_bytes.len() as u64;
 
-    // Write to filesystem (async I/O — no store guard held)
-    let file_path = match file_store
-        .write_object(
-            &ctx.account_id,
-            &ctx.region,
-            &bucket,
-            &key,
-            &version_id,
-            &body_bytes,
-        )
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(error = %e, "Failed to write object to filesystem");
-            return s3_error("InternalError", "Failed to store object", 500);
-        }
+    // For small objects store bytes inline in memory (no disk I/O).
+    // For large objects write to the filesystem for memory efficiency.
+    let object_data = if size <= INLINE_OBJECT_THRESHOLD {
+        ObjectDataRef::Inline(body_bytes)
+    } else {
+        let file_path = match file_store
+            .write_object(
+                &ctx.account_id,
+                &ctx.region,
+                &bucket,
+                &key,
+                &version_id,
+                &body_bytes,
+            )
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "Failed to write object to filesystem");
+                return s3_error("InternalError", "Failed to store object", 500);
+            }
+        };
+        ObjectDataRef::FileRef(file_path)
     };
 
     // Build version and store in S3Store (short-lived guard)
@@ -356,7 +371,7 @@ async fn handle_put_object_async(
             size,
             metadata,
             acl: "private".to_string(),
-            data: ObjectDataRef::FileRef(file_path),
+            data: object_data,
             delete_marker: false,
         };
         store.put_object_version(&bucket, &key, version);
@@ -451,17 +466,30 @@ async fn handle_get_object_async(
             let body = match data {
                 ObjectDataRef::Inline(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
                 ObjectDataRef::FileRef(path) => {
-                    match ObjectFileStore::read_object_at(&path).await {
-                        Ok(file) => {
-                            let stream = ReaderStream::new(file);
-                            ResponseBody::Streaming {
-                                stream: Box::pin(stream),
-                                content_length: Some(size),
+                    // For small objects read the entire file into memory and
+                    // return a buffered response — this avoids the spawn_blocking
+                    // overhead of ReaderStream for tiny payloads.
+                    if size <= INLINE_OBJECT_THRESHOLD {
+                        match tokio::fs::read(&path).await {
+                            Ok(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
+                            Err(e) => {
+                                warn!(error = %e, path = %path.display(), "Failed to read object file");
+                                return s3_error("InternalError", "Failed to read object", 500);
                             }
                         }
-                        Err(e) => {
-                            warn!(error = %e, path = %path.display(), "Failed to open object file for streaming");
-                            return s3_error("InternalError", "Failed to read object", 500);
+                    } else {
+                        match ObjectFileStore::read_object_at(&path).await {
+                            Ok(file) => {
+                                let stream = ReaderStream::new(file);
+                                ResponseBody::Streaming {
+                                    stream: Box::pin(stream),
+                                    content_length: Some(size),
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, path = %path.display(), "Failed to open object file for streaming");
+                                return s3_error("InternalError", "Failed to read object", 500);
+                            }
                         }
                     }
                 }
@@ -721,52 +749,68 @@ async fn handle_copy_object_async(
         "null".to_string()
     };
 
-    // Copy data — filesystem copy for FileRef, write for Inline
+    // Copy data — keep small objects inline; use filesystem for large ones.
     let dest_data = match &src_data {
-        ObjectDataRef::FileRef(_path) => {
-            match file_store
-                .copy_object(
-                    ObjectLocation {
-                        account_id: &ctx.account_id,
-                        region: &ctx.region,
-                        bucket: &src_bucket,
-                        key: &src_key,
-                        version_id: &src_version_id,
-                    },
-                    ObjectLocation {
-                        account_id: &ctx.account_id,
-                        region: &ctx.region,
-                        bucket: &dest_bucket,
-                        key: &dest_key,
-                        version_id: &dest_version_id,
-                    },
-                )
-                .await
-            {
-                Ok(dest_path) => ObjectDataRef::FileRef(dest_path),
-                Err(e) => {
-                    warn!(error = %e, "Failed to copy object on filesystem");
-                    return s3_error("InternalError", "Failed to copy object", 500);
+        ObjectDataRef::Inline(bytes) => {
+            // Source is already in memory — keep it inline for the destination
+            // if it's within the threshold; otherwise write to disk.
+            if src_size <= INLINE_OBJECT_THRESHOLD {
+                ObjectDataRef::Inline(bytes.clone())
+            } else {
+                match file_store
+                    .write_object(
+                        &ctx.account_id,
+                        &ctx.region,
+                        &dest_bucket,
+                        &dest_key,
+                        &dest_version_id,
+                        bytes,
+                    )
+                    .await
+                {
+                    Ok(dest_path) => ObjectDataRef::FileRef(dest_path),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to write copied object to filesystem");
+                        return s3_error("InternalError", "Failed to copy object", 500);
+                    }
                 }
             }
         }
-        ObjectDataRef::Inline(bytes) => {
-            // Write inline data to filesystem for the destination
-            match file_store
-                .write_object(
-                    &ctx.account_id,
-                    &ctx.region,
-                    &dest_bucket,
-                    &dest_key,
-                    &dest_version_id,
-                    bytes,
-                )
-                .await
-            {
-                Ok(dest_path) => ObjectDataRef::FileRef(dest_path),
-                Err(e) => {
-                    warn!(error = %e, "Failed to write copied object to filesystem");
-                    return s3_error("InternalError", "Failed to copy object", 500);
+        ObjectDataRef::FileRef(_path) => {
+            if src_size <= INLINE_OBJECT_THRESHOLD {
+                // Small file-backed object — read into memory and keep inline.
+                match tokio::fs::read(_path).await {
+                    Ok(bytes) => ObjectDataRef::Inline(bytes),
+                    Err(e) => {
+                        warn!(error = %e, path = %_path.display(), "Failed to read source object file for copy");
+                        return s3_error("InternalError", "Failed to copy object", 500);
+                    }
+                }
+            } else {
+                match file_store
+                    .copy_object(
+                        ObjectLocation {
+                            account_id: &ctx.account_id,
+                            region: &ctx.region,
+                            bucket: &src_bucket,
+                            key: &src_key,
+                            version_id: &src_version_id,
+                        },
+                        ObjectLocation {
+                            account_id: &ctx.account_id,
+                            region: &ctx.region,
+                            bucket: &dest_bucket,
+                            key: &dest_key,
+                            version_id: &dest_version_id,
+                        },
+                    )
+                    .await
+                {
+                    Ok(dest_path) => ObjectDataRef::FileRef(dest_path),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to copy object on filesystem");
+                        return s3_error("InternalError", "Failed to copy object", 500);
+                    }
                 }
             }
         }
@@ -1125,25 +1169,31 @@ async fn handle_upload_part_async(
     let etag = format!("\"{}\"", hex::encode(md5::compute(&data).0));
     let size = data.len() as u64;
 
-    // Write part to filesystem: use a part-specific version_id
-    let part_version_id = format!("part-{}", part_number);
-    let file_path = match file_store
-        .write_object(
-            &ctx.account_id,
-            &ctx.region,
-            &bucket,
-            // Use a sub-path under the upload_id to keep parts separate
-            &format!("__multipart/{upload_id}/{key}"),
-            &part_version_id,
-            &data,
-        )
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(error = %e, "Failed to write upload part to filesystem");
-            return s3_error("InternalError", "Failed to store part", 500);
-        }
+    // Store part inline for small payloads; write to disk for large ones.
+    let part_data = if size <= INLINE_OBJECT_THRESHOLD {
+        ObjectDataRef::Inline(data)
+    } else {
+        // Write part to filesystem: use a part-specific version_id
+        let part_version_id = format!("part-{}", part_number);
+        let file_path = match file_store
+            .write_object(
+                &ctx.account_id,
+                &ctx.region,
+                &bucket,
+                // Use a sub-path under the upload_id to keep parts separate
+                &format!("__multipart/{upload_id}/{key}"),
+                &part_version_id,
+                &data,
+            )
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "Failed to write upload part to filesystem");
+                return s3_error("InternalError", "Failed to store part", 500);
+            }
+        };
+        ObjectDataRef::FileRef(file_path)
     };
 
     // Store part metadata in S3Store (short-lived guard)
@@ -1152,7 +1202,7 @@ async fn handle_upload_part_async(
         store.upload_part_with_etag(
             &upload_id,
             part_number,
-            ObjectDataRef::FileRef(file_path),
+            part_data,
             etag.clone(),
             size,
         );
@@ -1264,31 +1314,44 @@ async fn handle_complete_multipart_upload_async(
     let etag = format!("\"{}\"", hex::encode(md5::compute(&combined).0));
     let size = combined.len() as u64;
 
-    // Write combined data to final object file
-    let file_path = match file_store
-        .write_object(
-            &ctx.account_id,
-            &ctx.region,
-            &bucket,
-            &key,
-            &version_id,
-            &combined,
-        )
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(error = %e, "Failed to write assembled object to filesystem");
-            return s3_error("InternalError", "Failed to store object", 500);
+    // Store assembled object inline if small; write to disk for large objects.
+    let assembled_data = if size <= INLINE_OBJECT_THRESHOLD {
+        // Clean up any file-backed parts before going inline.
+        for (_pn, data_ref, _size) in &part_data {
+            if let ObjectDataRef::FileRef(path) = data_ref {
+                let _ = tokio::fs::remove_file(path).await;
+            }
         }
-    };
+        ObjectDataRef::Inline(combined)
+    } else {
+        // Write combined data to final object file
+        let file_path = match file_store
+            .write_object(
+                &ctx.account_id,
+                &ctx.region,
+                &bucket,
+                &key,
+                &version_id,
+                &combined,
+            )
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "Failed to write assembled object to filesystem");
+                return s3_error("InternalError", "Failed to store object", 500);
+            }
+        };
 
-    // Clean up part files
-    for (_pn, data_ref, _size) in &part_data {
-        if let ObjectDataRef::FileRef(path) = data_ref {
-            let _ = tokio::fs::remove_file(path).await;
+        // Clean up part files
+        for (_pn, data_ref, _size) in &part_data {
+            if let ObjectDataRef::FileRef(path) = data_ref {
+                let _ = tokio::fs::remove_file(path).await;
+            }
         }
-    }
+
+        ObjectDataRef::FileRef(file_path)
+    };
 
     // Build version and store in S3Store
     let version = crate::store::ObjectVersion {
@@ -1302,7 +1365,7 @@ async fn handle_complete_multipart_upload_async(
         size,
         metadata,
         acl: "private".to_string(),
-        data: ObjectDataRef::FileRef(file_path),
+        data: assembled_data,
         delete_marker: false,
     };
 
