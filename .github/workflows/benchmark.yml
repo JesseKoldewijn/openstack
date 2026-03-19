@@ -1,0 +1,265 @@
+name: Benchmark
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Benchmark profile to run
+        required: false
+        default: default
+        type: choice
+        options:
+          - default
+          - stress
+  issue_comment:
+    types: [created]
+
+env:
+  PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+  PARITY_MOTO_IMAGE: motoserver/moto:latest
+  PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
+  PARITY_DOCKER_CPU_LIMIT: "2"
+  PARITY_DOCKER_MEMORY_LIMIT: 4g
+  PARITY_DOCKER_NETWORK_MODE: bridge
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  # ── Gate: only run on /benchmark PR comments ─────────────────────────────────
+  check-trigger:
+    name: Check trigger
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      profile: ${{ steps.check.outputs.profile }}
+      pr_number: ${{ steps.check.outputs.pr_number }}
+      pr_sha: ${{ steps.check.outputs.pr_sha }}
+      pr_ref: ${{ steps.check.outputs.pr_ref }}
+    steps:
+      - name: Evaluate trigger and resolve profile
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_PROFILE: ${{ github.event.inputs.profile }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "issue_comment" ]]; then
+            # Only fire on /benchmark commands on PRs (not regular issues)
+            if [[ "${COMMENT_BODY:-}" != /benchmark* ]]; then
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            PR_NUMBER="${{ github.event.issue.number }}"
+            IS_PR=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}" --jq '.pull_request // empty' 2>/dev/null || true)
+            if [[ -z "$IS_PR" ]]; then
+              echo "Comment is not on a pull request — skipping" >&2
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            # Parse optional profile arg: /benchmark [default|stress]
+            ARG=$(echo "${COMMENT_BODY}" | awk '{print $2}')
+            if [[ "$ARG" == "stress" ]]; then
+              PROFILE="stress"
+            else
+              PROFILE="default"
+            fi
+
+            # Get the PR head ref and SHA
+            PR_DATA=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json headRefName,headRefOid)
+            PR_REF=$(echo "$PR_DATA" | jq -r '.headRefName')
+            PR_SHA=$(echo "$PR_DATA" | jq -r '.headRefOid')
+
+            echo "should_run=true"   >> "$GITHUB_OUTPUT"
+            echo "profile=$PROFILE"  >> "$GITHUB_OUTPUT"
+            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "pr_sha=$PR_SHA"    >> "$GITHUB_OUTPUT"
+            echo "pr_ref=$PR_REF"    >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == "schedule" ]]; then
+            echo "should_run=true"   >> "$GITHUB_OUTPUT"
+            echo "profile=stress"    >> "$GITHUB_OUTPUT"
+            echo "pr_number="        >> "$GITHUB_OUTPUT"
+            echo "pr_sha="           >> "$GITHUB_OUTPUT"
+            echo "pr_ref="           >> "$GITHUB_OUTPUT"
+          else
+            # workflow_dispatch
+            PROFILE="${DISPATCH_PROFILE:-default}"
+            echo "should_run=true"   >> "$GITHUB_OUTPUT"
+            echo "profile=$PROFILE"  >> "$GITHUB_OUTPUT"
+            echo "pr_number="        >> "$GITHUB_OUTPUT"
+            echo "pr_sha="           >> "$GITHUB_OUTPUT"
+            echo "pr_ref="           >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Prepare image ─────────────────────────────────────────────────────────────
+  prepare-openstack-runtime-image:
+    name: Prepare OpenStack runtime image
+    runs-on: ubuntu-latest
+    needs: [check-trigger]
+    if: needs.check-trigger.outputs.should_run == 'true'
+    outputs:
+      openstack_runtime_image_ref: ${{ steps.runtime_meta.outputs.image_ref }}
+      openstack_runtime_image_id: ${{ steps.runtime_id.outputs.image_id }}
+      openstack_runtime_image_artifact: ${{ steps.runtime_meta.outputs.image_artifact }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-trigger.outputs.pr_sha || github.sha }}
+      - name: Compute deterministic runtime image reference
+        id: runtime_meta
+        run: |
+          set -euo pipefail
+          image_ref="openstack-runtime-benchmark:${{ github.run_id }}-${{ github.sha }}"
+          echo "image_ref=${image_ref}" >> "$GITHUB_OUTPUT"
+          echo "image_artifact=openstack-runtime-image-benchmark-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+      - name: Build OpenStack runtime image once
+        run: |
+          set -euo pipefail
+          docker build --target runtime -t "${{ steps.runtime_meta.outputs.image_ref }}" .
+      - name: Capture immutable runtime image id
+        id: runtime_id
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect "${{ steps.runtime_meta.outputs.image_ref }}" --format '{{.Id}}')"
+          echo "image_id=${image_id}" >> "$GITHUB_OUTPUT"
+          echo "image_id=${image_id}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Export runtime image as artifact
+        run: |
+          set -euo pipefail
+          docker save "${{ steps.runtime_meta.outputs.image_ref }}" -o /tmp/openstack-runtime-image.tar
+      - name: Upload runtime image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.runtime_meta.outputs.image_artifact }}
+          path: /tmp/openstack-runtime-image.tar
+          retention-days: 2
+
+  # ── Run benchmark ─────────────────────────────────────────────────────────────
+  benchmark:
+    name: Benchmark (${{ needs.check-trigger.outputs.profile }} profile)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    needs: [check-trigger, prepare-openstack-runtime-image]
+    if: needs.check-trigger.outputs.should_run == 'true'
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
+      BENCH_PROFILE: ${{ needs.check-trigger.outputs.profile }}
+      PR_NUMBER: ${{ needs.check-trigger.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-trigger.outputs.pr_sha || github.sha }}
+      - name: React to /benchmark comment
+        if: env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api \
+            "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}/reactions" \
+            -X POST \
+            -f content=rocket || true
+      - name: Load deterministic OpenStack runtime image
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
+          fi
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
+            echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
+            exit 1
+          fi
+      - name: Preflight benchmark environment
+        run: |
+          set -euo pipefail
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+          docker pull "$PARITY_MOTO_IMAGE"
+      - name: Install oha
+        run: |
+          set -euo pipefail
+          curl -sSfL https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64 -o /usr/local/bin/oha
+          chmod +x /usr/local/bin/oha
+          oha --version
+      - name: Run benchmark (${{ env.BENCH_PROFILE }} profile)
+        run: |
+          ./tests/bench/bench_services.sh \
+            --profile "$BENCH_PROFILE" \
+            --openstack-image "$PARITY_OPENSTACK_IMAGE" \
+            --output benchmark-report.json
+      - name: Run benchmark gate
+        continue-on-error: true
+        run: |
+          ./tests/bench/bench_gate.sh \
+            --report benchmark-report.json \
+            --p95-max 5 \
+            --memory-max 10 \
+            --output benchmark-gate.json
+      - name: Benchmark report
+        if: always()
+        uses: ./.github/actions/benchmark-report
+        with:
+          gate-json: benchmark-gate.json
+          post-pr-comment: 'false'
+      - name: Post benchmark results as PR comment
+        if: always() && env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f /tmp/benchmark-report.md ]]; then
+            echo "WARNING: no rendered report — skipping PR comment" >&2
+            exit 0
+          fi
+
+          MARKER="<!-- benchmark-gate-report -->"
+          REPO="${{ github.repository }}"
+          BODY="$(cat /tmp/benchmark-report.md)"
+
+          EXISTING_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --jq "[.[] | select(.body | startswith(\"${MARKER}\"))] | first | .id // empty" 2>/dev/null || true)
+
+          if [[ -n "$EXISTING_ID" ]]; then
+            gh api "repos/${REPO}/issues/comments/${EXISTING_ID}" \
+              -X PATCH \
+              -f body="$BODY"
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$REPO" \
+              --body "$BODY"
+          fi
+      - name: Upload benchmark report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ env.BENCH_PROFILE }}-report
+          path: |
+            benchmark-report.json
+            benchmark-gate.json
+          retention-days: 14

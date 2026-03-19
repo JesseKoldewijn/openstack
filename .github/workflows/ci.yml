@@ -537,10 +537,10 @@ jobs:
           path: target/parity-reports/*.json
           retention-days: 7
 
-  benchmark-smoke-full:
-    name: Benchmark (standard profile, main)
+  benchmark:
+    name: Benchmark (default profile)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: github.event_name == 'pull_request'
     needs: [prepare-openstack-runtime-image]
     env:
       PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
@@ -570,10 +570,10 @@ jobs:
           curl -sSfL https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64 -o /usr/local/bin/oha
           chmod +x /usr/local/bin/oha
           oha --version
-      - name: Run benchmark (standard profile)
+      - name: Run benchmark (default profile)
         run: |
           ./tests/bench/bench_services.sh \
-            --profile standard \
+            --profile default \
             --openstack-image "$PARITY_OPENSTACK_IMAGE" \
             --output benchmark-report.json
       - name: Run benchmark gate
@@ -583,7 +583,6 @@ jobs:
             --report benchmark-report.json \
             --p95-max 5 \
             --memory-max 10 \
-            --ignore-errors iam/create_user \
             --output benchmark-gate.json
       - name: Benchmark report
         if: always()
@@ -595,71 +594,7 @@ jobs:
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-smoke-full-report
-          path: |
-            benchmark-report.json
-            benchmark-gate.json
-          retention-days: 7
-
-  benchmark-smoke-fast:
-    name: Benchmark (smoke profile, non-main)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref != 'main'
-    needs: [prepare-openstack-runtime-image]
-    env:
-      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
-      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Load deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
-          path: /tmp
-      - name: Import deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        run: |
-          set -euo pipefail
-          docker load -i /tmp/openstack-runtime-image.tar
-      - name: Preflight benchmark environment
-        run: |
-          set -euo pipefail
-          docker --version
-          docker pull "$PARITY_LOCALSTACK_IMAGE"
-          docker pull "$PARITY_MOTO_IMAGE"
-      - name: Install oha
-        run: |
-          set -euo pipefail
-          curl -sSfL https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64 -o /usr/local/bin/oha
-          chmod +x /usr/local/bin/oha
-          oha --version
-      - name: Run benchmark (smoke profile)
-        run: |
-          ./tests/bench/bench_services.sh \
-            --profile smoke \
-            --openstack-image "$PARITY_OPENSTACK_IMAGE" \
-            --output benchmark-report.json
-      - name: Run benchmark gate
-        continue-on-error: true
-        run: |
-          ./tests/bench/bench_gate.sh \
-            --report benchmark-report.json \
-            --p95-max 5 \
-            --memory-max 10 \
-            --ignore-errors iam/create_user \
-            --output benchmark-gate.json
-      - name: Benchmark report
-        if: always()
-        uses: ./.github/actions/benchmark-report
-        with:
-          gate-json: benchmark-gate.json
-          post-pr-comment: ${{ github.event_name == 'pull_request' }}
-      - name: Upload benchmark report artifacts
-        if: always() && env.ACT != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-smoke-fast-report
+          name: benchmark-report
           path: |
             benchmark-report.json
             benchmark-gate.json
@@ -744,7 +679,7 @@ jobs:
         studio-performance-budget,
         parity-core,
         parity-all-services-full,
-        benchmark-smoke-full
+        benchmark
       ]
     steps:
       - name: All required checks passed
@@ -767,7 +702,7 @@ jobs:
         studio-performance-budget,
         parity-core,
         parity-all-services-fast,
-        benchmark-smoke-fast
+        benchmark
       ]
     steps:
       - name: All required checks passed
@@ -787,8 +722,7 @@ jobs:
         parity-core,
         parity-all-services-full,
         parity-all-services-fast,
-        benchmark-smoke-full,
-        benchmark-smoke-fast
+        benchmark
       ]
     steps:
       - uses: actions/checkout@v4
@@ -802,9 +736,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: benchmark-*-report
-          merge-multiple: true
-          path: artifacts/benchmark
+          name: benchmark-report
       - name: Build PR markdown summary
         id: build_comment
         run: |
@@ -845,7 +777,7 @@ jobs:
               lines.append("")
 
           # Include benchmark gate markdown summary if available
-          gate_md = Path("artifacts/benchmark/benchmark_gate_summary.md")
+          gate_md = Path("benchmark_gate_summary.md")
           if gate_md.exists():
               lines.append("### Benchmark")
               lines.append("")
