@@ -1199,13 +1199,7 @@ async fn handle_upload_part_async(
     // Store part metadata in S3Store (short-lived guard)
     {
         let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        store.upload_part_with_etag(
-            &upload_id,
-            part_number,
-            part_data,
-            etag.clone(),
-            size,
-        );
+        store.upload_part_with_etag(&upload_id, part_number, part_data, etag.clone(), size);
     }
 
     DispatchResponse {
