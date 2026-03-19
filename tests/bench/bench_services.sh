@@ -279,18 +279,22 @@ bench() {
 }
 
 # bench_targets <service> <operation> <method> <os_url> <ls_url> <moto_url> [extra_args...]
+# Respects SEED_OS/SEED_LS/SEED_MOTO flags: skips targets whose seed failed.
+# Defaults to 1 (enabled) so services without seed_all_targets still work.
 bench_targets() {
   local service="$1" operation="$2" method="$3" os_url="$4" ls_url="$5" moto_url="$6"
   shift 6
   local extra_args=("$@")
 
-  log "  $service/$operation (openstack)..."
-  bench "$service" "$operation" "os" "$method" "$os_url" "${extra_args[@]}"
-  if target_active ls; then
+  if [[ "${SEED_OS:-1}" -eq 1 ]]; then
+    log "  $service/$operation (openstack)..."
+    bench "$service" "$operation" "os" "$method" "$os_url" "${extra_args[@]}"
+  fi
+  if target_active ls && [[ "${SEED_LS:-1}" -eq 1 ]]; then
     log "  $service/$operation (localstack)..."
     bench "$service" "$operation" "ls" "$method" "$ls_url" "${extra_args[@]}"
   fi
-  if target_active moto; then
+  if target_active moto && [[ "${SEED_MOTO:-1}" -eq 1 ]]; then
     log "  $service/$operation (moto)..."
     bench "$service" "$operation" "moto" "$method" "$moto_url" "${extra_args[@]}"
   fi
@@ -306,12 +310,51 @@ skip_service() {
     '.results += [{service: $svc, operation: "SKIPPED", skip_reason: $reason}]'
 }
 
-# seed_request <target: os|ls> <method> <url> [extra_args...]
-# Returns 0 on success, 1 on failure
+# Per-target seed state flags (reset to 1 so bench_targets is unaffected when
+# a service section uses the old-style seed or has no seed at all).
+SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+
+# seed_request <target: os|ls|moto> <method> <url> [extra_args...]
+# Returns 0 on success (2xx), 1 on failure.  Logs diagnostic info on failure.
 seed_request() {
   local target="$1" method="$2" url="$3"
   shift 3
-  curl -sf -X "$method" "$@" "$url" > /dev/null 2>&1
+  local response http_code body
+  response=$(curl -s -w "\n%{http_code}" -X "$method" "$@" "$url" 2>/dev/null) || true
+  http_code="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+
+  if [[ "$http_code" =~ ^2 ]]; then
+    return 0
+  fi
+
+  log "  WARN: seed failed for target=$target (HTTP ${http_code:-000})"
+  if [[ -n "$body" ]]; then
+    log "  Response: ${body:0:300}"
+  fi
+  return 1
+}
+
+# seed_all_targets <method> <os_url> <ls_url> <moto_url> [extra_args...]
+# Seeds each active target independently.  Sets SEED_OS/SEED_LS/SEED_MOTO to
+# 1 (succeeded) or 0 (failed/inactive).  Returns 0 if openstack seed succeeded.
+seed_all_targets() {
+  local method="$1" os_url="$2" ls_url="$3" moto_url="$4"
+  shift 4
+  SEED_OS=0; SEED_LS=0; SEED_MOTO=0
+
+  seed_request "os" "$method" "$os_url" "$@" && SEED_OS=1 || true
+
+  if target_active ls; then
+    seed_request "ls" "$method" "$ls_url" "$@" && SEED_LS=1 || true
+  fi
+
+  if target_active moto; then
+    seed_request "moto" "$method" "$moto_url" "$@" && SEED_MOTO=1 || true
+  fi
+
+  # Service proceeds as long as openstack seed succeeded
+  [[ $SEED_OS -eq 1 ]]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -584,12 +627,14 @@ update_results \
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "s3"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "S3 (REST-XML)"
 
-  # Seed: create bucket
-  if seed_request "os" PUT "$OS_BASE/bench-bucket-$$" && \
-     { ! target_active ls || seed_request "ls" PUT "$LS_BASE/bench-bucket-$$"; } && \
-     { ! target_active moto || seed_request "moto" PUT "$MOTO_BASE/bench-bucket-$$"; }; then
+  # Seed: create bucket (each target independently; only openstack is required)
+  if seed_all_targets PUT \
+       "$OS_BASE/bench-bucket-$$" \
+       "$LS_BASE/bench-bucket-$$" \
+       "$MOTO_BASE/bench-bucket-$$"; then
 
     # PutObject
     bench_targets "s3" "put_object" PUT \
@@ -626,23 +671,16 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "dynamodb"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "DynamoDB (JSON)"
 
   DDB_HEADERS=(-H "Content-Type: application/x-amz-json-1.0")
 
-  # Seed: create table
-  if seed_request "os" POST "$OS_BASE" \
+  # Seed: create table (each target independently; only openstack is required)
+  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.0" \
        -H "X-Amz-Target: DynamoDB_20120810.CreateTable" \
-       -d '{"TableName":"bench-table-'"$$"'","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}' && \
-     { ! target_active ls || seed_request "ls" POST "$LS_BASE" \
-       -H "Content-Type: application/x-amz-json-1.0" \
-       -H "X-Amz-Target: DynamoDB_20120810.CreateTable" \
-       -d '{"TableName":"bench-table-'"$$"'","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}'; } && \
-     { ! target_active moto || seed_request "moto" POST "$MOTO_BASE" \
-       -H "Content-Type: application/x-amz-json-1.0" \
-       -H "X-Amz-Target: DynamoDB_20120810.CreateTable" \
-       -d '{"TableName":"bench-table-'"$$"'","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}'; }; then
+       -d '{"TableName":"bench-table-'"$$"'","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}'; then
 
     sleep 1  # Wait for table to be active
 
@@ -679,6 +717,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "sns"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "SNS (Query-XML)"
 
   # Seed: create topic
@@ -749,15 +788,12 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "iam"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "IAM (Query-XML)"
 
-  # Seed: create a user
-  if seed_request "os" POST "$OS_BASE" \
-       -d "Action=CreateUser&UserName=bench-user-$$&Version=2010-05-08" && \
-     { ! target_active ls || seed_request "ls" POST "$LS_BASE" \
-       -d "Action=CreateUser&UserName=bench-user-$$&Version=2010-05-08"; } && \
-     { ! target_active moto || seed_request "moto" POST "$MOTO_BASE" \
-       -d "Action=CreateUser&UserName=bench-user-$$&Version=2010-05-08"; }; then
+  # Seed: create user (each target independently; only openstack is required)
+  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -d "Action=CreateUser&UserName=bench-user-$$&Version=2010-05-08"; then
 
     # CreateUser (unique per request via timestamp — oha/hey don't support dynamic payloads
     # so we benchmark creating the same user which will get ConflictException but still
@@ -786,6 +822,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "sts"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "STS (Query-XML)"
 
   # No seed needed for STS
@@ -806,23 +843,16 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "kinesis"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "Kinesis (JSON)"
 
   KINESIS_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
-  # Seed: create stream
-  if seed_request "os" POST "$OS_BASE" \
+  # Seed: create stream (each target independently; only openstack is required)
+  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: Kinesis_20131202.CreateStream" \
-       -d '{"StreamName":"bench-stream-'"$$"'","ShardCount":1}' && \
-     { ! target_active ls || seed_request "ls" POST "$LS_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: Kinesis_20131202.CreateStream" \
-       -d '{"StreamName":"bench-stream-'"$$"'","ShardCount":1}'; } && \
-     { ! target_active moto || seed_request "moto" POST "$MOTO_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: Kinesis_20131202.CreateStream" \
-       -d '{"StreamName":"bench-stream-'"$$"'","ShardCount":1}'; }; then
+       -d '{"StreamName":"bench-stream-'"$$"'","ShardCount":1}'; then
 
     sleep 2  # Wait for stream to be active
 
@@ -853,23 +883,16 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "firehose"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "Firehose (JSON)"
 
   FIREHOSE_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
-  # Seed: create delivery stream
-  if seed_request "os" POST "$OS_BASE" \
+  # Seed: create delivery stream (each target independently; only openstack is required)
+  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: Firehose_20150804.CreateDeliveryStream" \
-       -d '{"DeliveryStreamName":"bench-firehose-'"$$"'","DeliveryStreamType":"DirectPut"}' && \
-     { ! target_active ls || seed_request "ls" POST "$LS_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: Firehose_20150804.CreateDeliveryStream" \
-       -d '{"DeliveryStreamName":"bench-firehose-'"$$"'","DeliveryStreamType":"DirectPut"}'; } && \
-     { ! target_active moto || seed_request "moto" POST "$MOTO_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: Firehose_20150804.CreateDeliveryStream" \
-       -d '{"DeliveryStreamName":"bench-firehose-'"$$"'","DeliveryStreamType":"DirectPut"}'; }; then
+       -d '{"DeliveryStreamName":"bench-firehose-'"$$"'","DeliveryStreamType":"DirectPut"}'; then
 
     sleep 1
 
@@ -900,23 +923,16 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "secretsmanager"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "SecretsManager (JSON)"
 
   SM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
-  # Seed: create secret
-  if seed_request "os" POST "$OS_BASE" \
+  # Seed: create secret (each target independently; only openstack is required)
+  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: secretsmanager.CreateSecret" \
-       -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value"}' && \
-     { ! target_active ls || seed_request "ls" POST "$LS_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: secretsmanager.CreateSecret" \
-       -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value"}'; } && \
-     { ! target_active moto || seed_request "moto" POST "$MOTO_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: secretsmanager.CreateSecret" \
-       -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value"}'; }; then
+       -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value"}'; then
 
     # CreateSecret (will fail with duplicate but exercises write path)
     bench_targets "secretsmanager" "create_secret" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
@@ -951,6 +967,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "sqs"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "SQS (Query-XML)"
 
   # Seed: create queue
@@ -1021,6 +1038,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "kms"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "KMS (JSON)"
 
   KMS_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
@@ -1131,23 +1149,16 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "ssm"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "SSM (JSON)"
 
   SSM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
-  # Seed: put parameter
-  if seed_request "os" POST "$OS_BASE" \
+  # Seed: put parameter (each target independently; only openstack is required)
+  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: AmazonSSM.PutParameter" \
-       -d '{"Name":"/bench/param-'"$$"'","Value":"benchmark-value","Type":"String"}' && \
-     { ! target_active ls || seed_request "ls" POST "$LS_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: AmazonSSM.PutParameter" \
-       -d '{"Name":"/bench/param-'"$$"'","Value":"benchmark-value","Type":"String"}'; } && \
-     { ! target_active moto || seed_request "moto" POST "$MOTO_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: AmazonSSM.PutParameter" \
-       -d '{"Name":"/bench/param-'"$$"'","Value":"benchmark-value","Type":"String"}'; }; then
+       -d '{"Name":"/bench/param-'"$$"'","Value":"benchmark-value","Type":"String"}'; then
 
     # PutParameter (overwrite)
     bench_targets "ssm" "put_parameter" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
@@ -1176,6 +1187,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "acm"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "ACM (JSON)"
 
   ACM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
@@ -1200,6 +1212,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "cloudwatch"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "CloudWatch (Query-XML)"
 
   # PutMetricData
@@ -1223,23 +1236,16 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "events"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "EventBridge (JSON)"
 
   EB_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
-  # Seed: put rule
-  if seed_request "os" POST "$OS_BASE" \
+  # Seed: put rule (each target independently; only openstack is required)
+  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: AWSEvents.PutRule" \
-       -d '{"Name":"bench-rule-'"$$"'","ScheduleExpression":"rate(1 hour)","State":"ENABLED"}' && \
-     { ! target_active ls || seed_request "ls" POST "$LS_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: AWSEvents.PutRule" \
-       -d '{"Name":"bench-rule-'"$$"'","ScheduleExpression":"rate(1 hour)","State":"ENABLED"}'; } && \
-     { ! target_active moto || seed_request "moto" POST "$MOTO_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: AWSEvents.PutRule" \
-       -d '{"Name":"bench-rule-'"$$"'","ScheduleExpression":"rate(1 hour)","State":"ENABLED"}'; }; then
+       -d '{"Name":"bench-rule-'"$$"'","ScheduleExpression":"rate(1 hour)","State":"ENABLED"}'; then
 
     # PutRule (overwrite)
     bench_targets "events" "put_rule" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
@@ -1268,6 +1274,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "states"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "Step Functions (JSON)"
 
   SF_HEADERS=(-H "Content-Type: application/x-amz-json-1.0")
@@ -1332,6 +1339,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "apigateway"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "API Gateway (REST-JSON)"
 
   # Seed: create REST API
@@ -1380,6 +1388,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "ec2"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "EC2 (EC2-Query)"
 
   # No seed needed
@@ -1400,6 +1409,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "route53"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "Route53 (REST-XML)"
 
   # Seed: create hosted zone
@@ -1444,6 +1454,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "ses"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "SES (Query-XML)"
 
   # No seed needed
@@ -1464,23 +1475,16 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "ecr"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "ECR (JSON)"
 
   ECR_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
-  # Seed: create repository
-  if seed_request "os" POST "$OS_BASE" \
+  # Seed: create repository (each target independently; only openstack is required)
+  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.CreateRepository" \
-       -d '{"repositoryName":"bench-repo-'"$$"'"}' && \
-     { ! target_active ls || seed_request "ls" POST "$LS_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.CreateRepository" \
-       -d '{"repositoryName":"bench-repo-'"$$"'"}'; } && \
-     { ! target_active moto || seed_request "moto" POST "$MOTO_BASE" \
-       -H "Content-Type: application/x-amz-json-1.1" \
-       -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.CreateRepository" \
-       -d '{"repositoryName":"bench-repo-'"$$"'"}'; }; then
+       -d '{"repositoryName":"bench-repo-'"$$"'"}'; then
 
     # CreateRepository
     bench_targets "ecr" "create_repository" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
@@ -1503,6 +1507,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "opensearch"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "OpenSearch (REST-JSON)"
 
   # CreateDomain
@@ -1525,6 +1530,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "redshift"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "Redshift (Query-XML)"
 
   # CreateCluster
@@ -1543,17 +1549,14 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "cloudformation"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "CloudFormation (Query-XML)"
 
   CFN_TEMPLATE='{"AWSTemplateFormatVersion":"2010-09-09","Description":"Bench","Resources":{"BenchTopic":{"Type":"AWS::SNS::Topic","Properties":{"TopicName":"bench-cfn-topic-'"$$"'"}}}}'
 
-  # Seed: create stack
-  if seed_request "os" POST "$OS_BASE" \
-       -d "Action=CreateStack&StackName=bench-stack-$$&TemplateBody=$CFN_TEMPLATE&Version=2010-05-15" && \
-     { ! target_active ls || seed_request "ls" POST "$LS_BASE" \
-       -d "Action=CreateStack&StackName=bench-stack-$$&TemplateBody=$CFN_TEMPLATE&Version=2010-05-15"; } && \
-     { ! target_active moto || seed_request "moto" POST "$MOTO_BASE" \
-       -d "Action=CreateStack&StackName=bench-stack-$$&TemplateBody=$CFN_TEMPLATE&Version=2010-05-15"; }; then
+  # Seed: create stack (each target independently; only openstack is required)
+  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -d "Action=CreateStack&StackName=bench-stack-$$&TemplateBody=$CFN_TEMPLATE&Version=2010-05-15"; then
 
     # CreateStack
     bench_targets "cloudformation" "create_stack" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
@@ -1574,6 +1577,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "lambda"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "Lambda (REST-JSON)"
 
   # Seed: create function with inline zip
