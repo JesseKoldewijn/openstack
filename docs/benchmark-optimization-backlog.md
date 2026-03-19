@@ -1,6 +1,15 @@
 # Benchmark Optimization Backlog
 
-This backlog is seeded by initial benchmark harness priorities and should be refined as baseline reports accumulate.
+This backlog is seeded by initial benchmark priorities and should be refined as baseline reports accumulate.
+
+## Benchmark Tooling
+
+Benchmarks are run via shell scripts using [oha](https://github.com/hatoo/oha) as the HTTP load generator:
+
+- **`tests/bench/bench_services.sh`** — runs all 24 AWS service benchmarks against both OpenStack and LocalStack, outputs a JSON report with per-operation latency percentiles, throughput, errors, and memory snapshots.
+- **`tests/bench/bench_gate.sh`** — evaluates a benchmark report against configurable thresholds (p95 latency ratio, memory budget, error rate) and produces a markdown summary.
+
+Profiles: `smoke` (fast CI), `standard` (main-branch PRs), `deep` (scheduled nightly).
 
 ## Candidate Hotspots
 
@@ -10,6 +19,6 @@ This backlog is seeded by initial benchmark harness priorities and should be ref
 
 ## Follow-up Work
 
-- Establish baseline snapshots from `all-services-smoke` and `hot-path-deep` runs in CI artifacts.
-- Add trend scripts for p50/p95 latency and throughput ratio drift detection.
-- Define advisory thresholds before introducing any benchmark gating.
+- Establish baseline snapshots from `standard` and `deep` profile runs in CI artifacts.
+- Add trend analysis for p50/p95 latency and throughput ratio drift detection across runs.
+- Tune gate thresholds (`--p95-threshold`, `--memory-budget`) as baseline data accumulates.

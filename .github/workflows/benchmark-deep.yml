@@ -6,13 +6,8 @@ on:
   workflow_dispatch:
 
 env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
   PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
   PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
-  PARITY_BENCHMARK_RUNTIME_MODE: symmetric-docker
-  PARITY_BENCHMARK_EXECUTION_ORDER: alternating
-  PARITY_BENCHMARK_LANE_MODE: harness-influenced
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
   PARITY_DOCKER_NETWORK_MODE: bridge
@@ -59,7 +54,7 @@ jobs:
           retention-days: 2
 
   benchmark-deep:
-    name: Benchmark (hot-path-deep, non-blocking)
+    name: Benchmark (deep profile, non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true
     needs: [prepare-openstack-runtime-image]
@@ -68,11 +63,6 @@ jobs:
       PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-benchmark-deep
-          key: benchmark-deep-${{ hashFiles('**/Cargo.lock') }}
       - name: Load deterministic OpenStack runtime image
         if: env.ACT != 'true'
         uses: actions/download-artifact@v4
@@ -111,17 +101,36 @@ jobs:
           set -euo pipefail
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark fairness high profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-high
-      - name: Run benchmark fairness extreme profile (heavy objects, non-blocking)
+      - name: Install oha
+        run: |
+          set -euo pipefail
+          curl -sSfL https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64 -o /usr/local/bin/oha
+          chmod +x /usr/local/bin/oha
+          oha --version
+      - name: Run benchmark (deep profile)
+        run: |
+          ./tests/bench/bench_services.sh \
+            --profile deep \
+            --openstack-image "$PARITY_OPENSTACK_IMAGE" \
+            --output benchmark-report.json
+      - name: Run benchmark gate
         continue-on-error: true
-        env:
-          BENCHMARK_HEAVY_OBJECTS: "1"
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-extreme
+        run: |
+          ./tests/bench/bench_gate.sh \
+            --report benchmark-report.json \
+            --output-markdown benchmark_gate_summary.md
+      - name: Add benchmark summary to workflow summary
+        if: always()
+        run: |
+          if [ -f benchmark_gate_summary.md ]; then
+            cat benchmark_gate_summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload benchmark deep report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-deep-report
-          path: target/benchmark-reports/*.json
+          path: |
+            benchmark-report.json
+            benchmark_gate_summary.md
           retention-days: 14
