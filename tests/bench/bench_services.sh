@@ -401,7 +401,7 @@ bench_targets() {
   fi
   if target_active moto && [[ "${SEED_MOTO:-1}" -eq 1 ]]; then
     log "  $service/$operation (moto)..."
-    bench "$service" "$operation" "moto" "$method" "$moto_url" "${extra_args[@]}"
+    bench "$service" "$operation" "moto" "$method" "$moto_url" "${extra_args[@]}" "${MOTO_EXTRA[@]}"
   fi
 }
 
@@ -423,7 +423,7 @@ bench_dynamic_targets() {
   fi
   if target_active moto && [[ "${SEED_MOTO:-1}" -eq 1 ]]; then
     log "  $service/$operation (moto)..."
-    bench_dynamic "$service" "$operation" "moto" "$method" "$moto_url" "$body_template" "${extra_args[@]}"
+    bench_dynamic "$service" "$operation" "moto" "$method" "$moto_url" "$body_template" "${extra_args[@]}" "${MOTO_EXTRA[@]}"
   fi
 }
 
@@ -440,6 +440,11 @@ skip_service() {
 # Per-target seed state flags (reset to 1 so bench_targets is unaffected when
 # a service section uses the old-style seed or has no seed at all).
 SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+
+# Optional moto-only extra curl/oha args (e.g. -H "Host: s3.amazonaws.com").
+# Set per service section; bench_targets/seed_all_targets append these to moto
+# calls only.  Reset to empty after each service block that uses it.
+MOTO_EXTRA=()
 
 # seed_request <target: os|ls|moto> <method> <url> [extra_args...]
 # Returns 0 on success (2xx), 1 on failure.  Logs diagnostic info on failure.
@@ -477,7 +482,7 @@ seed_all_targets() {
   fi
 
   if target_active moto; then
-    seed_request "moto" "$method" "$moto_url" "$@" && SEED_MOTO=1 || true
+    seed_request "moto" "$method" "$moto_url" "$@" "${MOTO_EXTRA[@]}" && SEED_MOTO=1 || true
   fi
 
   # Service proceeds as long as openstack seed succeeded
@@ -757,6 +762,11 @@ if is_active "s3"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "S3 (REST-XML)"
 
+  # Moto's multi-service standalone server needs a Host header to route
+  # path-style S3 URLs (/bucket/key) to its S3 backend.  LocalStack and
+  # openstack both infer S3 from path style without it; moto does not.
+  MOTO_EXTRA=(-H "Host: s3.amazonaws.com")
+
   # Seed: create bucket (each target independently; only openstack is required)
   if seed_all_targets PUT \
        "$OS_BASE/bench-bucket-$$" \
@@ -791,6 +801,8 @@ if is_active "s3"; then
   else
     skip_service "s3" "Failed to create seed bucket"
   fi
+
+  MOTO_EXTRA=()  # clear after S3 block
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
