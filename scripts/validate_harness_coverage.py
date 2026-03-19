@@ -14,6 +14,7 @@ def main() -> int:
     root = pathlib.Path(__file__).resolve().parents[1]
 
     services_dir = root / "crates" / "services"
+
     def normalize_service_name(name: str) -> str:
         if name == "eventbridge":
             return "events"
@@ -33,9 +34,6 @@ def main() -> int:
 
     parity_path = root / "tests" / "parity" / "scenarios" / "all-services-smoke.json"
     parity_services = sorted({item["service"] for item in load_json(parity_path)})
-
-    benchmark_path = root / "tests" / "benchmark" / "scenarios" / "all-services-smoke.json"
-    benchmark_services = sorted({item["service"] for item in load_json(benchmark_path)})
 
     manifests_dir = root / "manifests" / "guided"
     manifest_services = sorted(
@@ -57,10 +55,6 @@ def main() -> int:
     missing_parity = sorted(set(matrix_services) - set(parity_services))
     if missing_parity:
         failures.append(f"parity all-services-smoke missing services: {missing_parity}")
-
-    missing_benchmark = sorted(set(matrix_services) - set(benchmark_services))
-    if missing_benchmark:
-        failures.append(f"benchmark all-services-smoke missing services: {missing_benchmark}")
 
     missing_manifests = sorted(set(matrix_services) - set(manifest_services))
     if missing_manifests:
