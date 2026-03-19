@@ -278,6 +278,111 @@ bench() {
     '
 }
 
+# bench_dynamic <service> <operation> <target> <method> <url> <body_template> [extra_header_args...]
+# Like bench() but sends REQ_COUNT requests with a unique body per request.
+# body_template must contain the literal "{i}" which is replaced with the
+# 1-based iteration index, e.g.:
+#   "Action=CreateUser&UserName=user-{i}&Version=2010-05-08"
+# Requests are dispatched in batches of $CONC concurrent curl processes.
+# Produces the same p50/p95/p99/throughput/errors metrics as bench().
+bench_dynamic() {
+  local service="$1" operation="$2" target="$3" method="$4" url="$5" body_template="$6"
+  shift 6
+  local extra_args=("$@")   # extra -H flags, etc.
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  local start_ts end_ts wall_secs throughput
+  start_ts=$(date +%s%3N)   # ms since epoch
+
+  local i
+  for (( i=1; i<=REQ_COUNT; i++ )); do
+    local body="${body_template//\{i\}/$i}"
+    # Write result file: "time_total_ms http_code"
+    (
+      local raw
+      raw=$(curl -s -w "\n%{http_code}" -X "$method" "${extra_args[@]}" -d "$body" "$url" 2>/dev/null) || true
+      local code="${raw##*$'\n'}"
+      local time_ms
+      # Capture time_total via a second curl just for timing — no, instead
+      # use curl -o /dev/null -w '%{time_total}' which avoids body parsing.
+      time_ms=$(curl -s -o /dev/null -w '%{time_total}' -X "$method" \
+        "${extra_args[@]}" -d "$body" "$url" 2>/dev/null) || time_ms=0
+      # Convert fractional seconds to ms
+      time_ms=$(awk "BEGIN{printf \"%.2f\", ${time_ms:-0}*1000}")
+      printf '%s %s\n' "$time_ms" "${code:-000}" > "$tmpdir/$i"
+    ) &
+
+    # Wait for batch to complete every $CONC jobs
+    if (( i % CONC == 0 )); then
+      wait
+    fi
+  done
+  wait   # final stragglers
+
+  end_ts=$(date +%s%3N)
+  wall_secs=$(awk "BEGIN{printf \"%.3f\", ($end_ts - $start_ts)/1000}")
+
+  # Collect results
+  local times=() errors=0
+  for (( i=1; i<=REQ_COUNT; i++ )); do
+    if [[ -f "$tmpdir/$i" ]]; then
+      local t c
+      read -r t c < "$tmpdir/$i"
+      times+=("$t")
+      if [[ ! "$c" =~ ^2 ]]; then
+        (( errors++ )) || true
+      fi
+    fi
+  done
+  rm -rf "$tmpdir"
+
+  local total="${#times[@]}"
+
+  # Compute percentiles: sort numerically, pick by index
+  local p50=0 p95=0 p99=0
+  if [[ $total -gt 0 ]]; then
+    local sorted_times
+    sorted_times=$(printf '%s\n' "${times[@]}" | sort -n)
+    p50=$(echo "$sorted_times" | awk -v n="$total" 'NR==int(n*0.50+0.5){print; exit}')
+    p95=$(echo "$sorted_times" | awk -v n="$total" 'NR==int(n*0.95+0.5){print; exit}')
+    p99=$(echo "$sorted_times" | awk -v n="$total" 'NR==int(n*0.99+0.5){print; exit}')
+    p50=$(awk "BEGIN{printf \"%.2f\", ${p50:-0}}")
+    p95=$(awk "BEGIN{printf \"%.2f\", ${p95:-0}}")
+    p99=$(awk "BEGIN{printf \"%.2f\", ${p99:-0}}")
+  fi
+
+  throughput=$(awk "BEGIN{printf \"%.1f\", ($total)/(${wall_secs:-1})}")
+
+  # Append to report (same schema as bench())
+  local target_field="openstack"
+  [[ "$target" == "ls" ]]   && target_field="localstack"
+  [[ "$target" == "moto" ]] && target_field="moto"
+
+  update_results \
+    --arg svc "$service" \
+    --arg op "$operation" \
+    --arg tf "$target_field" \
+    --argjson p50 "${p50:-0}" \
+    --argjson p95 "${p95:-0}" \
+    --argjson p99 "${p99:-0}" \
+    --argjson tp "${throughput:-0}" \
+    --argjson errs "${errors:-0}" \
+    --argjson total "$total" \
+    '
+    (.results |= (
+      if any(.[]; .service == $svc and .operation == $op) then
+        map(if .service == $svc and .operation == $op then
+          . + {($tf): {p50_ms: $p50, p95_ms: $p95, p99_ms: $p99, throughput_rps: $tp, errors: $errs, total: $total}}
+        else . end)
+      else
+        . + [{service: $svc, operation: $op, ($tf): {p50_ms: $p50, p95_ms: $p95, p99_ms: $p99, throughput_rps: $tp, errors: $errs, total: $total}}]
+      end
+    ))
+    '
+}
+
 # bench_targets <service> <operation> <method> <os_url> <ls_url> <moto_url> [extra_args...]
 # Respects SEED_OS/SEED_LS/SEED_MOTO flags: skips targets whose seed failed.
 # Defaults to 1 (enabled) so services without seed_all_targets still work.
@@ -297,6 +402,28 @@ bench_targets() {
   if target_active moto && [[ "${SEED_MOTO:-1}" -eq 1 ]]; then
     log "  $service/$operation (moto)..."
     bench "$service" "$operation" "moto" "$method" "$moto_url" "${extra_args[@]}"
+  fi
+}
+
+# bench_dynamic_targets <service> <operation> <method> <os_url> <ls_url> <moto_url> <body_template> [extra_header_args...]
+# Like bench_targets but uses bench_dynamic (unique body per request via {i} substitution).
+# Respects SEED_OS/SEED_LS/SEED_MOTO flags.
+bench_dynamic_targets() {
+  local service="$1" operation="$2" method="$3" os_url="$4" ls_url="$5" moto_url="$6" body_template="$7"
+  shift 7
+  local extra_args=("$@")
+
+  if [[ "${SEED_OS:-1}" -eq 1 ]]; then
+    log "  $service/$operation (openstack)..."
+    bench_dynamic "$service" "$operation" "os" "$method" "$os_url" "$body_template" "${extra_args[@]}"
+  fi
+  if target_active ls && [[ "${SEED_LS:-1}" -eq 1 ]]; then
+    log "  $service/$operation (localstack)..."
+    bench_dynamic "$service" "$operation" "ls" "$method" "$ls_url" "$body_template" "${extra_args[@]}"
+  fi
+  if target_active moto && [[ "${SEED_MOTO:-1}" -eq 1 ]]; then
+    log "  $service/$operation (moto)..."
+    bench_dynamic "$service" "$operation" "moto" "$method" "$moto_url" "$body_template" "${extra_args[@]}"
   fi
 }
 
@@ -795,23 +922,20 @@ if is_active "iam"; then
   if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -d "Action=CreateUser&UserName=bench-user-$$&Version=2010-05-08"; then
 
-    # CreateUser (unique per request via timestamp — oha/hey don't support dynamic payloads
-    # so we benchmark creating the same user which will get ConflictException but still
-    # exercises the code path; alternatively we use GetUser which is idempotent)
-    # Let's benchmark GetUser as the write-like operation that's repeatable
-    bench_targets "iam" "get_user" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "Action=GetUser&UserName=bench-user-$$&Version=2010-05-08"
+    # CreateUser — unique username per iteration via {i}; 0 errors expected
+    bench_dynamic_targets "iam" "create_user" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=CreateUser&UserName=bench-create-user-$$-{i}&Version=2010-05-08" \
+      -H "Content-Type: application/x-www-form-urlencoded"
 
-    # ListUsers
+    # GetUser — reads back the users created above using the same {i} index
+    bench_dynamic_targets "iam" "get_user" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=GetUser&UserName=bench-create-user-$$-{i}&Version=2010-05-08" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    # ListUsers — idempotent; oha is fine here
     bench_targets "iam" "list_users" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=ListUsers&Version=2010-05-08"
-
-    # CreateUser — we use a fixed name so repeats get error, but it tests the write path
-    bench_targets "iam" "create_user" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "Action=CreateUser&UserName=bench-create-user-$$&Version=2010-05-08"
   else
     skip_service "iam" "Failed to create seed user"
   fi
