@@ -1058,11 +1058,11 @@ if is_active "secretsmanager"; then
        -H "X-Amz-Target: secretsmanager.CreateSecret" \
        -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value"}'; then
 
-    # CreateSecret (will fail with duplicate but exercises write path)
-    bench_targets "secretsmanager" "create_secret" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-      "${SM_HEADERS[@]}" \
-      -H "X-Amz-Target: secretsmanager.CreateSecret" \
-      -d '{"Name":"bench-secret-create-'"$$"'","SecretString":"new-secret-value"}'
+    # CreateSecret — unique name per iteration via {i}; 0 errors expected
+    bench_dynamic_targets "secretsmanager" "create_secret" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      '{"Name":"bench-secret-create-'"$$"'-{i}","SecretString":"new-secret-value"}' \
+      -H "Content-Type: application/x-amz-json-1.1" \
+      -H "X-Amz-Target: secretsmanager.CreateSecret"
 
     # GetSecretValue
     bench_targets "secretsmanager" "get_secret_value" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \

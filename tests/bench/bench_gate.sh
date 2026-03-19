@@ -183,6 +183,52 @@ SERVICES_ORDER=$(jq -r '[.results[].service] | unique | .[]' "$REPORT")
 # Build services JSON object — we'll accumulate a jq-compatible string
 SERVICES_JSON_PARTS=()
 
+# Global speedup accumulators across all services/operations (for overall section)
+declare -a ALL_LS_P50_SU=()
+declare -a ALL_LS_P95_SU=()
+declare -a ALL_LS_P99_SU=()
+declare -a ALL_LS_RPS_SU=()
+declare -a ALL_MOTO_P50_SU=()
+declare -a ALL_MOTO_P95_SU=()
+declare -a ALL_MOTO_P99_SU=()
+declare -a ALL_MOTO_RPS_SU=()
+
+# Helper: compute min/max/avg stats from a bash array (passed by name-ref).
+# Prints a JSON object {min, max, avg} or "null" if the array is empty.
+compute_stats() {
+  local -n _arr=$1
+  if [[ ${#_arr[@]} -eq 0 ]]; then
+    echo "null"
+    return
+  fi
+  local min max sum count
+  min="${_arr[0]}"; max="${_arr[0]}"; sum=0; count=0
+  for v in "${_arr[@]}"; do
+    if awk "BEGIN {exit !($v < $min)}"; then min="$v"; fi
+    if awk "BEGIN {exit !($v > $max)}"; then max="$v"; fi
+    sum=$(awk "BEGIN {printf \"%.4f\", $sum + $v}")
+    count=$(( count + 1 ))
+  done
+  local avg
+  avg=$(awk "BEGIN {printf \"%.2f\", $sum / $count}")
+  min=$(awk "BEGIN {printf \"%.2f\", $min}")
+  max=$(awk "BEGIN {printf \"%.2f\", $max}")
+  jq -n --argjson mn "$min" --argjson mx "$max" --argjson av "$avg" \
+    '{min:$mn, max:$mx, avg:$av}'
+}
+
+# Helper: given two numeric strings a and b (both > 0), compute ratio a/b
+# formatted to 2 decimal places. Prints "null" if either is 0 or non-numeric.
+ratio() {
+  local a="$1" b="$2"
+  if [[ "$a" == "null" || "$b" == "null" ]] \
+     || ! awk "BEGIN {exit !($a > 0 && $b > 0)}"; then
+    echo "null"
+  else
+    awk "BEGIN {printf \"%.4f\", $a / $b}"
+  fi
+}
+
 while IFS= read -r SERVICE; do
   # Collect all non-skipped operations for this service
   OPS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation != \"SKIPPED\")] | .[].operation" "$REPORT")
@@ -194,9 +240,15 @@ while IFS= read -r SERVICE; do
 
   OPS_JSON_PARTS=()
 
-  # Per-service speedup accumulators (vs LS and moto, only valid comparisons)
-  declare -a LS_SPEEDUPS=()
-  declare -a MOTO_SPEEDUPS=()
+  # Per-service speedup accumulators — one array per metric per competitor
+  declare -a LS_P50_SU=()
+  declare -a LS_P95_SU=()
+  declare -a LS_P99_SU=()
+  declare -a LS_RPS_SU=()
+  declare -a MOTO_P50_SU=()
+  declare -a MOTO_P95_SU=()
+  declare -a MOTO_P99_SU=()
+  declare -a MOTO_RPS_SU=()
 
   while IFS= read -r OPERATION; do
     KEY="$SERVICE/$OPERATION"
@@ -243,6 +295,7 @@ while IFS= read -r SERVICE; do
       '{p50_ms:$p50, p95_ms:$p95, p99_ms:$p99, rps:$rps, errors:$err}')
 
     LS_JSON="null"
+    LS_OP_SPEEDUP_JSON="null"
     if $HAS_LS; then
       LS_P50=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].localstack.p50_ms // null" "$REPORT")
       LS_P95=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].localstack.p95_ms // null" "$REPORT")
@@ -257,16 +310,32 @@ while IFS= read -r SERVICE; do
           --argjson rps "${LS_RPS:-null}" \
           --argjson err "${LS_ERRORS:-null}" \
           '{p50_ms:$p50, p95_ms:$p95, p99_ms:$p99, rps:$rps, errors:$err}')
-        # Accumulate speedup if both p95 values are valid positive numbers
-        if [[ "$OS_P95" != "null" && "$LS_P95" != "null" ]] \
-           && awk "BEGIN {exit !($OS_P95 > 0 && $LS_P95 > 0)}"; then
-          _speedup=$(awk "BEGIN {printf \"%.4f\", $LS_P95 / $OS_P95}")
-          LS_SPEEDUPS+=("$_speedup")
-        fi
+
+        # Per-operation speedup ratios:
+        #   latency: competitor / openstack  (higher = openstack is faster)
+        #   rps:     openstack / competitor  (higher = openstack has higher throughput)
+        _su_p50=$(ratio "$LS_P50"  "$OS_P50")
+        _su_p95=$(ratio "$LS_P95"  "$OS_P95")
+        _su_p99=$(ratio "$LS_P99"  "$OS_P99")
+        _su_rps=$(ratio "$OS_RPS"  "$LS_RPS")
+
+        # Accumulate valid ratios into per-service and global arrays
+        [[ "$_su_p50" != "null" ]] && LS_P50_SU+=("$_su_p50")  && ALL_LS_P50_SU+=("$_su_p50")
+        [[ "$_su_p95" != "null" ]] && LS_P95_SU+=("$_su_p95")  && ALL_LS_P95_SU+=("$_su_p95")
+        [[ "$_su_p99" != "null" ]] && LS_P99_SU+=("$_su_p99")  && ALL_LS_P99_SU+=("$_su_p99")
+        [[ "$_su_rps" != "null" ]] && LS_RPS_SU+=("$_su_rps")  && ALL_LS_RPS_SU+=("$_su_rps")
+
+        LS_OP_SPEEDUP_JSON=$(jq -n \
+          --argjson p50 "${_su_p50:-null}" \
+          --argjson p95 "${_su_p95:-null}" \
+          --argjson p99 "${_su_p99:-null}" \
+          --argjson rps "${_su_rps:-null}" \
+          '{p50:$p50, p95:$p95, p99:$p99, rps:$rps}')
       fi
     fi
 
     MOTO_JSON="null"
+    MOTO_OP_SPEEDUP_JSON="null"
     if $HAS_MOTO; then
       MOTO_P50=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].moto.p50_ms // null" "$REPORT")
       MOTO_P95=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].moto.p95_ms // null" "$REPORT")
@@ -281,23 +350,38 @@ while IFS= read -r SERVICE; do
           --argjson rps "${MOTO_RPS:-null}" \
           --argjson err "${MOTO_ERRORS:-null}" \
           '{p50_ms:$p50, p95_ms:$p95, p99_ms:$p99, rps:$rps, errors:$err}')
-        if [[ "$OS_P95" != "null" && "$MOTO_P95" != "null" ]] \
-           && awk "BEGIN {exit !($OS_P95 > 0 && $MOTO_P95 > 0)}"; then
-          _speedup=$(awk "BEGIN {printf \"%.4f\", $MOTO_P95 / $OS_P95}")
-          MOTO_SPEEDUPS+=("$_speedup")
-        fi
+
+        _su_p50=$(ratio "$MOTO_P50" "$OS_P50")
+        _su_p95=$(ratio "$MOTO_P95" "$OS_P95")
+        _su_p99=$(ratio "$MOTO_P99" "$OS_P99")
+        _su_rps=$(ratio "$OS_RPS"   "$MOTO_RPS")
+
+        [[ "$_su_p50" != "null" ]] && MOTO_P50_SU+=("$_su_p50") && ALL_MOTO_P50_SU+=("$_su_p50")
+        [[ "$_su_p95" != "null" ]] && MOTO_P95_SU+=("$_su_p95") && ALL_MOTO_P95_SU+=("$_su_p95")
+        [[ "$_su_p99" != "null" ]] && MOTO_P99_SU+=("$_su_p99") && ALL_MOTO_P99_SU+=("$_su_p99")
+        [[ "$_su_rps" != "null" ]] && MOTO_RPS_SU+=("$_su_rps") && ALL_MOTO_RPS_SU+=("$_su_rps")
+
+        MOTO_OP_SPEEDUP_JSON=$(jq -n \
+          --argjson p50 "${_su_p50:-null}" \
+          --argjson p95 "${_su_p95:-null}" \
+          --argjson p99 "${_su_p99:-null}" \
+          --argjson rps "${_su_rps:-null}" \
+          '{p50:$p50, p95:$p95, p99:$p99, rps:$rps}')
       fi
     fi
 
     # Assemble operation JSON
     OP_JSON=$(jq -n \
-      --argjson os   "$OS_JSON" \
-      --argjson ls   "$LS_JSON" \
-      --argjson moto "$MOTO_JSON" \
-      --argjson pass "$([ "$OP_GATE_PASS" == "true" ] && echo true || echo false)" \
-      --argjson errig "$([ "$ERROR_IGNORED" == "true" ] && echo true || echo false)" \
-      --argjson failures "$OP_FAILURES_JSON" \
+      --argjson os         "$OS_JSON" \
+      --argjson ls         "$LS_JSON" \
+      --argjson moto       "$MOTO_JSON" \
+      --argjson ls_su      "$LS_OP_SPEEDUP_JSON" \
+      --argjson moto_su    "$MOTO_OP_SPEEDUP_JSON" \
+      --argjson pass       "$([ "$OP_GATE_PASS"    == "true" ] && echo true || echo false)" \
+      --argjson errig      "$([ "$ERROR_IGNORED"   == "true" ] && echo true || echo false)" \
+      --argjson failures   "$OP_FAILURES_JSON" \
       '{openstack:$os, localstack:$ls, moto:$moto,
+        speedup_vs_localstack:$ls_su, speedup_vs_moto:$moto_su,
         gate_pass:$pass, error_ignored:$errig, gate_failures:$failures}')
 
     OPS_JSON_PARTS+=("$(jq -n --arg k "$OPERATION" --argjson v "$OP_JSON" '{($k):$v}')")
@@ -306,45 +390,44 @@ while IFS= read -r SERVICE; do
   # Merge all operations into a single object
   OPS_MERGED=$(printf '%s\n' "${OPS_JSON_PARTS[@]}" | jq -s 'add // {}')
 
-  # Compute per-service speedup stats
-  compute_stats() {
-    local -n _arr=$1
-    if [[ ${#_arr[@]} -eq 0 ]]; then
+  # Compute per-service speedup stats for each metric
+  _build_speedup_obj() {
+    # args: p50_arr_name p95_arr_name p99_arr_name rps_arr_name
+    local p50_json p95_json p99_json rps_json
+    p50_json=$(compute_stats "$1")
+    p95_json=$(compute_stats "$2")
+    p99_json=$(compute_stats "$3")
+    rps_json=$(compute_stats "$4")
+    if [[ "$p50_json" == "null" && "$p95_json" == "null" \
+          && "$p99_json" == "null" && "$rps_json" == "null" ]]; then
       echo "null"
-      return
+    else
+      jq -n \
+        --argjson p50 "$p50_json" \
+        --argjson p95 "$p95_json" \
+        --argjson p99 "$p99_json" \
+        --argjson rps "$rps_json" \
+        '{p50:$p50, p95:$p95, p99:$p99, rps:$rps}'
     fi
-    local min max sum count
-    min="${_arr[0]}"; max="${_arr[0]}"; sum=0; count=0
-    for v in "${_arr[@]}"; do
-      if awk "BEGIN {exit !($v < $min)}"; then min="$v"; fi
-      if awk "BEGIN {exit !($v > $max)}"; then max="$v"; fi
-      sum=$(awk "BEGIN {printf \"%.4f\", $sum + $v}")
-      count=$(( count + 1 ))
-    done
-    local avg
-    avg=$(awk "BEGIN {printf \"%.2f\", $sum / $count}")
-    min=$(awk "BEGIN {printf \"%.2f\", $min}")
-    max=$(awk "BEGIN {printf \"%.2f\", $max}")
-    jq -n --argjson mn "$min" --argjson mx "$max" --argjson av "$avg" \
-      '{min:$mn, max:$mx, avg:$av}'
   }
 
   LS_SPEEDUP_JSON="null"
   MOTO_SPEEDUP_JSON="null"
-  $HAS_LS   && [[ ${#LS_SPEEDUPS[@]}   -gt 0 ]] && LS_SPEEDUP_JSON=$(compute_stats   LS_SPEEDUPS)
-  $HAS_MOTO && [[ ${#MOTO_SPEEDUPS[@]} -gt 0 ]] && MOTO_SPEEDUP_JSON=$(compute_stats MOTO_SPEEDUPS)
+  $HAS_LS   && LS_SPEEDUP_JSON=$(  _build_speedup_obj LS_P50_SU   LS_P95_SU   LS_P99_SU   LS_RPS_SU)
+  $HAS_MOTO && MOTO_SPEEDUP_JSON=$(_build_speedup_obj MOTO_P50_SU MOTO_P95_SU MOTO_P99_SU MOTO_RPS_SU)
 
   SVC_JSON=$(jq -n \
-    --argjson ops "$OPS_MERGED" \
-    --argjson ls_su "$LS_SPEEDUP_JSON" \
+    --argjson ops     "$OPS_MERGED" \
+    --argjson ls_su   "$LS_SPEEDUP_JSON" \
     --argjson moto_su "$MOTO_SPEEDUP_JSON" \
     '{operations:$ops, speedup_vs_localstack:$ls_su, speedup_vs_moto:$moto_su}')
 
   SERVICES_JSON_PARTS+=("$(jq -n --arg k "$SERVICE" --argjson v "$SVC_JSON" '{($k):$v}')")
 
-  unset LS_SPEEDUPS MOTO_SPEEDUPS
-  declare -a LS_SPEEDUPS=()
-  declare -a MOTO_SPEEDUPS=()
+  unset LS_P50_SU LS_P95_SU LS_P99_SU LS_RPS_SU
+  unset MOTO_P50_SU MOTO_P95_SU MOTO_P99_SU MOTO_RPS_SU
+  declare -a LS_P50_SU=() LS_P95_SU=() LS_P99_SU=() LS_RPS_SU=()
+  declare -a MOTO_P50_SU=() MOTO_P95_SU=() MOTO_P99_SU=() MOTO_RPS_SU=()
 done <<< "$SERVICES_ORDER"
 
 # Merge all services into a single object
@@ -353,6 +436,25 @@ if [[ ${#SERVICES_JSON_PARTS[@]} -gt 0 ]]; then
 else
   SERVICES_MERGED="{}"
 fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Overall speedup (across all services and operations)
+# ─────────────────────────────────────────────────────────────────────────────
+
+OVERALL_LS_JSON="null"
+OVERALL_MOTO_JSON="null"
+
+if $HAS_LS; then
+  OVERALL_LS_JSON=$(_build_speedup_obj ALL_LS_P50_SU ALL_LS_P95_SU ALL_LS_P99_SU ALL_LS_RPS_SU)
+fi
+if $HAS_MOTO; then
+  OVERALL_MOTO_JSON=$(_build_speedup_obj ALL_MOTO_P50_SU ALL_MOTO_P95_SU ALL_MOTO_P99_SU ALL_MOTO_RPS_SU)
+fi
+
+OVERALL_JSON=$(jq -n \
+  --argjson ls   "$OVERALL_LS_JSON" \
+  --argjson moto "$OVERALL_MOTO_JSON" \
+  '{speedup_vs_localstack:$ls, speedup_vs_moto:$moto}')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Build skipped array
@@ -405,6 +507,7 @@ GATE_JSON=$(jq -n \
   --argjson moto_loaded "$MOTO_LOADED_MB" \
   --argjson mem_pass "$([ "$MEMORY_GATE_PASS" == "true" ] && echo true || echo false)" \
   --argjson services "$SERVICES_MERGED" \
+  --argjson overall "$OVERALL_JSON" \
   --argjson skipped "$SKIPPED_JSON" \
   --argjson lat_fail "$LATENCY_FAILURES_JSON" \
   --argjson err_fail "$ERROR_FAILURES_JSON" \
@@ -432,6 +535,7 @@ GATE_JSON=$(jq -n \
       gate_pass:  $mem_pass
     },
     services: $services,
+    overall: $overall,
     skipped: $skipped,
     failures: {
       latency: $lat_fail,
