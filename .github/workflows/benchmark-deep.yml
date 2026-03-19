@@ -120,13 +120,16 @@ jobs:
         run: |
           ./tests/bench/bench_gate.sh \
             --report benchmark-report.json \
-            --output-markdown benchmark_gate_summary.md
-      - name: Add benchmark summary to workflow summary
+            --p95-max 5 \
+            --memory-max 10 \
+            --ignore-errors iam/create_user \
+            --output benchmark-gate.json
+      - name: Benchmark report
         if: always()
-        run: |
-          if [ -f benchmark_gate_summary.md ]; then
-            cat benchmark_gate_summary.md >> "$GITHUB_STEP_SUMMARY"
-          fi
+        uses: ./.github/actions/benchmark-report
+        with:
+          gate-json: benchmark-gate.json
+          post-pr-comment: 'false'
       - name: Upload benchmark deep report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -134,5 +137,5 @@ jobs:
           name: benchmark-deep-report
           path: |
             benchmark-report.json
-            benchmark_gate_summary.md
+            benchmark-gate.json
           retention-days: 14

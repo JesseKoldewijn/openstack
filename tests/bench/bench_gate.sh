@@ -2,43 +2,51 @@
 # bench_gate.sh
 #
 # Benchmark gate script for openstack.
-# Reads a JSON report from bench_services.sh and evaluates:
-#   1. Per-operation p95 latency ratio (openstack vs LocalStack and/or moto)
-#   2. Memory budget (openstack/LocalStack RSS ratio)
-#   3. Error rate (zero tolerance for openstack errors)
+# Reads a raw JSON report from bench_services.sh and evaluates:
+#   1. Per-operation p95 latency: absolute ceiling on openstack only
+#   2. Openstack loaded RSS: absolute memory ceiling
+#   3. Error rate: zero tolerance for openstack errors (with optional ignore list)
 #
-# Produces a markdown summary suitable for CI comments.
+# LocalStack and Moto data is included in the output as comparison context
+# (to demonstrate how much faster openstack is) but never used for gating.
+#
+# Outputs a structured JSON evaluation report to stdout or --output file.
+# All markdown rendering is handled downstream (CI action).
 #
 # Exit codes:
-#   0 - All checks pass
-#   1 - One or more checks failed
-#   2 - Invalid input (missing/malformed report)
+#   0 - All gate checks pass
+#   1 - One or more gate checks failed
+#   2 - Invalid input (missing/malformed report or bad arguments)
 #
 # Usage:
 #   ./bench_gate.sh --report report.json
-#   ./bench_gate.sh --report report.json --p95-threshold 2.0 --memory-budget 0.10
-#   ./bench_gate.sh --report report.json --output-markdown summary.md
+#   ./bench_gate.sh --report report.json --p95-max 5 --memory-max 10
+#   ./bench_gate.sh --report report.json --ignore-errors iam/create_user
+#   ./bench_gate.sh --report report.json --output benchmark-gate.json
 
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6.1 Argument parsing
+# Argument parsing
 # ─────────────────────────────────────────────────────────────────────────────
 
 REPORT=""
-P95_THRESHOLD="1.5"
-MEMORY_BUDGET="0.20"
-OUTPUT_MARKDOWN=""
+P95_MAX="5"
+MEMORY_MAX="10"
+IGNORE_ERRORS=""
+OUTPUT=""
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --report <path>              Path to JSON benchmark report (required)
-  --p95-threshold <ratio>      Max openstack/target p95 ratio (default: 1.5)
-  --memory-budget <ratio>      Max openstack/LocalStack RSS ratio (default: 0.20)
-  --output-markdown <path>     Write markdown summary to file (default: stdout)
+  --report <path>              Path to JSON benchmark report from bench_services.sh (required)
+  --p95-max <ms>               Absolute p95 ceiling for openstack in milliseconds (default: 5)
+  --memory-max <mb>            Absolute loaded RSS ceiling for openstack in MB (default: 10)
+  --ignore-errors <list>       Comma-separated service/operation pairs to skip error check
+                               e.g. "iam/create_user,s3/put_object"
+  --output <path>              Write gate JSON to file (default: stdout)
   -h, --help                   Show this help
 EOF
   exit 0
@@ -46,17 +54,18 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --report) REPORT="$2"; shift 2 ;;
-    --p95-threshold) P95_THRESHOLD="$2"; shift 2 ;;
-    --memory-budget) MEMORY_BUDGET="$2"; shift 2 ;;
-    --output-markdown) OUTPUT_MARKDOWN="$2"; shift 2 ;;
+    --report)        REPORT="$2";        shift 2 ;;
+    --p95-max)       P95_MAX="$2";       shift 2 ;;
+    --memory-max)    MEMORY_MAX="$2";    shift 2 ;;
+    --ignore-errors) IGNORE_ERRORS="$2"; shift 2 ;;
+    --output)        OUTPUT="$2";        shift 2 ;;
     -h|--help) usage ;;
     *) echo "ERROR: Unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Input validation (exit 2 on invalid input)
+# Input validation
 # ─────────────────────────────────────────────────────────────────────────────
 
 if [[ -z "$REPORT" ]]; then
@@ -69,13 +78,16 @@ if [[ ! -f "$REPORT" ]]; then
   exit 2
 fi
 
-# Validate JSON structure
+if ! command -v jq &>/dev/null; then
+  echo "ERROR: Required tool 'jq' not found in PATH." >&2
+  exit 2
+fi
+
 if ! jq empty "$REPORT" 2>/dev/null; then
   echo "ERROR: Report file is not valid JSON: $REPORT" >&2
   exit 2
 fi
 
-# Check required fields exist
 if ! jq -e '.results' "$REPORT" >/dev/null 2>&1; then
   echo "ERROR: Report JSON missing 'results' field" >&2
   exit 2
@@ -86,14 +98,8 @@ if ! jq -e '.memory' "$REPORT" >/dev/null 2>&1; then
   exit 2
 fi
 
-# Check for required tools
-if ! command -v jq &>/dev/null; then
-  echo "ERROR: Required tool 'jq' not found in PATH." >&2
-  exit 2
-fi
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Read report metadata and detect active targets
+# Read report metadata
 # ─────────────────────────────────────────────────────────────────────────────
 
 PROFILE=$(jq -r '.profile // "unknown"' "$REPORT")
@@ -102,316 +108,358 @@ TIMESTAMP=$(jq -r '.timestamp // "unknown"' "$REPORT")
 REQ_COUNT=$(jq -r '.config.requests // "?"' "$REPORT")
 CONCURRENCY=$(jq -r '.config.concurrency // "?"' "$REPORT")
 
-# Detect active targets from report (fallback to os,ls if field missing)
+# Detect active targets
 HAS_LS=false
 HAS_MOTO=false
-if jq -e '.targets' "$REPORT" >/dev/null 2>&1; then
-  jq -r '.targets[]' "$REPORT" | while read -r t; do
-    case "$t" in
-      ls) ;; # handled below
-      moto) ;;
-    esac
-  done
-  # Use jq to check membership
-  if jq -e '.targets | index("ls")' "$REPORT" >/dev/null 2>&1; then
-    HAS_LS=true
-  fi
-  if jq -e '.targets | index("moto")' "$REPORT" >/dev/null 2>&1; then
-    HAS_MOTO=true
-  fi
-else
-  # Legacy report without targets field — assume ls present, moto absent
+if jq -e '.targets | index("ls")' "$REPORT" >/dev/null 2>&1; then
   HAS_LS=true
+fi
+if jq -e '.targets | index("moto")' "$REPORT" >/dev/null 2>&1; then
+  HAS_MOTO=true
+fi
+
+TARGETS_JSON=$(jq -c '.targets // ["os","ls"]' "$REPORT")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build ignore-errors set (bash associative array keyed by "service/operation")
+# ─────────────────────────────────────────────────────────────────────────────
+
+declare -A IGNORE_SET
+if [[ -n "$IGNORE_ERRORS" ]]; then
+  IFS=',' read -ra _ignore_list <<< "$IGNORE_ERRORS"
+  for _entry in "${_ignore_list[@]}"; do
+    _entry="${_entry// /}"  # trim spaces
+    IGNORE_SET["$_entry"]=1
+  done
+fi
+
+# Build JSON array of ignored entries for output
+IGNORED_JSON=$(
+  if [[ -n "$IGNORE_ERRORS" ]]; then
+    IFS=',' read -ra _items <<< "$IGNORE_ERRORS"
+    printf '%s\n' "${_items[@]}" | jq -R . | jq -s .
+  else
+    echo "[]"
+  fi
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Memory evaluation
+# ─────────────────────────────────────────────────────────────────────────────
+
+OS_IDLE_MB=$(jq -r  '.memory.openstack.idle_mb   // 0' "$REPORT")
+OS_LOADED_MB=$(jq -r '.memory.openstack.loaded_mb // 0' "$REPORT")
+LS_IDLE_MB=0; LS_LOADED_MB=0
+MOTO_IDLE_MB=0; MOTO_LOADED_MB=0
+
+$HAS_LS   && LS_IDLE_MB=$(jq -r '.memory.localstack.idle_mb   // 0' "$REPORT") \
+          && LS_LOADED_MB=$(jq -r '.memory.localstack.loaded_mb // 0' "$REPORT")
+$HAS_MOTO && MOTO_IDLE_MB=$(jq -r '.memory.moto.idle_mb   // 0' "$REPORT") \
+          && MOTO_LOADED_MB=$(jq -r '.memory.moto.loaded_mb // 0' "$REPORT")
+
+MEMORY_GATE_PASS=true
+MEMORY_FAILURE_MSG=""
+if [[ "$OS_LOADED_MB" != "null" ]] && awk "BEGIN {exit !($OS_LOADED_MB > $MEMORY_MAX)}"; then
+  MEMORY_GATE_PASS=false
+  MEMORY_FAILURE_MSG="openstack loaded RSS ${OS_LOADED_MB}MB exceeds ${MEMORY_MAX}MB ceiling"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6.2 Per-operation p95 latency ratio evaluation
+# Per-operation evaluation
 # ─────────────────────────────────────────────────────────────────────────────
 
 GATE_FAILED=false
+$MEMORY_GATE_PASS || GATE_FAILED=true
+
+# Accumulate JSON fragments using temp arrays
 LATENCY_FAILURES=()
 ERROR_FAILURES=()
+MEMORY_FAILURES=()
+$MEMORY_GATE_PASS || MEMORY_FAILURES+=("$MEMORY_FAILURE_MSG")
 
-# Process each non-skipped result that has openstack data
-RESULT_COUNT=$(jq '[.results[] | select(.operation != "SKIPPED" and .openstack != null)] | length' "$REPORT")
+# Get all unique services (preserving order, skipped entries included)
+SERVICES_ORDER=$(jq -r '[.results[].service] | unique | .[]' "$REPORT")
 
-for i in $(seq 0 $(( RESULT_COUNT - 1 ))); do
-  SERVICE=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].service" "$REPORT")
-  OPERATION=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].operation" "$REPORT")
-  OS_P95=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].openstack.p95_ms" "$REPORT")
-  OS_ERRORS=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].openstack.errors" "$REPORT")
+# Build services JSON object — we'll accumulate a jq-compatible string
+SERVICES_JSON_PARTS=()
 
-  # Check OS vs LocalStack p95 ratio
-  if $HAS_LS; then
-    LS_P95=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].localstack.p95_ms // 0" "$REPORT")
-    if [[ "$LS_P95" != "null" ]] && awk "BEGIN {exit !($LS_P95 > 0)}"; then
-      RATIO=$(awk "BEGIN {printf \"%.2f\", $OS_P95 / $LS_P95}")
-      EXCEEDS=$(awk "BEGIN {print ($RATIO > $P95_THRESHOLD) ? \"yes\" : \"no\"}")
-      if [[ "$EXCEEDS" == "yes" ]]; then
-        GATE_FAILED=true
-        LATENCY_FAILURES+=("$SERVICE/$OPERATION: OS=${OS_P95}ms vs LS=${LS_P95}ms (ratio=${RATIO}x, threshold=${P95_THRESHOLD}x)")
-      fi
-    fi
+while IFS= read -r SERVICE; do
+  # Collect all non-skipped operations for this service
+  OPS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation != \"SKIPPED\")] | .[].operation" "$REPORT")
+
+  if [[ -z "$OPS" ]]; then
+    # Only skipped entries for this service — handled in skipped section
+    continue
   fi
 
-  # Check OS vs Moto p95 ratio
-  if $HAS_MOTO; then
-    MOTO_P95=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].moto.p95_ms // 0" "$REPORT")
-    if [[ "$MOTO_P95" != "null" ]] && awk "BEGIN {exit !($MOTO_P95 > 0)}"; then
-      MOTO_RATIO=$(awk "BEGIN {printf \"%.2f\", $OS_P95 / $MOTO_P95}")
-      MOTO_EXCEEDS=$(awk "BEGIN {print ($MOTO_RATIO > $P95_THRESHOLD) ? \"yes\" : \"no\"}")
-      if [[ "$MOTO_EXCEEDS" == "yes" ]]; then
-        GATE_FAILED=true
-        LATENCY_FAILURES+=("$SERVICE/$OPERATION: OS=${OS_P95}ms vs Moto=${MOTO_P95}ms (ratio=${MOTO_RATIO}x, threshold=${P95_THRESHOLD}x)")
-      fi
-    fi
-  fi
+  OPS_JSON_PARTS=()
 
-  # 6.4: Check error rate
-  if [[ "$OS_ERRORS" != "0" && "$OS_ERRORS" != "null" ]]; then
-    GATE_FAILED=true
-    ERROR_FAILURES+=("$SERVICE/$OPERATION: openstack errors=$OS_ERRORS")
-  fi
-done
+  # Per-service speedup accumulators (vs LS and moto, only valid comparisons)
+  declare -a LS_SPEEDUPS=()
+  declare -a MOTO_SPEEDUPS=()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6.3 Memory budget evaluation
-# ─────────────────────────────────────────────────────────────────────────────
+  while IFS= read -r OPERATION; do
+    KEY="$SERVICE/$OPERATION"
 
-MEMORY_FAILED=false
-MEMORY_FAILURE_MSG=""
+    # Read openstack metrics
+    OS_P50=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].openstack.p50_ms // 0" "$REPORT")
+    OS_P95=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].openstack.p95_ms // 0" "$REPORT")
+    OS_P99=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].openstack.p99_ms // 0" "$REPORT")
+    OS_RPS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].openstack.throughput_rps // 0" "$REPORT")
+    OS_ERRORS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].openstack.errors // 0" "$REPORT")
 
-OS_LOADED_MB=$(jq -r '.memory.openstack.loaded_mb // 0' "$REPORT")
-OS_IDLE_MB=$(jq -r '.memory.openstack.idle_mb // 0' "$REPORT")
-LS_LOADED_MB=0
-LS_IDLE_MB=0
-MOTO_LOADED_MB=0
-MOTO_IDLE_MB=0
-MEM_RATIO="N/A"
+    # Gate checks for this operation
+    OP_FAILURES_JSON="[]"
+    OP_GATE_PASS=true
 
-if $HAS_LS; then
-  LS_LOADED_MB=$(jq -r '.memory.localstack.loaded_mb // 0' "$REPORT")
-  LS_IDLE_MB=$(jq -r '.memory.localstack.idle_mb // 0' "$REPORT")
-fi
-
-if $HAS_MOTO; then
-  MOTO_LOADED_MB=$(jq -r '.memory.moto.loaded_mb // 0' "$REPORT")
-  MOTO_IDLE_MB=$(jq -r '.memory.moto.idle_mb // 0' "$REPORT")
-fi
-
-  if $HAS_LS && [[ "$LS_LOADED_MB" != "null" && "$OS_LOADED_MB" != "null" ]] && awk "BEGIN {exit !($LS_LOADED_MB > 0)}"; then
-  MEM_RATIO=$(awk "BEGIN {printf \"%.4f\", $OS_LOADED_MB / $LS_LOADED_MB}")
-  MEM_EXCEEDS=$(awk "BEGIN {print ($MEM_RATIO > $MEMORY_BUDGET) ? \"yes\" : \"no\"}")
-  if [[ "$MEM_EXCEEDS" == "yes" ]]; then
-    GATE_FAILED=true
-    MEMORY_FAILED=true
-    MEMORY_FAILURE_MSG="openstack=${OS_LOADED_MB}MB vs LocalStack=${LS_LOADED_MB}MB (ratio=${MEM_RATIO}, budget=${MEMORY_BUDGET})"
-  fi
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 6.5 Markdown summary generation
-# ─────────────────────────────────────────────────────────────────────────────
-
-generate_markdown() {
-  local verdict="PASS"
-  local failure_count=0
-
-  if $GATE_FAILED; then
-    verdict="FAIL"
-    failure_count=$(( ${#LATENCY_FAILURES[@]} + ${#ERROR_FAILURES[@]} ))
-    $MEMORY_FAILED && failure_count=$(( failure_count + 1 ))
-  fi
-
-  # Build targets display string
-  local targets_str="os"
-  $HAS_LS && targets_str="$targets_str, ls"
-  $HAS_MOTO && targets_str="$targets_str, moto"
-
-  cat <<EOF
-## Benchmark Gate: $verdict
-
-**Profile:** $PROFILE | **Mode:** $MODE | **Requests:** $REQ_COUNT | **Concurrency:** $CONCURRENCY
-**Timestamp:** $TIMESTAMP | **Targets:** $targets_str
-**Thresholds:** p95 ratio <= ${P95_THRESHOLD}x | Memory ratio <= ${MEMORY_BUDGET}
-
-### Memory Comparison
-
-| Target | Idle RSS (MB) | Loaded RSS (MB) |
-|--------|---------------|-----------------|
-| openstack | $OS_IDLE_MB | $OS_LOADED_MB |
-EOF
-
-  if $HAS_LS; then
-    echo "| LocalStack | $LS_IDLE_MB | $LS_LOADED_MB |"
-  fi
-  if $HAS_MOTO; then
-    echo "| moto | $MOTO_IDLE_MB | $MOTO_LOADED_MB |"
-  fi
-
-if $HAS_LS && [[ "$LS_LOADED_MB" != "null" && "$OS_LOADED_MB" != "null" ]] && awk "BEGIN {exit !($LS_LOADED_MB > 0)}"; then
-    echo "| **Ratio (OS/LS)** | $(awk "BEGIN {printf \"%.4f\", $OS_IDLE_MB / ($LS_IDLE_MB == 0 ? 1 : $LS_IDLE_MB)}") | $MEM_RATIO |"
-  fi
-
-  if $MEMORY_FAILED; then
-    echo ""
-    echo "> **FAIL:** Memory budget exceeded: $MEMORY_FAILURE_MSG"
-  fi
-
-  echo ""
-  echo "### Per-Operation Metrics"
-  echo ""
-
-  # Build dynamic table header based on active targets
-  local header="| Service | Operation | OS p50 | OS p95 | OS p99 | OS RPS"
-  local separator="|---------|-----------|--------|--------|--------|-------"
-  if $HAS_LS; then
-    header="$header | LS p50 | LS p95 | LS p99 | LS RPS | OS/LS"
-    separator="$separator|--------|--------|--------|--------|------"
-  fi
-  if $HAS_MOTO; then
-    header="$header | Moto p50 | Moto p95 | Moto p99 | Moto RPS | OS/Moto"
-    separator="$separator|----------|----------|----------|----------|--------"
-  fi
-  header="$header | Status |"
-  separator="$separator|--------|"
-
-  echo "$header"
-  echo "$separator"
-
-  # Iterate through all non-skipped results with openstack data
-  for i in $(seq 0 $(( RESULT_COUNT - 1 ))); do
-    local svc op os_p50 os_p95 os_p99 os_rps os_errs
-    svc=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].service" "$REPORT")
-    op=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].operation" "$REPORT")
-    os_p50=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].openstack.p50_ms" "$REPORT")
-    os_p95=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].openstack.p95_ms" "$REPORT")
-    os_p99=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].openstack.p99_ms" "$REPORT")
-    os_rps=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].openstack.throughput_rps" "$REPORT")
-    os_errs=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].openstack.errors" "$REPORT")
-
-    local row="| $svc | $op | ${os_p50}ms | ${os_p95}ms | ${os_p99}ms | $os_rps"
-    local status="PASS"
-    local ls_ratio_str="N/A"
-    local moto_ratio_str="N/A"
-
-    if [[ "$os_errs" != "0" && "$os_errs" != "null" ]]; then
-      status="FAIL (errors)"
+    # 1. Absolute p95 threshold
+    if [[ "$OS_P95" != "null" ]] && awk "BEGIN {exit !($OS_P95 > $P95_MAX)}"; then
+      OP_GATE_PASS=false
+      GATE_FAILED=true
+      _msg="${KEY}: p95=${OS_P95}ms exceeds ${P95_MAX}ms threshold"
+      LATENCY_FAILURES+=("$_msg")
+      OP_FAILURES_JSON=$(echo "$OP_FAILURES_JSON" | jq -c --arg m "$_msg" '. + [$m]')
     fi
 
-    # LocalStack columns
+    # 2. Error check (unless ignored)
+    ERROR_IGNORED=false
+    if [[ -n "${IGNORE_SET[$KEY]+x}" ]]; then
+      ERROR_IGNORED=true
+    elif [[ "$OS_ERRORS" != "0" && "$OS_ERRORS" != "null" ]]; then
+      OP_GATE_PASS=false
+      GATE_FAILED=true
+      _msg="${KEY}: openstack errors=${OS_ERRORS}"
+      ERROR_FAILURES+=("$_msg")
+      OP_FAILURES_JSON=$(echo "$OP_FAILURES_JSON" | jq -c --arg m "$_msg" '. + [$m]')
+    fi
+
+    # Build target JSON sub-objects
+    OS_JSON=$(jq -n \
+      --argjson p50 "$OS_P50" \
+      --argjson p95 "$OS_P95" \
+      --argjson p99 "$OS_P99" \
+      --argjson rps "$OS_RPS" \
+      --argjson err "$OS_ERRORS" \
+      '{p50_ms:$p50, p95_ms:$p95, p99_ms:$p99, rps:$rps, errors:$err}')
+
+    LS_JSON="null"
     if $HAS_LS; then
-      local ls_p50 ls_p95 ls_p99 ls_rps
-      ls_p50=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].localstack.p50_ms // \"—\"" "$REPORT")
-      ls_p95=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].localstack.p95_ms // \"—\"" "$REPORT")
-      ls_p99=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].localstack.p99_ms // \"—\"" "$REPORT")
-      ls_rps=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].localstack.throughput_rps // \"—\"" "$REPORT")
-
-      if [[ "$ls_p95" != "—" && "$ls_p95" != "null" ]] && awk "BEGIN {exit !($ls_p95 > 0)}"; then
-        ls_ratio_str="$(awk "BEGIN {printf \"%.2f\", $os_p95 / $ls_p95}")x"
-        local ls_exceeds
-        ls_exceeds=$(awk "BEGIN {print (${os_p95} / ${ls_p95} > $P95_THRESHOLD) ? \"yes\" : \"no\"}")
-        if [[ "$ls_exceeds" == "yes" && "$status" == "PASS" ]]; then
-          status="FAIL (p95/LS)"
+      LS_P50=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].localstack.p50_ms // null" "$REPORT")
+      LS_P95=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].localstack.p95_ms // null" "$REPORT")
+      LS_P99=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].localstack.p99_ms // null" "$REPORT")
+      LS_RPS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].localstack.throughput_rps // null" "$REPORT")
+      LS_ERRORS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].localstack.errors // null" "$REPORT")
+      if [[ "$LS_P50" != "null" ]]; then
+        LS_JSON=$(jq -n \
+          --argjson p50 "$LS_P50" \
+          --argjson p95 "${LS_P95:-null}" \
+          --argjson p99 "${LS_P99:-null}" \
+          --argjson rps "${LS_RPS:-null}" \
+          --argjson err "${LS_ERRORS:-null}" \
+          '{p50_ms:$p50, p95_ms:$p95, p99_ms:$p99, rps:$rps, errors:$err}')
+        # Accumulate speedup if both p95 values are valid positive numbers
+        if [[ "$OS_P95" != "null" && "$LS_P95" != "null" ]] \
+           && awk "BEGIN {exit !($OS_P95 > 0 && $LS_P95 > 0)}"; then
+          _speedup=$(awk "BEGIN {printf \"%.4f\", $LS_P95 / $OS_P95}")
+          LS_SPEEDUPS+=("$_speedup")
         fi
       fi
-
-      row="$row | ${ls_p50}ms | ${ls_p95}ms | ${ls_p99}ms | $ls_rps | $ls_ratio_str"
     fi
 
-    # Moto columns
+    MOTO_JSON="null"
     if $HAS_MOTO; then
-      local moto_p50 moto_p95 moto_p99 moto_rps
-      moto_p50=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].moto.p50_ms // \"—\"" "$REPORT")
-      moto_p95=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].moto.p95_ms // \"—\"" "$REPORT")
-      moto_p99=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].moto.p99_ms // \"—\"" "$REPORT")
-      moto_rps=$(jq -r "[.results[] | select(.operation != \"SKIPPED\" and .openstack != null)][$i].moto.throughput_rps // \"—\"" "$REPORT")
-
-      if [[ "$moto_p95" != "—" && "$moto_p95" != "null" ]] && awk "BEGIN {exit !($moto_p95 > 0)}"; then
-        moto_ratio_str="$(awk "BEGIN {printf \"%.2f\", $os_p95 / $moto_p95}")x"
-        local moto_exceeds
-        moto_exceeds=$(awk "BEGIN {print (${os_p95} / ${moto_p95} > $P95_THRESHOLD) ? \"yes\" : \"no\"}")
-        if [[ "$moto_exceeds" == "yes" && "$status" == "PASS" ]]; then
-          status="FAIL (p95/Moto)"
+      MOTO_P50=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].moto.p50_ms // null" "$REPORT")
+      MOTO_P95=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].moto.p95_ms // null" "$REPORT")
+      MOTO_P99=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].moto.p99_ms // null" "$REPORT")
+      MOTO_RPS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].moto.throughput_rps // null" "$REPORT")
+      MOTO_ERRORS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation == \"$OPERATION\")][0].moto.errors // null" "$REPORT")
+      if [[ "$MOTO_P50" != "null" ]]; then
+        MOTO_JSON=$(jq -n \
+          --argjson p50 "$MOTO_P50" \
+          --argjson p95 "${MOTO_P95:-null}" \
+          --argjson p99 "${MOTO_P99:-null}" \
+          --argjson rps "${MOTO_RPS:-null}" \
+          --argjson err "${MOTO_ERRORS:-null}" \
+          '{p50_ms:$p50, p95_ms:$p95, p99_ms:$p99, rps:$rps, errors:$err}')
+        if [[ "$OS_P95" != "null" && "$MOTO_P95" != "null" ]] \
+           && awk "BEGIN {exit !($OS_P95 > 0 && $MOTO_P95 > 0)}"; then
+          _speedup=$(awk "BEGIN {printf \"%.4f\", $MOTO_P95 / $OS_P95}")
+          MOTO_SPEEDUPS+=("$_speedup")
         fi
       fi
-
-      row="$row | ${moto_p50}ms | ${moto_p95}ms | ${moto_p99}ms | $moto_rps | $moto_ratio_str"
     fi
 
-    row="$row | $status |"
-    echo "$row"
-  done
+    # Assemble operation JSON
+    OP_JSON=$(jq -n \
+      --argjson os   "$OS_JSON" \
+      --argjson ls   "$LS_JSON" \
+      --argjson moto "$MOTO_JSON" \
+      --argjson pass "$([ "$OP_GATE_PASS" == "true" ] && echo true || echo false)" \
+      --argjson errig "$([ "$ERROR_IGNORED" == "true" ] && echo true || echo false)" \
+      --argjson failures "$OP_FAILURES_JSON" \
+      '{openstack:$os, localstack:$ls, moto:$moto,
+        gate_pass:$pass, error_ignored:$errig, gate_failures:$failures}')
 
-  # Show skipped services
-  SKIP_COUNT=$(jq '[.results[] | select(.operation == "SKIPPED")] | length' "$REPORT")
-  if [[ "$SKIP_COUNT" -gt 0 ]]; then
-    echo ""
-    echo "### Skipped Services"
-    echo ""
-    for i in $(seq 0 $(( SKIP_COUNT - 1 ))); do
-      local skip_svc skip_reason
-      skip_svc=$(jq -r "[.results[] | select(.operation == \"SKIPPED\")][$i].service" "$REPORT")
-      skip_reason=$(jq -r "[.results[] | select(.operation == \"SKIPPED\")][$i].skip_reason" "$REPORT")
-      echo "- **$skip_svc**: $skip_reason"
+    OPS_JSON_PARTS+=("$(jq -n --arg k "$OPERATION" --argjson v "$OP_JSON" '{($k):$v}')")
+  done <<< "$OPS"
+
+  # Merge all operations into a single object
+  OPS_MERGED=$(printf '%s\n' "${OPS_JSON_PARTS[@]}" | jq -s 'add // {}')
+
+  # Compute per-service speedup stats
+  compute_stats() {
+    local -n _arr=$1
+    if [[ ${#_arr[@]} -eq 0 ]]; then
+      echo "null"
+      return
+    fi
+    local min max sum count
+    min="${_arr[0]}"; max="${_arr[0]}"; sum=0; count=0
+    for v in "${_arr[@]}"; do
+      if awk "BEGIN {exit !($v < $min)}"; then min="$v"; fi
+      if awk "BEGIN {exit !($v > $max)}"; then max="$v"; fi
+      sum=$(awk "BEGIN {printf \"%.4f\", $sum + $v}")
+      count=$(( count + 1 ))
     done
-  fi
+    local avg
+    avg=$(awk "BEGIN {printf \"%.2f\", $sum / $count}")
+    min=$(awk "BEGIN {printf \"%.2f\", $min}")
+    max=$(awk "BEGIN {printf \"%.2f\", $max}")
+    jq -n --argjson mn "$min" --argjson mx "$max" --argjson av "$avg" \
+      '{min:$mn, max:$mx, avg:$av}'
+  }
 
-  # Show failures summary
-  if $GATE_FAILED; then
-    echo ""
-    echo "### Failures"
-    echo ""
+  LS_SPEEDUP_JSON="null"
+  MOTO_SPEEDUP_JSON="null"
+  $HAS_LS   && [[ ${#LS_SPEEDUPS[@]}   -gt 0 ]] && LS_SPEEDUP_JSON=$(compute_stats   LS_SPEEDUPS)
+  $HAS_MOTO && [[ ${#MOTO_SPEEDUPS[@]} -gt 0 ]] && MOTO_SPEEDUP_JSON=$(compute_stats MOTO_SPEEDUPS)
 
-    if [[ ${#LATENCY_FAILURES[@]} -gt 0 ]]; then
-      echo "**Latency threshold exceeded (p95 ratio > ${P95_THRESHOLD}x):**"
-      for f in "${LATENCY_FAILURES[@]}"; do
-        echo "- $f"
-      done
-      echo ""
-    fi
+  SVC_JSON=$(jq -n \
+    --argjson ops "$OPS_MERGED" \
+    --argjson ls_su "$LS_SPEEDUP_JSON" \
+    --argjson moto_su "$MOTO_SPEEDUP_JSON" \
+    '{operations:$ops, speedup_vs_localstack:$ls_su, speedup_vs_moto:$moto_su}')
 
-    if [[ ${#ERROR_FAILURES[@]} -gt 0 ]]; then
-      echo "**Non-zero error rates:**"
-      for f in "${ERROR_FAILURES[@]}"; do
-        echo "- $f"
-      done
-      echo ""
-    fi
+  SERVICES_JSON_PARTS+=("$(jq -n --arg k "$SERVICE" --argjson v "$SVC_JSON" '{($k):$v}')")
 
-    if $MEMORY_FAILED; then
-      echo "**Memory budget exceeded:**"
-      echo "- $MEMORY_FAILURE_MSG"
-      echo ""
-    fi
+  unset LS_SPEEDUPS MOTO_SPEEDUPS
+  declare -a LS_SPEEDUPS=()
+  declare -a MOTO_SPEEDUPS=()
+done <<< "$SERVICES_ORDER"
 
-    local total_failures=$(( ${#LATENCY_FAILURES[@]} + ${#ERROR_FAILURES[@]} ))
-    $MEMORY_FAILED && total_failures=$(( total_failures + 1 ))
-    echo "**Total failures: $total_failures**"
+# Merge all services into a single object
+if [[ ${#SERVICES_JSON_PARTS[@]} -gt 0 ]]; then
+  SERVICES_MERGED=$(printf '%s\n' "${SERVICES_JSON_PARTS[@]}" | jq -s 'add // {}')
+else
+  SERVICES_MERGED="{}"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build skipped array
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKIPPED_JSON=$(jq -c '[.results[] | select(.operation == "SKIPPED") | {service:.service, reason:.skip_reason}]' "$REPORT")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build failures summary JSON
+# ─────────────────────────────────────────────────────────────────────────────
+
+_arr_to_json() {
+  local -n _ref=$1
+  if [[ ${#_ref[@]} -gt 0 ]]; then
+    printf '%s\n' "${_ref[@]}" | jq -R . | jq -s .
+  else
+    echo '[]'
   fi
 }
 
+LATENCY_FAILURES_JSON=$(_arr_to_json LATENCY_FAILURES)
+ERROR_FAILURES_JSON=$(_arr_to_json ERROR_FAILURES)
+MEMORY_FAILURES_JSON=$(_arr_to_json MEMORY_FAILURES)
+
+TOTAL_FAILURES=$(( ${#LATENCY_FAILURES[@]} + ${#ERROR_FAILURES[@]} + ${#MEMORY_FAILURES[@]} ))
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Output markdown summary
+# Assemble final gate JSON
 # ─────────────────────────────────────────────────────────────────────────────
 
-MARKDOWN=$(generate_markdown)
+VERDICT="PASS"
+$GATE_FAILED && VERDICT="FAIL"
 
-if [[ -n "$OUTPUT_MARKDOWN" ]]; then
-  echo "$MARKDOWN" > "$OUTPUT_MARKDOWN"
-  echo "[gate] Markdown summary written to: $OUTPUT_MARKDOWN" >&2
+GATE_JSON=$(jq -n \
+  --arg verdict "$VERDICT" \
+  --argjson p95_max "$P95_MAX" \
+  --argjson mem_max "$MEMORY_MAX" \
+  --argjson ignored "$IGNORED_JSON" \
+  --arg profile "$PROFILE" \
+  --arg mode "$MODE" \
+  --arg timestamp "$TIMESTAMP" \
+  --argjson targets "$TARGETS_JSON" \
+  --argjson requests "$REQ_COUNT" \
+  --argjson concurrency "$CONCURRENCY" \
+  --argjson os_idle "$OS_IDLE_MB" \
+  --argjson os_loaded "$OS_LOADED_MB" \
+  --argjson ls_idle "$LS_IDLE_MB" \
+  --argjson ls_loaded "$LS_LOADED_MB" \
+  --argjson moto_idle "$MOTO_IDLE_MB" \
+  --argjson moto_loaded "$MOTO_LOADED_MB" \
+  --argjson mem_pass "$([ "$MEMORY_GATE_PASS" == "true" ] && echo true || echo false)" \
+  --argjson services "$SERVICES_MERGED" \
+  --argjson skipped "$SKIPPED_JSON" \
+  --argjson lat_fail "$LATENCY_FAILURES_JSON" \
+  --argjson err_fail "$ERROR_FAILURES_JSON" \
+  --argjson mem_fail "$MEMORY_FAILURES_JSON" \
+  --argjson total_fail "$TOTAL_FAILURES" \
+  '{
+    verdict: $verdict,
+    thresholds: {
+      p95_max_ms: $p95_max,
+      memory_max_mb: $mem_max,
+      ignored_errors: $ignored
+    },
+    metadata: {
+      profile: $profile,
+      mode: $mode,
+      timestamp: $timestamp,
+      targets: $targets,
+      requests: $requests,
+      concurrency: $concurrency
+    },
+    memory: {
+      openstack:  {idle_mb: $os_idle,   loaded_mb: $os_loaded},
+      localstack: {idle_mb: $ls_idle,   loaded_mb: $ls_loaded},
+      moto:       {idle_mb: $moto_idle, loaded_mb: $moto_loaded},
+      gate_pass:  $mem_pass
+    },
+    services: $services,
+    skipped: $skipped,
+    failures: {
+      latency: $lat_fail,
+      errors:  $err_fail,
+      memory:  $mem_fail,
+      total:   $total_fail
+    }
+  }')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Output
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -n "$OUTPUT" ]]; then
+  echo "$GATE_JSON" > "$OUTPUT"
+  echo "[gate] Gate JSON written to: $OUTPUT" >&2
 else
-  echo "$MARKDOWN"
+  echo "$GATE_JSON"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6.6 Exit codes
+# Exit code
 # ─────────────────────────────────────────────────────────────────────────────
 
 if $GATE_FAILED; then
-  echo "[gate] FAIL — gate checks did not pass" >&2
+  echo "[gate] FAIL — ${TOTAL_FAILURES} gate check(s) did not pass" >&2
   exit 1
 else
-  echo "[gate] PASS — all checks passed" >&2
+  echo "[gate] PASS — all gate checks passed" >&2
   exit 0
 fi
