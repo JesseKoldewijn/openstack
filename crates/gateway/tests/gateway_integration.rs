@@ -2,19 +2,19 @@
 
 #[cfg(test)]
 mod gateway_tests {
-    use axum::body::Body;
     use axum::body::to_bytes;
+    use axum::body::Body;
     use axum::http::{HeaderMap, HeaderValue, Method};
     use axum::http::{Request, StatusCode};
     use openstack_config::{
         Config, CorsConfig, Directories, LogLevel, ServicesConfig, SnapshotLoadStrategy,
         SnapshotSaveStrategy,
     };
-    use openstack_gateway::Gateway;
     use openstack_gateway::cors::CorsHandler;
     use openstack_gateway::sigv4::{
-        DEFAULT_ACCOUNT_ID, access_key_to_account_id, is_valid_region, parse_sigv4_auth,
+        access_key_to_account_id, is_valid_region, parse_sigv4_auth, DEFAULT_ACCOUNT_ID,
     };
+    use openstack_gateway::Gateway;
     use openstack_service_framework::ServicePluginManager;
     use tower::ServiceExt;
 
@@ -261,7 +261,7 @@ mod gateway_tests {
             .body(Body::from(""))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     #[tokio::test]
@@ -321,6 +321,6 @@ mod gateway_tests {
             .body(Body::from(""))
             .unwrap();
         let aws_resp = app.oneshot(aws_req).await.unwrap();
-        assert_eq!(aws_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(aws_resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 }

@@ -45,7 +45,7 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   clippy:
@@ -70,7 +70,7 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   test:
@@ -102,8 +102,8 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
-            echo "| OS | \\`${{ matrix.os }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
+            echo "| OS | \`${{ matrix.os }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   studio-ui-gates:
@@ -170,7 +170,7 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   prepare-openstack-runtime-image:
@@ -228,7 +228,7 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   studio-coverage:
