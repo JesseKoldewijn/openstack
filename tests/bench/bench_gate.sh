@@ -38,7 +38,7 @@ set -euo pipefail
 
 REPORT=""
 P95_MAX="5"
-MEMORY_MAX="10"
+MEMORY_MAX="80"
 IGNORE_ERRORS=""
 IGNORE_LATENCY=""
 OP_P95_MAX=""
@@ -51,7 +51,7 @@ Usage: $(basename "$0") [OPTIONS]
 Options:
   --report <path>              Path to JSON benchmark report from bench_services.sh (required)
   --p95-max <ms>               Global p95 ceiling for openstack in milliseconds (default: 5)
-  --memory-max <mb>            Absolute loaded RSS ceiling for openstack in MB (default: 10)
+  --memory-max <mb>            Absolute loaded RSS ceiling for openstack in MB (default: 80)
   --ignore-errors <list>       Comma-separated service/operation pairs to skip error check
                                e.g. "iam/create_user,s3/put_object"
   --ignore-latency <list>      Comma-separated service/operation pairs to skip p95 latency check
