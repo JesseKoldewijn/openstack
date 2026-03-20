@@ -107,10 +107,20 @@ log_section() {
 
 get_docker_mem_kb() {
   local container_id="$1"
-  # Use cgroup memory.current for accurate RSS
-  docker exec "$container_id" cat /sys/fs/cgroup/memory.current 2>/dev/null \
-    | awk '{printf "%.0f", $1/1024}' 2>/dev/null \
-    || docker stats --no-stream --format '{{.MemUsage}}' "$container_id" 2>/dev/null \
+  # Use cgroup v2: memory.current minus page-cache (inactive_file + active_file)
+  # to measure true process RSS without OS file-cache inflation.
+  local mem_bytes cache_bytes
+  mem_bytes=$(docker exec "$container_id" cat /sys/fs/cgroup/memory.current 2>/dev/null || echo "")
+  if [[ -n "$mem_bytes" && "$mem_bytes" =~ ^[0-9]+$ ]]; then
+    # Try to subtract file cache recorded in memory.stat
+    cache_bytes=$(docker exec "$container_id" \
+      awk '/^inactive_file /{c+=$2} /^active_file /{c+=$2} END{print c+0}' \
+      /sys/fs/cgroup/memory.stat 2>/dev/null || echo "0")
+    echo $(( (mem_bytes - cache_bytes) / 1024 ))
+    return
+  fi
+  # Fallback: docker stats (includes page cache — less accurate)
+  docker stats --no-stream --format '{{.MemUsage}}' "$container_id" 2>/dev/null \
     | awk -F'/' '{gsub(/[^0-9.]/, "", $1); if ($1 ~ /GiB/) printf "%.0f", $1*1048576; else if ($1 ~ /MiB/) printf "%.0f", $1*1024; else printf "%.0f", $1}' 2>/dev/null \
     || echo "0"
 }

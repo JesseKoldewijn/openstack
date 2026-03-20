@@ -10,6 +10,7 @@ use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
+use tokio::io::BufReader;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
 
@@ -533,7 +534,12 @@ async fn handle_get_object_async(
                     } else {
                         match ObjectFileStore::read_object_at(&path).await {
                             Ok(file) => {
-                                let stream = ReaderStream::new(file);
+                                // Wrap in a 512 KiB BufReader to amortise the
+                                // spawn_blocking overhead of tokio::fs::File reads
+                                // across fewer, larger I/O calls.
+                                const READ_BUF: usize = 512 * 1024;
+                                let buffered = BufReader::with_capacity(READ_BUF, file);
+                                let stream = ReaderStream::with_capacity(buffered, READ_BUF);
                                 ResponseBody::Streaming {
                                     stream: Box::pin(stream),
                                     content_length: Some(size),
