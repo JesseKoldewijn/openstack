@@ -633,13 +633,13 @@ fn test_store_put_get() {
     store.put_object(
         "bucket",
         "key",
-        ObjectDataRef::Inline(b"hello".to_vec()),
+        ObjectDataRef::Inline(Bytes::from_static(b"hello")),
         "text/plain",
         HashMap::new(),
     );
 
     let v = store.get_object("bucket", "key").unwrap();
-    assert_eq!(v.data, ObjectDataRef::Inline(b"hello".to_vec()));
+    assert_eq!(v.data, ObjectDataRef::Inline(Bytes::from_static(b"hello")));
     assert!(!v.etag.is_empty());
 }
 
@@ -650,7 +650,7 @@ fn test_store_delete_object() {
     store.put_object(
         "bucket",
         "key",
-        ObjectDataRef::Inline(b"data".to_vec()),
+        ObjectDataRef::Inline(Bytes::from_static(b"data")),
         "text/plain",
         HashMap::new(),
     );
@@ -668,20 +668,23 @@ fn test_store_versioning() {
     store.put_object(
         "bucket",
         "k",
-        ObjectDataRef::Inline(b"v1".to_vec()),
+        ObjectDataRef::Inline(Bytes::from_static(b"v1")),
         "text/plain",
         HashMap::new(),
     );
     store.put_object(
         "bucket",
         "k",
-        ObjectDataRef::Inline(b"v2".to_vec()),
+        ObjectDataRef::Inline(Bytes::from_static(b"v2")),
         "text/plain",
         HashMap::new(),
     );
 
     let current = store.get_object("bucket", "k").unwrap();
-    assert_eq!(current.data, ObjectDataRef::Inline(b"v2".to_vec()));
+    assert_eq!(
+        current.data,
+        ObjectDataRef::Inline(Bytes::from_static(b"v2"))
+    );
 
     let objs = store.list_objects("bucket");
     let obj = objs.into_iter().find(|o| o.key == "k").unwrap();
@@ -694,12 +697,15 @@ fn test_store_multipart() {
     store.create_bucket("bucket", "us-east-1");
     let uid =
         store.create_multipart_upload("bucket", "key", "application/octet-stream", HashMap::new());
-    store.upload_part(&uid, 1, ObjectDataRef::Inline(b"part1".to_vec()));
-    store.upload_part(&uid, 2, ObjectDataRef::Inline(b"part2".to_vec()));
+    store.upload_part(&uid, 1, ObjectDataRef::Inline(Bytes::from_static(b"part1")));
+    store.upload_part(&uid, 2, ObjectDataRef::Inline(Bytes::from_static(b"part2")));
     let v = store
         .complete_multipart_upload(&uid, &[(1, String::new()), (2, String::new())])
         .unwrap();
-    assert_eq!(v.data, ObjectDataRef::Inline(b"part1part2".to_vec()));
+    assert_eq!(
+        v.data,
+        ObjectDataRef::Inline(Bytes::from(b"part1part2".as_ref()))
+    );
 }
 
 // ---------------------------------------------------------------------------

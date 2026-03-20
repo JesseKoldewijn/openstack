@@ -213,7 +213,21 @@ impl ServiceProvider for OpenSearchProvider {
             // ----------------------------------------------------------------
             "DescribeDomain" => {
                 let domain_name = ctx.path.split('/').next_back().unwrap_or("").to_string();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                        &format!(
+                            "<RequestId>00000000-0000-0000-0000-000000000000</RequestId><BucketName>{}</BucketName>",
+                            ctx.path
+                                .trim_start_matches('/')
+                                .split('/')
+                                .next()
+                                .unwrap_or("")
+                        ),
+                    ));
+                };
                 match store.domains.get(&domain_name) {
                     Some(d) => Ok(json_ok(json!({
                         "DomainStatus": {
@@ -250,7 +264,9 @@ impl ServiceProvider for OpenSearchProvider {
             // ListDomainNames  GET /2021-01-01/domain
             // ----------------------------------------------------------------
             "ListDomainNames" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok_text_plain(json!({ "DomainNames": [] })));
+                };
                 let mut domain_names = store
                     .domains
                     .values()

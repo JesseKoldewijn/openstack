@@ -144,7 +144,10 @@ impl ServiceProvider for SesProvider {
             // ListIdentities
             // ----------------------------------------------------------------
             "ListIdentities" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let inner = "<Identities />";
+                    return Ok(xml_resp("ListIdentities", &rid, inner));
+                };
                 let members: String = store
                     .identities
                     .keys()

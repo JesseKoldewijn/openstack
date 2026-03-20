@@ -320,7 +320,15 @@ impl ServiceProvider for LambdaProvider {
                         DispatchError::NotImplemented("FunctionName required".to_string())
                     })?;
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!(
+                            "Function not found: arn:aws:lambda:{region}:{account_id}:function:{function_name}"
+                        ),
+                        404,
+                    ));
+                };
                 match store.functions.get(&function_name) {
                     Some(f) => Ok(json_ok(json!({
                         "Configuration": function_to_json(f),
@@ -346,7 +354,13 @@ impl ServiceProvider for LambdaProvider {
                         DispatchError::NotImplemented("FunctionName required".to_string())
                     })?;
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Function not found: {function_name}"),
+                        404,
+                    ));
+                };
                 match store.functions.get(&function_name) {
                     Some(f) => Ok(json_ok(function_to_json(f))),
                     None => Ok(json_error(
@@ -361,7 +375,9 @@ impl ServiceProvider for LambdaProvider {
             // ListFunctions
             // ----------------------------------------------------------------
             "ListFunctions" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Functions": [] })));
+                };
                 let functions: Vec<Value> =
                     store.functions.values().map(function_to_json).collect();
                 Ok(json_ok(json!({
@@ -558,7 +574,13 @@ impl ServiceProvider for LambdaProvider {
 
                 // Clone function data while holding the store lock briefly
                 let func_data = {
-                    let store = self.store.get_or_create(account_id, region);
+                    let Some(store) = self.store.get(account_id, region) else {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Function not found: {function_name}"),
+                            404,
+                        ));
+                    };
                     store.functions.get(&function_name).map(|f| {
                         (
                             f.function_arn.clone(),
@@ -751,7 +773,13 @@ impl ServiceProvider for LambdaProvider {
                         DispatchError::NotImplemented("VersionNumber required".to_string())
                     })?;
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Layer not found: {layer_name}"),
+                        404,
+                    ));
+                };
                 match store.layers.get(&layer_name) {
                     Some(versions) => match versions.iter().find(|lv| lv.version == version_num) {
                         Some(lv) => Ok(json_ok(layer_version_to_json(lv))),
@@ -779,7 +807,9 @@ impl ServiceProvider for LambdaProvider {
                         DispatchError::NotImplemented("LayerName required".to_string())
                     })?;
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "LayerVersions": [] })));
+                };
                 let versions = store
                     .layers
                     .get(&layer_name)
@@ -792,7 +822,9 @@ impl ServiceProvider for LambdaProvider {
             // ListLayers
             // ----------------------------------------------------------------
             "ListLayers" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Layers": [] })));
+                };
                 let layers: Vec<Value> = store
                     .layers
                     .iter()
@@ -870,7 +902,13 @@ impl ServiceProvider for LambdaProvider {
                     .or_else(|| str_field(body, "UUID"))
                     .ok_or_else(|| DispatchError::NotImplemented("UUID required".to_string()))?;
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("ESM not found: {uuid}"),
+                        404,
+                    ));
+                };
                 match store.event_source_mappings.get(&uuid) {
                     Some(esm) => Ok(json_ok(esm_to_json(esm))),
                     None => Ok(json_error(
@@ -885,7 +923,9 @@ impl ServiceProvider for LambdaProvider {
             // ListEventSourceMappings
             // ----------------------------------------------------------------
             "ListEventSourceMappings" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "EventSourceMappings": [] })));
+                };
                 let mappings: Vec<Value> = store
                     .event_source_mappings
                     .values()
@@ -1015,7 +1055,13 @@ impl ServiceProvider for LambdaProvider {
                         DispatchError::NotImplemented("Alias name required".to_string())
                     })?;
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Alias not found: {alias_name}"),
+                        404,
+                    ));
+                };
                 let aliases = store
                     .aliases
                     .get(&function_name)
@@ -1046,7 +1092,9 @@ impl ServiceProvider for LambdaProvider {
                         DispatchError::NotImplemented("FunctionName required".to_string())
                     })?;
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Aliases": [] })));
+                };
                 let aliases = store
                     .aliases
                     .get(&function_name)

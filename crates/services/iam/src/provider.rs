@@ -242,17 +242,15 @@ impl ServiceProvider for IamProvider {
 
             "GetUser" => {
                 let name = param(ctx, "UserName");
-                let store = self.store.get_or_create(account_id, region);
-                let user = match &name {
-                    Some(n) => store.users.get(n.as_str()),
-                    None => {
-                        // "get current user" — return a synthetic caller identity
-                        let xml = format!(
-                            "<User><UserId>AIDADEFAULT</UserId><UserName>default</UserName><Arn>arn:aws:iam::{account_id}:user/default</Arn><Path>/</Path><CreateDate>2020-01-01T00:00:00Z</CreateDate></User>"
-                        );
-                        return Ok(xml_resp("GetUser", &rid, &xml));
-                    }
+                // "get current user" — return a synthetic caller identity without touching the store
+                let Some(n) = &name else {
+                    let xml = format!(
+                        "<User><UserId>AIDADEFAULT</UserId><UserName>default</UserName><Arn>arn:aws:iam::{account_id}:user/default</Arn><Path>/</Path><CreateDate>2020-01-01T00:00:00Z</CreateDate></User>"
+                    );
+                    return Ok(xml_resp("GetUser", &rid, &xml));
                 };
+                let store = self.store.get(account_id, region);
+                let user = store.as_ref().and_then(|s| s.users.get(n.as_str()));
                 match user {
                     None => Ok(iam_error(
                         "NoSuchEntity",
@@ -280,7 +278,10 @@ impl ServiceProvider for IamProvider {
             }
 
             "ListUsers" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let inner = "<Users /><IsTruncated>false</IsTruncated>";
+                    return Ok(xml_resp("ListUsers", &rid, inner));
+                };
                 let mut users: Vec<String> = store.users.values().map(user_xml).collect();
                 users.sort();
                 let users_fragment = if users.is_empty() {
@@ -336,7 +337,13 @@ impl ServiceProvider for IamProvider {
                     Some(n) => n,
                     None => return Ok(iam_error("ValidationError", "RoleName is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(iam_error(
+                        "NoSuchEntity",
+                        &format!("Role {name} not found"),
+                        404,
+                    ));
+                };
                 match store.roles.get(&name) {
                     None => Ok(iam_error(
                         "NoSuchEntity",
@@ -364,7 +371,10 @@ impl ServiceProvider for IamProvider {
             }
 
             "ListRoles" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let inner = "<Roles /><IsTruncated>false</IsTruncated>";
+                    return Ok(xml_resp("ListRoles", &rid, inner));
+                };
                 let roles: Vec<String> = store.roles.values().map(role_xml).collect();
                 let inner = format!(
                     "<Roles>{}</Roles><IsTruncated>false</IsTruncated>",
@@ -415,7 +425,13 @@ impl ServiceProvider for IamProvider {
                     Some(n) => n,
                     None => return Ok(iam_error("ValidationError", "PolicyArn is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(iam_error(
+                        "NoSuchEntity",
+                        &format!("Policy {arn} not found"),
+                        404,
+                    ));
+                };
                 match store.policies.get(&arn) {
                     None => Ok(iam_error(
                         "NoSuchEntity",
@@ -427,7 +443,10 @@ impl ServiceProvider for IamProvider {
             }
 
             "ListPolicies" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let inner = "<Policies /><IsTruncated>false</IsTruncated>";
+                    return Ok(xml_resp("ListPolicies", &rid, inner));
+                };
                 let policies: Vec<String> = store.policies.values().map(policy_xml).collect();
                 let inner = format!(
                     "<Policies>{}</Policies><IsTruncated>false</IsTruncated>",
@@ -576,7 +595,10 @@ impl ServiceProvider for IamProvider {
             }
 
             "ListGroups" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let inner = "<Groups /><IsTruncated>false</IsTruncated>";
+                    return Ok(xml_resp("ListGroups", &rid, inner));
+                };
                 let groups: Vec<String> = store.groups.values().map(group_xml).collect();
                 let inner = format!(
                     "<Groups>{}</Groups><IsTruncated>false</IsTruncated>",

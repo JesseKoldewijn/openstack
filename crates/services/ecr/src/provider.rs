@@ -189,7 +189,9 @@ impl ServiceProvider for EcrProvider {
             // DescribeRepositories
             // ----------------------------------------------------------------
             "DescribeRepositories" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "repositories": [] })));
+                };
                 let repos: Vec<Value> = store
                     .repositories
                     .values()
@@ -271,7 +273,9 @@ impl ServiceProvider for EcrProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "images": [], "failures": [] })));
+                };
                 let image_ids = ctx
                     .request_body
                     .get("imageIds")
@@ -325,7 +329,9 @@ impl ServiceProvider for EcrProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "imageIds": [] })));
+                };
                 let image_ids: Vec<Value> = store
                     .images
                     .values()

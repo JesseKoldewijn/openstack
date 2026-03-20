@@ -656,25 +656,65 @@ impl ServiceProvider for SnsProvider {
 
         debug!(service = "sns", action = %action, "SNS dispatch");
 
-        let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-
         let response = match action.as_str() {
-            "CreateTopic" => handle_create_topic(&mut store, ctx, &params),
-            "DeleteTopic" => handle_delete_topic(&mut store, &params),
-            "ListTopics" => handle_list_topics(&store, &params),
-            "GetTopicAttributes" => handle_get_topic_attributes(&store, &params),
-            "SetTopicAttributes" => handle_set_topic_attributes(&mut store, &params),
-            "Subscribe" => handle_subscribe(&mut store, ctx, &params),
-            "Unsubscribe" => handle_unsubscribe(&mut store, &params),
-            "ListSubscriptions" => handle_list_subscriptions(&store, &params),
-            "ListSubscriptionsByTopic" => handle_list_subscriptions_by_topic(&store, &params),
-            "GetSubscriptionAttributes" => handle_get_subscription_attributes(&store, &params),
-            "SetSubscriptionAttributes" => handle_set_subscription_attributes(&mut store, &params),
-            "Publish" => handle_publish(&mut store, &params),
-            "PublishBatch" => handle_publish_batch(&mut store, &params),
-            _ => {
-                warn!(service = "sns", action = %action, "SNS action not implemented");
-                return Err(DispatchError::NotImplemented(action));
+            // Read-only ops — acquire shared (read) lock
+            "ListTopics" => {
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(xml_wrap(
+                        "ListTopics",
+                        &new_request_id(),
+                        "<Topics></Topics>",
+                    ));
+                };
+                handle_list_topics(&store, &params)
+            }
+            "GetTopicAttributes" => {
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(sns_error("NotFound", "Topic does not exist", 404));
+                };
+                handle_get_topic_attributes(&store, &params)
+            }
+            "ListSubscriptions" => {
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(xml_wrap(
+                        "ListSubscriptions",
+                        &new_request_id(),
+                        "<Subscriptions></Subscriptions>",
+                    ));
+                };
+                handle_list_subscriptions(&store, &params)
+            }
+            "ListSubscriptionsByTopic" => {
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(sns_error("NotFound", "Topic not found", 404));
+                };
+                handle_list_subscriptions_by_topic(&store, &params)
+            }
+            "GetSubscriptionAttributes" => {
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(sns_error("NotFound", "Subscription not found", 404));
+                };
+                handle_get_subscription_attributes(&store, &params)
+            }
+            // Write ops — acquire exclusive (write) lock
+            other => {
+                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                match other {
+                    "CreateTopic" => handle_create_topic(&mut store, ctx, &params),
+                    "DeleteTopic" => handle_delete_topic(&mut store, &params),
+                    "SetTopicAttributes" => handle_set_topic_attributes(&mut store, &params),
+                    "Subscribe" => handle_subscribe(&mut store, ctx, &params),
+                    "Unsubscribe" => handle_unsubscribe(&mut store, &params),
+                    "SetSubscriptionAttributes" => {
+                        handle_set_subscription_attributes(&mut store, &params)
+                    }
+                    "Publish" => handle_publish(&mut store, &params),
+                    "PublishBatch" => handle_publish_batch(&mut store, &params),
+                    _ => {
+                        warn!(service = "sns", action = %other, "SNS action not implemented");
+                        return Err(DispatchError::NotImplemented(other.to_string()));
+                    }
+                }
             }
         };
 

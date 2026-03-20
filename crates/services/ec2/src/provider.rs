@@ -127,7 +127,9 @@ impl ServiceProvider for Ec2Provider {
             // DescribeVpcs
             // ----------------------------------------------------------------
             "DescribeVpcs" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok("DescribeVpcs", &rid, "<vpcSet></vpcSet>"));
+                };
                 let items: String = store
                     .vpcs
                     .values()
@@ -202,7 +204,9 @@ impl ServiceProvider for Ec2Provider {
             // DescribeSubnets
             // ----------------------------------------------------------------
             "DescribeSubnets" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok("DescribeSubnets", &rid, "<subnetSet></subnetSet>"));
+                };
                 let items: String = store
                     .subnets
                     .values()
@@ -252,7 +256,13 @@ impl ServiceProvider for Ec2Provider {
             // DescribeSecurityGroups
             // ----------------------------------------------------------------
             "DescribeSecurityGroups" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok(
+                        "DescribeSecurityGroups",
+                        &rid,
+                        "<securityGroupInfo></securityGroupInfo>",
+                    ));
+                };
                 let items: String = store
                     .security_groups
                     .values()
@@ -336,10 +346,10 @@ impl ServiceProvider for Ec2Provider {
 
                 // Fetch vpc_id from subnet if possible
                 let vpc_id = {
-                    let store = self.store.get_or_create(account_id, region);
+                    let store = self.store.get(account_id, region);
                     store
-                        .subnets
-                        .get(&subnet_id)
+                        .as_ref()
+                        .and_then(|s| s.subnets.get(&subnet_id))
                         .map(|s| s.vpc_id.clone())
                         .unwrap_or_default()
                 };
@@ -378,7 +388,13 @@ impl ServiceProvider for Ec2Provider {
             // DescribeInstances
             // ----------------------------------------------------------------
             "DescribeInstances" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok(
+                        "DescribeInstances",
+                        &rid,
+                        "<reservationSet></reservationSet>",
+                    ));
+                };
                 let instance_items: String = store
                     .instances
                     .values()

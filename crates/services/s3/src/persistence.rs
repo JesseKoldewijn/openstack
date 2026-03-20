@@ -177,6 +177,8 @@ fn resolve_data_ref(data: &mut ObjectDataRef, base: &Path, bucket: &str, key: &s
 mod tests {
     use std::collections::HashMap;
 
+    use bytes::Bytes;
+
     use super::*;
     use crate::store::{ObjectVersion, S3Object, S3Store};
 
@@ -232,11 +234,11 @@ mod tests {
         // Relativize should not touch Inline data
         relativize_paths(&mut store, &base);
         let data = &store.objects["mybucket"]["inline-key"].versions[0].data;
-        assert_eq!(data, &ObjectDataRef::Inline(b"hello".to_vec()));
+        assert_eq!(data, &ObjectDataRef::Inline(Bytes::from_static(b"hello")));
 
         // Resolve should not touch Inline data
         resolve_and_verify_paths(&mut store, &base);
         let data = &store.objects["mybucket"]["inline-key"].versions[0].data;
-        assert_eq!(data, &ObjectDataRef::Inline(b"hello".to_vec()));
+        assert_eq!(data, &ObjectDataRef::Inline(Bytes::from_static(b"hello")));
     }
 }

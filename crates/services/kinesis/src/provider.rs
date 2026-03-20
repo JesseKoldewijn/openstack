@@ -183,7 +183,13 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
+                };
                 let stream = match store.streams.get(&stream_name) {
                     Some(s) => s,
                     None => {
@@ -224,7 +230,13 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
+                };
                 let stream = match store.streams.get(&stream_name) {
                     Some(s) => s,
                     None => {
@@ -249,7 +261,12 @@ impl ServiceProvider for KinesisProvider {
             }
 
             "ListStreams" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({
+                        "StreamNames": [],
+                        "HasMoreStreams": false,
+                    })));
+                };
                 let names: Vec<&str> = store
                     .streams
                     .values()
@@ -272,7 +289,13 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
+                };
                 let stream = match store.streams.get(&stream_name) {
                     Some(s) => s,
                     None => {
@@ -521,7 +544,13 @@ impl ServiceProvider for KinesisProvider {
                 let starting_sequence =
                     str_param(ctx, "StartingSequenceNumber").unwrap_or_default();
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
+                };
                 let stream = match store.streams.get(&stream_name) {
                     Some(s) => s,
                     None => {
@@ -598,7 +627,13 @@ impl ServiceProvider for KinesisProvider {
                     }
                 };
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {} not found", state.stream_name),
+                        400,
+                    ));
+                };
                 let stream = match store.streams.get(&state.stream_name) {
                     Some(s) => s,
                     None => {

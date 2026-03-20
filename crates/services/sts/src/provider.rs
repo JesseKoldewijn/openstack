@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::store::StsStore;
 
 pub struct StsProvider {
+    #[allow(dead_code)]
     store: Arc<AccountRegionBundle<StsStore>>,
 }
 
@@ -108,8 +109,6 @@ impl ServiceProvider for StsProvider {
         let rid = req_id();
         let account_id = &ctx.account_id;
         // STS is global — pin to us-east-1
-        let _store = self.store.get_or_create(account_id, "us-east-1");
-
         match op {
             "GetCallerIdentity" => {
                 let inner = format!(

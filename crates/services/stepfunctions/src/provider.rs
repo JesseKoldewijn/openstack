@@ -435,7 +435,13 @@ impl ServiceProvider for StepFunctionsProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "StateMachineDoesNotExist",
+                        &format!("State Machine Does Not Exist: '{arn}'"),
+                        400,
+                    ));
+                };
                 match store.state_machines.get(&arn) {
                     Some(sm) => Ok(json_ok(json!({
                         "stateMachineArn": sm.state_machine_arn,
@@ -458,7 +464,9 @@ impl ServiceProvider for StepFunctionsProvider {
             // ListStateMachines
             // ----------------------------------------------------------------
             "ListStateMachines" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "stateMachines": [] })));
+                };
                 let machines: Vec<Value> = store
                     .state_machines
                     .values()
@@ -527,7 +535,13 @@ impl ServiceProvider for StepFunctionsProvider {
                     str_param(ctx, "name").unwrap_or_else(|| Uuid::new_v4().to_string());
 
                 let definition = {
-                    let store = self.store.get_or_create(account_id, region);
+                    let Some(store) = self.store.get(account_id, region) else {
+                        return Ok(json_error(
+                            "StateMachineDoesNotExist",
+                            &format!("State machine {sm_arn} not found"),
+                            404,
+                        ));
+                    };
                     match store.state_machines.get(&sm_arn) {
                         Some(sm) => sm.definition.clone(),
                         None => {
@@ -590,7 +604,13 @@ impl ServiceProvider for StepFunctionsProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ExecutionDoesNotExist",
+                        &format!("Execution {exec_arn} not found"),
+                        404,
+                    ));
+                };
                 match store.executions.get(&exec_arn) {
                     Some(e) => {
                         let mut obj = json!({
@@ -629,7 +649,9 @@ impl ServiceProvider for StepFunctionsProvider {
             "ListExecutions" => {
                 let sm_arn = str_param(ctx, "stateMachineArn");
                 let status_filter = str_param(ctx, "statusFilter");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "executions": [] })));
+                };
                 let executions: Vec<Value> = store
                     .executions
                     .values()

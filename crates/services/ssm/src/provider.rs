@@ -145,7 +145,13 @@ impl ServiceProvider for SsmProvider {
                     Some(n) => n,
                     None => return Ok(json_error("ValidationException", "Name is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ParameterNotFound",
+                        &format!("Parameter {name} not found."),
+                        400,
+                    ));
+                };
                 match store.parameters.get(&name) {
                     None => Ok(json_error(
                         "ParameterNotFound",
@@ -163,7 +169,16 @@ impl ServiceProvider for SsmProvider {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let invalid_parameters: Vec<Value> = names
+                        .iter()
+                        .filter_map(|n| n.as_str().map(|s| json!(s)))
+                        .collect();
+                    return Ok(json_ok(json!({
+                        "Parameters": [],
+                        "InvalidParameters": invalid_parameters,
+                    })));
+                };
                 let mut parameters = Vec::new();
                 let mut invalid_parameters = Vec::new();
                 for n in &names {
@@ -190,7 +205,9 @@ impl ServiceProvider for SsmProvider {
                     .get("Recursive")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Parameters": [] })));
+                };
                 let params: Vec<Value> = store
                     .parameters
                     .values()
@@ -250,7 +267,9 @@ impl ServiceProvider for SsmProvider {
             }
 
             "DescribeParameters" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Parameters": [] })));
+                };
                 let params: Vec<Value> = store
                     .parameters
                     .values()

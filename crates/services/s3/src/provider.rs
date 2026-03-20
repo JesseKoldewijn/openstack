@@ -220,11 +220,11 @@ async fn handle_delete_bucket_async(
     };
 
     {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        if !store.bucket_exists(&bucket) {
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        if !store.as_ref().is_some_and(|s| s.bucket_exists(&bucket)) {
             return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
         }
-        if !store.is_bucket_empty(&bucket) {
+        if !store.as_ref().is_some_and(|s| s.is_bucket_empty(&bucket)) {
             return s3_error("BucketNotEmpty", "The bucket is not empty", 409);
         }
     }
@@ -394,7 +394,7 @@ async fn handle_put_object_async(
             let digest = hashing_reader.finalize();
             let etag = format!("\"{}\"", hex::encode(digest));
             let size = body_bytes.len() as u64;
-            (etag, size, ObjectDataRef::Inline(body_bytes))
+            (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
         } else {
             // Large object: run sync I/O in spawn_blocking to avoid blocking
             // tokio worker threads during the copy loop.  A 512 KiB buffer
@@ -441,7 +441,7 @@ async fn handle_put_object_async(
         let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&body_bytes)));
         let size = body_bytes.len() as u64;
         let object_data = if size <= INLINE_OBJECT_THRESHOLD {
-            ObjectDataRef::Inline(body_bytes)
+            ObjectDataRef::Inline(Bytes::from(body_bytes))
         } else {
             let file_path = match file_store
                 .write_object(
@@ -512,7 +512,9 @@ async fn handle_get_object_async(
 
     // Short-lived guard to read version metadata
     let version_info = {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else {
+            return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+        };
 
         if !store.bucket_exists(&bucket) {
             return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
@@ -572,7 +574,7 @@ async fn handle_get_object_async(
             }
 
             let body = match data {
-                ObjectDataRef::Inline(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
+                ObjectDataRef::Inline(bytes) => ResponseBody::Buffered(bytes),
                 ObjectDataRef::FileRef(path) => {
                     // For small objects read the entire file into memory and
                     // return a buffered response — this avoids the spawn_blocking
@@ -670,8 +672,8 @@ async fn handle_delete_object_async(
     let key = key_from_path(&ctx.path);
 
     {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        if !store.bucket_exists(&bucket) {
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        if !store.as_ref().is_some_and(|s| s.bucket_exists(&bucket)) {
             return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
         }
     }
@@ -732,8 +734,8 @@ async fn handle_delete_objects_async(
     };
 
     {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        if !store.bucket_exists(&bucket) {
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        if !store.as_ref().is_some_and(|s| s.bucket_exists(&bucket)) {
             return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
         }
     }
@@ -824,7 +826,9 @@ async fn handle_copy_object_async(
 
     // Read source object metadata (short-lived guard)
     let src_info = {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else {
+            return s3_error("NoSuchBucket", "Destination bucket does not exist", 404);
+        };
 
         if !store.bucket_exists(&dest_bucket) {
             return s3_error("NoSuchBucket", "Destination bucket does not exist", 404);
@@ -849,11 +853,12 @@ async fn handle_copy_object_async(
 
     // Determine versioning for destination
     let versioning_enabled = {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        store
-            .get_bucket(&dest_bucket)
-            .map(|b| b.versioning.as_str() == "Enabled")
-            .unwrap_or(false)
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        store.as_ref().is_some_and(|s| {
+            s.get_bucket(&dest_bucket)
+                .map(|b| b.versioning.as_str() == "Enabled")
+                .unwrap_or(false)
+        })
     };
 
     let dest_version_id = if versioning_enabled {
@@ -893,7 +898,7 @@ async fn handle_copy_object_async(
             if src_size <= INLINE_OBJECT_THRESHOLD {
                 // Small file-backed object — read into memory and keep inline.
                 match tokio::fs::read(_path).await {
-                    Ok(bytes) => ObjectDataRef::Inline(bytes),
+                    Ok(bytes) => ObjectDataRef::Inline(Bytes::from(bytes)),
                     Err(e) => {
                         warn!(error = %e, path = %_path.display(), "Failed to read source object file for copy");
                         return s3_error("InternalError", "Failed to copy object", 500);
@@ -1271,7 +1276,9 @@ async fn handle_upload_part_async(
 
     // Look up the multipart upload to get bucket/key (short-lived guard)
     let (bucket, key) = {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else {
+            return s3_error("NoSuchUpload", "The specified upload does not exist", 404);
+        };
         match store.get_multipart_upload(&upload_id) {
             None => return s3_error("NoSuchUpload", "The specified upload does not exist", 404),
             Some(u) => (u.bucket.clone(), u.key.clone()),
@@ -1304,7 +1311,7 @@ async fn handle_upload_part_async(
             let digest = hashing_reader.finalize();
             let etag = format!("\"{}\"", hex::encode(digest));
             let size = data.len() as u64;
-            (etag, size, ObjectDataRef::Inline(data))
+            (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
         } else {
             let part_version_id = format!("part-{}", part_number);
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
@@ -1335,7 +1342,7 @@ async fn handle_upload_part_async(
         let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&data)));
         let size = data.len() as u64;
         let part_data = if size <= INLINE_OBJECT_THRESHOLD {
-            ObjectDataRef::Inline(data)
+            ObjectDataRef::Inline(Bytes::from(data))
         } else {
             let part_version_id = format!("part-{}", part_number);
             let file_path = match file_store
@@ -1414,7 +1421,9 @@ async fn handle_complete_multipart_upload_async(
 
     // Gather part file paths and metadata from the store (short-lived guard)
     let upload_info = {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else {
+            return s3_error("NoSuchUpload", "The specified upload does not exist", 404);
+        };
         match store.get_multipart_upload(&upload_id) {
             None => return s3_error("NoSuchUpload", "The specified upload does not exist", 404),
             Some(u) => {
@@ -1438,11 +1447,12 @@ async fn handle_complete_multipart_upload_async(
 
     // Determine versioning
     let versioning_enabled = {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        store
-            .get_bucket(&bucket)
-            .map(|b| b.versioning.as_str() == "Enabled")
-            .unwrap_or(false)
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        store.as_ref().is_some_and(|s| {
+            s.get_bucket(&bucket)
+                .map(|b| b.versioning.as_str() == "Enabled")
+                .unwrap_or(false)
+        })
     };
 
     let version_id = if versioning_enabled {
@@ -1480,7 +1490,7 @@ async fn handle_complete_multipart_upload_async(
                 let _ = tokio::fs::remove_file(path).await;
             }
         }
-        ObjectDataRef::Inline(combined)
+        ObjectDataRef::Inline(Bytes::from(combined))
     } else {
         // Write combined data to final object file
         let file_path = match file_store
@@ -1967,13 +1977,21 @@ impl ServiceProvider for S3Provider {
         // X-Amz-Target — we derive the operation from method + path + query params.
         let op = derive_s3_operation(ctx);
 
-        // For read operations we use get_or_create (RefMut derefs to &S3Store).
-        // Mutations need a separate block to avoid borrow issues.
+        // For read operations we use get() (read lock); mutations use get_or_create() (write lock).
         let response = match op.as_str() {
             // ---- Bucket ops ----
             "ListBuckets" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_list_buckets(&store, ctx)
+                if let Some(store) = self.store.get(&ctx.account_id, &ctx.region) {
+                    handle_list_buckets(&store, ctx)
+                } else {
+                    // No state yet for this account — return empty bucket list.
+                    xml_ok(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+<Owner><ID>000000000000</ID><DisplayName>localstack</DisplayName></Owner>\
+<Buckets></Buckets></ListAllMyBucketsResult>",
+                    )
+                }
             }
             "CreateBucket" => {
                 let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
@@ -1981,18 +1999,40 @@ impl ServiceProvider for S3Provider {
             }
             "DeleteBucket" => handle_delete_bucket_async(&self.store, self.file_store(), ctx).await,
             "HeadBucket" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
+                    return Ok(s3_bucket_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        &bucket,
+                        404,
+                    ));
+                };
                 handle_head_bucket(&store, ctx)
             }
             "GetBucketLocation" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
+                    return Ok(s3_bucket_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        &bucket,
+                        404,
+                    ));
+                };
                 handle_get_bucket_location(&store, ctx)
             }
             // ---- Object ops ----
             "PutObject" => handle_put_object_async(&self.store, self.file_store(), ctx).await,
             "GetObject" => handle_get_object_async(&self.store, ctx).await,
             "HeadObject" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_head_object(&store, ctx)
             }
             "DeleteObject" => handle_delete_object_async(&self.store, ctx).await,
@@ -2000,11 +2040,23 @@ impl ServiceProvider for S3Provider {
             "CopyObject" => handle_copy_object_async(&self.store, self.file_store(), ctx).await,
             // ---- Listing ----
             "ListObjectsV2" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_list_objects_v2(&store, ctx)
             }
             "ListObjects" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_list_objects(&store, ctx)
             }
             // ---- Multipart ----
@@ -2021,12 +2073,24 @@ impl ServiceProvider for S3Provider {
                 handle_abort_multipart_upload(&mut store, ctx)
             }
             "ListMultipartUploads" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_list_multipart_uploads(&store, ctx)
             }
             // ---- ACL ----
             "GetBucketAcl" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_bucket_acl(&store, ctx)
             }
             "PutBucketAcl" => {
@@ -2034,16 +2098,34 @@ impl ServiceProvider for S3Provider {
                 handle_put_bucket_acl(&mut store, ctx)
             }
             "GetObjectAcl" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_object_acl(&store, ctx)
             }
             "PutObjectAcl" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_put_object_acl(&store, ctx)
             }
             // ---- Policy ----
             "GetBucketPolicy" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_bucket_policy(&store, ctx)
             }
             "PutBucketPolicy" => {
@@ -2056,7 +2138,13 @@ impl ServiceProvider for S3Provider {
             }
             // ---- Versioning ----
             "GetBucketVersioning" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_bucket_versioning(&store, ctx)
             }
             "PutBucketVersioning" => {
@@ -2064,12 +2152,24 @@ impl ServiceProvider for S3Provider {
                 handle_put_bucket_versioning(&mut store, ctx)
             }
             "ListObjectVersions" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_list_object_versions(&store, ctx)
             }
             // ---- Notifications ----
             "GetBucketNotificationConfiguration" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_bucket_notification(&store, ctx)
             }
             "PutBucketNotificationConfiguration" => {

@@ -140,14 +140,22 @@ impl ServiceProvider for EventBridgeProvider {
             // ListEventBuses
             // ----------------------------------------------------------------
             "ListEventBuses" => {
-                let store = self.store.get_or_create(account_id, region);
-                let mut buses: Vec<Value> = store
-                    .buses
-                    .values()
-                    .map(|b| json!({ "Name": b.name, "Arn": b.arn }))
-                    .collect();
+                let store_opt = self.store.get(account_id, region);
+                let mut buses: Vec<Value> = store_opt
+                    .as_ref()
+                    .map(|s| {
+                        s.buses
+                            .values()
+                            .map(|b| json!({ "Name": b.name, "Arn": b.arn }))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 // Always include default
-                if !store.buses.contains_key("default") {
+                let has_default = store_opt
+                    .as_ref()
+                    .map(|s| s.buses.contains_key("default"))
+                    .unwrap_or(false);
+                if !has_default {
                     buses.push(json!({
                         "Name": "default",
                         "Arn": format!("arn:aws:events:{region}:{account_id}:event-bus/default"),
@@ -219,7 +227,9 @@ impl ServiceProvider for EventBridgeProvider {
             "ListRules" => {
                 let event_bus_name =
                     str_param(ctx, "EventBusName").unwrap_or_else(|| "default".to_string());
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Rules": [] })));
+                };
                 let rules: Vec<Value> = store
                     .rules
                     .values()
@@ -340,7 +350,9 @@ impl ServiceProvider for EventBridgeProvider {
                     Some(n) => n,
                     None => return Ok(json_error("ValidationError", "Rule is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Targets": [] })));
+                };
                 let targets: Vec<Value> = store
                     .rules
                     .get(&rule)
@@ -367,7 +379,13 @@ impl ServiceProvider for EventBridgeProvider {
                     Some(n) => n,
                     None => return Ok(json_error("ValidationError", "Name is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Rule {name} not found"),
+                        404,
+                    ));
+                };
                 match store.rules.get(&name) {
                     Some(r) => {
                         let mut obj = json!({

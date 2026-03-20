@@ -174,7 +174,9 @@ impl ServiceProvider for ApiGatewayProvider {
             // GetRestApis  GET /restapis
             // ----------------------------------------------------------------
             "GetRestApis" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "items": [] })));
+                };
                 let apis: Vec<Value> = store
                     .apis
                     .values()
@@ -193,7 +195,13 @@ impl ServiceProvider for ApiGatewayProvider {
                         return Ok(json_error("BadRequestException", "restApiId required", 400));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        "Invalid Rest API Id specified",
+                        404,
+                    ));
+                };
                 match store.apis.get(&api_id) {
                     Some(a) => Ok(json_ok(
                         json!({ "id": a.id, "name": a.name, "createdDate": a.created.timestamp() }),
@@ -252,10 +260,10 @@ impl ServiceProvider for ApiGatewayProvider {
                 };
 
                 let resource_id = short_id();
-                let store_ref = self.store.get_or_create(account_id, region);
+                let store_ref = self.store.get(account_id, region);
                 let parent_path = parent_id
                     .as_deref()
-                    .and_then(|pid| store_ref.resources.get(pid))
+                    .and_then(|pid| store_ref.as_ref().and_then(|s| s.resources.get(pid)))
                     .map(|r| r.path.clone())
                     .unwrap_or_else(|| "/".to_string());
                 drop(store_ref);
@@ -303,7 +311,9 @@ impl ServiceProvider for ApiGatewayProvider {
                         return Ok(json_error("BadRequestException", "restApiId required", 400));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "items": [] })));
+                };
                 let resources: Vec<Value> = store
                     .resources
                     .values()
@@ -488,7 +498,9 @@ impl ServiceProvider for ApiGatewayProvider {
                         return Ok(json_error("BadRequestException", "restApiId required", 400));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "items": [] })));
+                };
                 let deployments: Vec<Value> = store
                     .deployments
                     .values()
@@ -508,7 +520,9 @@ impl ServiceProvider for ApiGatewayProvider {
                         return Ok(json_error("BadRequestException", "restApiId required", 400));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "item": [] })));
+                };
                 let stages: Vec<Value> = store
                     .stages
                     .iter()
@@ -549,7 +563,13 @@ impl ServiceProvider for ApiGatewayProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        "Invalid resource identifier specified",
+                        404,
+                    ));
+                };
                 if let Some(resource) = store.resources.get(&resource_id) {
                     if let Some(method) = resource.methods.get(&http_method) {
                         Ok(json_ok(json!({

@@ -204,7 +204,10 @@ impl ServiceProvider for RedshiftProvider {
             // DescribeClusters
             // ----------------------------------------------------------------
             "DescribeClusters" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let inner = "<Clusters></Clusters>";
+                    return Ok(xml_resp("DescribeClusters", &rid, inner));
+                };
                 let clusters_xml: String = store
                     .clusters
                     .values()

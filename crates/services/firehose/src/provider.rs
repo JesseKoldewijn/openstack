@@ -202,7 +202,13 @@ impl ServiceProvider for FirehoseProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Firehose {stream_name} under account {account_id} not found."),
+                        400,
+                    ));
+                };
                 match store.streams.get(&stream_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -216,7 +222,12 @@ impl ServiceProvider for FirehoseProvider {
             }
 
             "ListDeliveryStreams" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({
+                        "DeliveryStreamNames": [],
+                        "HasMoreDeliveryStreams": false,
+                    })));
+                };
                 let names: Vec<&str> = store.streams.values().map(|s| s.name.as_str()).collect();
                 Ok(json_ok(json!({
                     "DeliveryStreamNames": names,

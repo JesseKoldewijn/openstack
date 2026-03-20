@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use digest::Digest as _;
 use serde::{Deserialize, Serialize};
@@ -16,8 +17,9 @@ use uuid::Uuid;
 /// `FileRef` points to a file on disk managed by [`ObjectFileStore`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObjectDataRef {
-    /// Data stored inline in memory.
-    Inline(Vec<u8>),
+    /// Data stored inline in memory.  `Bytes` is reference-counted so
+    /// clone is O(1) — no deep copy under the DashMap lock.
+    Inline(Bytes),
     /// Data stored on disk at the given path.
     FileRef(PathBuf),
 }
@@ -47,7 +49,7 @@ impl ObjectDataRef {
 
 impl Default for ObjectDataRef {
     fn default() -> Self {
-        ObjectDataRef::Inline(Vec::new())
+        ObjectDataRef::Inline(Bytes::new())
     }
 }
 
@@ -59,6 +61,7 @@ mod serde_object_data_ref {
     use std::path::PathBuf;
 
     use base64::{Engine, engine::general_purpose::STANDARD};
+    use bytes::Bytes;
     use serde::Deserialize;
     use serde::de::{self, Deserializer};
     use serde::ser::Serializer;
@@ -89,7 +92,7 @@ mod serde_object_data_ref {
         match &value {
             serde_json::Value::String(b64) => {
                 let bytes = STANDARD.decode(b64).map_err(de::Error::custom)?;
-                Ok(ObjectDataRef::Inline(bytes))
+                Ok(ObjectDataRef::Inline(Bytes::from(bytes)))
             }
             serde_json::Value::Object(map) => {
                 if let Some(serde_json::Value::String(path)) = map.get("file_ref") {
@@ -192,7 +195,7 @@ impl ObjectVersion {
             size,
             metadata,
             acl: "private".to_string(),
-            data: ObjectDataRef::Inline(data),
+            data: ObjectDataRef::Inline(Bytes::from(data)),
             delete_marker: false,
         }
     }
@@ -374,7 +377,7 @@ impl S3Store {
 
         let version = match &data {
             ObjectDataRef::Inline(bytes) => {
-                ObjectVersion::new(bytes.clone(), content_type, metadata, versioning)
+                ObjectVersion::new(bytes.to_vec(), content_type, metadata, versioning)
             }
             ObjectDataRef::FileRef(path) => {
                 // For file-backed data we cannot compute etag here without
@@ -470,7 +473,7 @@ impl S3Store {
                 size: 0,
                 metadata: HashMap::new(),
                 acl: String::new(),
-                data: ObjectDataRef::Inline(Vec::new()),
+                data: ObjectDataRef::Inline(Bytes::new()),
                 delete_marker: true,
             };
             let obj = objects.entry(key.to_string()).or_insert_with(|| S3Object {

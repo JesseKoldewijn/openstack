@@ -211,7 +211,17 @@ impl ServiceProvider for Route53Provider {
             // ListHostedZones  GET /2013-04-01/hostedzone
             // ----------------------------------------------------------------
             "ListHostedZones" => {
-                let store = self.store.get_or_create(account_id, ROUTE53_REGION);
+                let Some(store) = self.store.get(account_id, ROUTE53_REGION) else {
+                    let body = format!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ListHostedZonesResponse xmlns=\"{ROUTE53_NS}\">\
+<HostedZones></HostedZones>\
+<IsTruncated>false</IsTruncated>\
+<MaxItems>100</MaxItems>\
+</ListHostedZonesResponse>"
+                    );
+                    return Ok(xml_ok(body));
+                };
                 let zones_xml: String = store
                     .zones
                     .values()
@@ -298,7 +308,13 @@ impl ServiceProvider for Route53Provider {
                     .unwrap_or("")
                     .to_string();
 
-                let store = self.store.get_or_create(account_id, ROUTE53_REGION);
+                let Some(store) = self.store.get(account_id, ROUTE53_REGION) else {
+                    return Ok(xml_error(
+                        "NoSuchHostedZone",
+                        &format!("No hosted zone found with ID: {zone_id}"),
+                        404,
+                    ));
+                };
                 if !store.zones.contains_key(&zone_id) {
                     return Ok(xml_error(
                         "NoSuchHostedZone",

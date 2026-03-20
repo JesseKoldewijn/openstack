@@ -456,7 +456,17 @@ impl ServiceProvider for CloudFormationProvider {
             // ----------------------------------------------------------------
             "DescribeStacks" => {
                 let stack_name = str_param(ctx, "StackName");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<DescribeStacksResponse xmlns="https://cloudformation.amazonaws.com/doc/2010-05-15/">
+  <DescribeStacksResult>
+    <Stacks></Stacks>
+  </DescribeStacksResult>
+</DescribeStacksResponse>"#
+                            .to_string(),
+                    ));
+                };
 
                 let stacks_xml: String = store
                     .stacks
@@ -479,7 +489,17 @@ impl ServiceProvider for CloudFormationProvider {
             // ListStacks
             // ----------------------------------------------------------------
             "ListStacks" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListStacksResponse xmlns="https://cloudformation.amazonaws.com/doc/2010-05-15/">
+  <ListStacksResult>
+    <StackSummaries></StackSummaries>
+  </ListStacksResult>
+</ListStacksResponse>"#
+                            .to_string(),
+                    ));
+                };
                 let summaries: String = store
                     .stacks
                     .values()
@@ -517,7 +537,13 @@ impl ServiceProvider for CloudFormationProvider {
                     Some(n) => n.to_string(),
                     None => return Ok(xml_error("ValidationError", "StackName is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_error(
+                        "ValidationError",
+                        &format!("Stack [{stack_name}] does not exist"),
+                        400,
+                    ));
+                };
                 let resources_xml = match store.stacks.get(&stack_name) {
                     Some(stack) => stack
                         .resources
@@ -562,7 +588,13 @@ impl ServiceProvider for CloudFormationProvider {
                     Some(n) => n.to_string(),
                     None => return Ok(xml_error("ValidationError", "StackName is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_error(
+                        "ValidationError",
+                        &format!("Stack [{stack_name}] does not exist"),
+                        400,
+                    ));
+                };
                 match store.stacks.get(&stack_name) {
                     Some(stack) => {
                         let template_str =

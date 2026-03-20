@@ -146,7 +146,13 @@ impl ServiceProvider for AcmProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Certificate with arn {arn} not found in account {account_id}"),
+                        400,
+                    ));
+                };
                 match store.certificates.get(&arn) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -158,7 +164,9 @@ impl ServiceProvider for AcmProvider {
             }
 
             "ListCertificates" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "CertificateSummaryList": [] })));
+                };
                 let certs: Vec<Value> = store
                     .certificates
                     .values()
@@ -244,7 +252,13 @@ impl ServiceProvider for AcmProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Certificate {arn} not found"),
+                        400,
+                    ));
+                };
                 match store.certificates.get(&arn) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",

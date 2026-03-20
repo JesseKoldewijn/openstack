@@ -206,7 +206,16 @@ impl ServiceProvider for CloudWatchProvider {
             "ListMetrics" => {
                 let namespace_filter = str_param(ctx, "Namespace");
                 let metric_name_filter = str_param(ctx, "MetricName");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    if is_query_protocol_request(ctx) {
+                        return Ok(query_ok(
+                            "ListMetrics",
+                            "<ListMetricsResult><Metrics></Metrics></ListMetricsResult>",
+                        ));
+                    } else {
+                        return Ok(json_ok(json!({ "Metrics": [] })));
+                    }
+                };
 
                 let mut seen = std::collections::HashSet::new();
                 let metrics: Vec<Value> = store
@@ -269,7 +278,9 @@ impl ServiceProvider for CloudWatchProvider {
             "GetMetricStatistics" => {
                 let namespace = str_param(ctx, "Namespace").unwrap_or_default();
                 let metric_name = str_param(ctx, "MetricName").unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Datapoints": [], "Label": metric_name })));
+                };
 
                 let values: Vec<f64> = store
                     .metrics
@@ -444,7 +455,9 @@ impl ServiceProvider for CloudWatchProvider {
                             .collect()
                     })
                     .unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "MetricAlarms": [] })));
+                };
                 let alarms: Vec<Value> = store
                     .alarms
                     .values()
@@ -595,7 +608,9 @@ impl ServiceProvider for CloudWatchProvider {
             // ----------------------------------------------------------------
             "DescribeLogGroups" => {
                 let prefix = str_param(ctx, "logGroupNamePrefix");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "logGroups": [] })));
+                };
                 let groups: Vec<Value> = store
                     .log_groups
                     .values()
@@ -689,7 +704,9 @@ impl ServiceProvider for CloudWatchProvider {
                     }
                 };
                 let prefix = str_param(ctx, "logStreamNamePrefix");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "logStreams": [] })));
+                };
                 let streams: Vec<Value> = store
                     .log_streams
                     .values()
@@ -806,7 +823,14 @@ impl ServiceProvider for CloudWatchProvider {
                     }
                 };
                 let key = (log_group_name, log_stream_name);
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let token = Uuid::new_v4().to_string();
+                    return Ok(json_ok(json!({
+                        "events": [],
+                        "nextForwardToken": token,
+                        "nextBackwardToken": token,
+                    })));
+                };
                 let events: Vec<Value> = store
                     .log_events
                     .get(&key)
@@ -845,7 +869,9 @@ impl ServiceProvider for CloudWatchProvider {
                     }
                 };
                 let filter_pattern = str_param(ctx, "filterPattern").unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "events": [] })));
+                };
                 let mut filtered_events: Vec<Value> = Vec::new();
                 for ((group, stream_name), events) in &store.log_events {
                     if group != &log_group_name {

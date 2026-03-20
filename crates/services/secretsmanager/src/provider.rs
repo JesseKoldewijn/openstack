@@ -113,12 +113,12 @@ impl ServiceProvider for SecretsManagerProvider {
                 let version_id = Uuid::new_v4().to_string();
 
                 {
-                    let store = self.store.get_or_create(account_id, region);
-                    if store
-                        .secrets
-                        .get(&name)
-                        .map(|s| !s.deleted)
-                        .unwrap_or(false)
+                    if let Some(store) = self.store.get(account_id, region)
+                        && store
+                            .secrets
+                            .get(&name)
+                            .map(|s| !s.deleted)
+                            .unwrap_or(false)
                     {
                         return Ok(json_error(
                             "ResourceExistsException",
@@ -166,7 +166,13 @@ impl ServiceProvider for SecretsManagerProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Secrets Manager can't find the specified secret.",
+                        400,
+                    ));
+                };
                 let secret = store.secrets.get(&secret_id).or_else(|| {
                     // Try ARN lookup
                     store.secrets.values().find(|s| s.arn == secret_id)
@@ -324,7 +330,13 @@ impl ServiceProvider for SecretsManagerProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Secret {secret_id} not found"),
+                        400,
+                    ));
+                };
                 let secret = store
                     .secrets
                     .get(&secret_id)
@@ -340,7 +352,9 @@ impl ServiceProvider for SecretsManagerProvider {
             }
 
             "ListSecrets" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "SecretList": [] })));
+                };
                 let secrets: Vec<Value> = store
                     .secrets
                     .values()

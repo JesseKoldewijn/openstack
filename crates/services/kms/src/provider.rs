@@ -143,7 +143,15 @@ impl ServiceProvider for KmsProvider {
                     Some(k) => k,
                     None => return Ok(json_error("ValidationException", "KeyId is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        &format!(
+                            "Key 'arn:aws:kms:{region}:{account_id}:key/{key_id}' does not exist"
+                        ),
+                        400,
+                    ));
+                };
                 match store.resolve_key(&key_id) {
                     None => Ok(json_error(
                         "NotFoundException",
@@ -157,7 +165,9 @@ impl ServiceProvider for KmsProvider {
             }
 
             "ListKeys" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Keys": [], "Truncated": false })));
+                };
                 let keys: Vec<Value> = store
                     .keys
                     .values()
@@ -277,7 +287,9 @@ impl ServiceProvider for KmsProvider {
             }
 
             "ListAliases" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Aliases": [], "Truncated": false })));
+                };
                 let aliases: Vec<Value> = store
                     .alias_to_key
                     .iter()
@@ -317,7 +329,13 @@ impl ServiceProvider for KmsProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        &format!("Invalid keyId {key_id}"),
+                        404,
+                    ));
+                };
                 let key = match store.resolve_key(&key_id) {
                     None => {
                         return Ok(json_error(
@@ -366,7 +384,13 @@ impl ServiceProvider for KmsProvider {
                 let mut parts = envelope.splitn(2, ':');
                 let key_id = parts.next().unwrap_or("").to_string();
                 let plaintext_b64 = parts.next().unwrap_or("").to_string();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        &format!("Invalid keyId {key_id}"),
+                        404,
+                    ));
+                };
                 let key = match store.resolve_key(&key_id) {
                     None => {
                         return Ok(json_error(
@@ -392,7 +416,13 @@ impl ServiceProvider for KmsProvider {
                     Some(k) => k,
                     None => return Ok(json_error("ValidationException", "KeyId is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        &format!("Invalid keyId {key_id}"),
+                        404,
+                    ));
+                };
                 let key = match store.resolve_key(&key_id) {
                     None => {
                         return Ok(json_error(
@@ -439,9 +469,10 @@ impl ServiceProvider for KmsProvider {
             "Sign" => {
                 // Stub: return a fake signature
                 let key_id = str_param(ctx, "KeyId").unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let store = self.store.get(account_id, region);
                 let key_arn = store
-                    .resolve_key(&key_id)
+                    .as_ref()
+                    .and_then(|s| s.resolve_key(&key_id))
                     .map(|k| k.arn.clone())
                     .unwrap_or_else(|| format!("arn:aws:kms:{region}:{account_id}:key/{key_id}"));
                 let sig = B64.encode(rand_hex(64).as_bytes());
@@ -455,9 +486,10 @@ impl ServiceProvider for KmsProvider {
             "Verify" => {
                 // Stub: always return valid
                 let key_id = str_param(ctx, "KeyId").unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let store = self.store.get(account_id, region);
                 let key_arn = store
-                    .resolve_key(&key_id)
+                    .as_ref()
+                    .and_then(|s| s.resolve_key(&key_id))
                     .map(|k| k.arn.clone())
                     .unwrap_or_else(|| format!("arn:aws:kms:{region}:{account_id}:key/{key_id}"));
                 Ok(json_ok(json!({
