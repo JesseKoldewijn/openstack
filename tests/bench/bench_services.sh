@@ -499,12 +499,12 @@ resolve_profile() {
     default)
       PROFILE_SERVICES="$CORE_SERVICES"
       PROFILE_REQUESTS=100
-      PROFILE_CONCURRENCY=2
+      PROFILE_CONCURRENCY=6
       ;;
     stress)
       PROFILE_SERVICES="$CORE_SERVICES"
       PROFILE_REQUESTS=1000
-      PROFILE_CONCURRENCY=6
+      PROFILE_CONCURRENCY=20
       ;;
     *)
       echo "ERROR: Unknown profile '$PROFILE'. Use default or stress." >&2
@@ -752,7 +752,6 @@ update_results \
 # ─────────────────────────────────────────────────────────────────────────────
 
 if is_active "s3"; then
-  SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "S3 (REST-XML)"
 
   # Moto's multi-service standalone server needs a Host header to route
@@ -763,40 +762,137 @@ if is_active "s3"; then
   # a static dummy value works fine.
   MOTO_EXTRA=(-H "Host: s3.amazonaws.com" -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=dummy")
 
-  # Seed: create bucket (each target independently; only openstack is required)
-  if seed_all_targets PUT \
-       "$OS_BASE/bench-bucket-$$" \
-       "$LS_BASE/bench-bucket-$$" \
-       "$MOTO_BASE/bench-bucket-$$"; then
-
-    # PutObject
-    bench_targets "s3" "put_object" PUT \
-      "$OS_BASE/bench-bucket-$$/testkey" \
-      "$LS_BASE/bench-bucket-$$/testkey" \
-      "$MOTO_BASE/bench-bucket-$$/testkey" \
-      -H "Content-Type: application/octet-stream" \
-      -d "benchmark-payload-data-1234567890"
-
-    # GetObject
-    bench_targets "s3" "get_object" GET \
-      "$OS_BASE/bench-bucket-$$/testkey" \
-      "$LS_BASE/bench-bucket-$$/testkey" \
-      "$MOTO_BASE/bench-bucket-$$/testkey"
-
-    # HeadObject
-    bench_targets "s3" "head_object" HEAD \
-      "$OS_BASE/bench-bucket-$$/testkey" \
-      "$LS_BASE/bench-bucket-$$/testkey" \
-      "$MOTO_BASE/bench-bucket-$$/testkey"
-
-    # ListObjectsV2
-    bench_targets "s3" "list_objects_v2" GET \
-      "$OS_BASE/bench-bucket-$$?list-type=2" \
-      "$LS_BASE/bench-bucket-$$?list-type=2" \
-      "$MOTO_BASE/bench-bucket-$$?list-type=2"
+  # Pre-flight: verify enough disk for temp payload files (~1.5 GB total).
+  # GitHub ubuntu-latest runners have ~14 GB free; abort early rather than
+  # silently producing partial results on constrained environments.
+  S3_TMPDIR=$(mktemp -d)
+  _s3_avail_kb=$(df -k "$S3_TMPDIR" 2>/dev/null | awk 'NR==2{print $4}')
+  _s3_avail_gb=$(( ${_s3_avail_kb:-0} / 1024 / 1024 ))
+  if [[ $_s3_avail_gb -lt 2 ]]; then
+    log "  WARN: Only ${_s3_avail_gb} GB available at $S3_TMPDIR; need ≥2 GB for S3 temp files"
+    skip_service "s3" "Insufficient disk space (${_s3_avail_gb} GB available, 2 GB required)"
+    rm -rf "$S3_TMPDIR"
+    MOTO_EXTRA=()
   else
-    skip_service "s3" "Failed to create seed bucket"
-  fi
+
+    # Generate payload files once; dd from /dev/urandom fills with random bytes.
+    # Sizes cover realistic single-part S3 object categories:
+    #   1MB  — small objects (configs, thumbnails, JSON)
+    #   10MB — medium objects (PDFs, packages, images)
+    #   50MB — large objects (archives, datasets)
+    #   100MB — max realistic single-part upload (videos, model weights)
+    log "  Generating S3 payload files in $S3_TMPDIR (${_s3_avail_gb} GB available)..."
+    dd if=/dev/urandom of="$S3_TMPDIR/1mb.bin"   bs=1M count=1   status=none
+    dd if=/dev/urandom of="$S3_TMPDIR/10mb.bin"  bs=1M count=10  status=none
+    dd if=/dev/urandom of="$S3_TMPDIR/50mb.bin"  bs=1M count=50  status=none
+    dd if=/dev/urandom of="$S3_TMPDIR/100mb.bin" bs=1M count=100 status=none
+
+    # Seed: create bucket once (each target independently; only openstack is required)
+    SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+    if seed_all_targets PUT \
+         "$OS_BASE/bench-bucket-$$" \
+         "$LS_BASE/bench-bucket-$$" \
+         "$MOTO_BASE/bench-bucket-$$"; then
+
+      # Benchmark each size tier independently.
+      # Request counts and concurrency are capped per tier to stay within the
+      # GitHub runner disk/memory budget (14 GB disk, 7 GB RAM, 4 GB per container).
+      #
+      # Tier  | default reqs | stress reqs | max concurrency
+      # 1MB   |     100      |    1000     | profile default
+      # 10MB  |      50      |     200     | profile default
+      # 50MB  |      20      |      60     | min(profile, 4)
+      # 100MB |      10      |      20     | min(profile, 2)
+
+      for _s3_tier in 1mb 10mb 50mb 100mb; do
+        _s3_file="$S3_TMPDIR/${_s3_tier}.bin"
+        _s3_key="testobj-${_s3_tier}"
+
+        # Save profile-level values; restore after each tier
+        _s3_saved_req=$REQ_COUNT
+        _s3_saved_conc=$CONC
+
+        case "$_s3_tier" in
+          1mb)
+            REQ_COUNT=$( [[ "$PROFILE" == "stress" ]] && echo 1000 || echo 100 )
+            # Concurrency unchanged — use profile default
+            ;;
+          10mb)
+            REQ_COUNT=$( [[ "$PROFILE" == "stress" ]] && echo 200  || echo 50  )
+            # Concurrency unchanged — use profile default
+            ;;
+          50mb)
+            REQ_COUNT=$( [[ "$PROFILE" == "stress" ]] && echo 60   || echo 20  )
+            CONC=$(( CONC < 4 ? CONC : 4 ))
+            ;;
+          100mb)
+            REQ_COUNT=$( [[ "$PROFILE" == "stress" ]] && echo 20   || echo 10  )
+            CONC=$(( CONC < 2 ? CONC : 2 ))
+            ;;
+        esac
+
+        # Seed object for this tier on each active target
+        SEED_OS=0; SEED_LS=0; SEED_MOTO=0
+        seed_request "os" PUT "$OS_BASE/bench-bucket-$$/$_s3_key" \
+          -H "Content-Type: application/octet-stream" --data-binary "@$_s3_file" \
+          && SEED_OS=1 || true
+        if target_active ls; then
+          seed_request "ls" PUT "$LS_BASE/bench-bucket-$$/$_s3_key" \
+            -H "Content-Type: application/octet-stream" --data-binary "@$_s3_file" \
+            && SEED_LS=1 || true
+        fi
+        if target_active moto; then
+          seed_request "moto" PUT "$MOTO_BASE/bench-bucket-$$/$_s3_key" \
+            -H "Content-Type: application/octet-stream" --data-binary "@$_s3_file" \
+            "${MOTO_EXTRA[@]}" && SEED_MOTO=1 || true
+        fi
+
+        # PutObject — body from file via -D (oha) or -d @file (hey)
+        if [[ "$BENCH_TOOL" == "oha" ]]; then
+          bench_targets "s3" "put_object_${_s3_tier}" PUT \
+            "$OS_BASE/bench-bucket-$$/$_s3_key" \
+            "$LS_BASE/bench-bucket-$$/$_s3_key" \
+            "$MOTO_BASE/bench-bucket-$$/$_s3_key" \
+            -H "Content-Type: application/octet-stream" \
+            -D "$_s3_file"
+        else
+          bench_targets "s3" "put_object_${_s3_tier}" PUT \
+            "$OS_BASE/bench-bucket-$$/$_s3_key" \
+            "$LS_BASE/bench-bucket-$$/$_s3_key" \
+            "$MOTO_BASE/bench-bucket-$$/$_s3_key" \
+            -H "Content-Type: application/octet-stream" \
+            -d "@$_s3_file"
+        fi
+
+        # GetObject
+        bench_targets "s3" "get_object_${_s3_tier}" GET \
+          "$OS_BASE/bench-bucket-$$/$_s3_key" \
+          "$LS_BASE/bench-bucket-$$/$_s3_key" \
+          "$MOTO_BASE/bench-bucket-$$/$_s3_key"
+
+        # HeadObject
+        bench_targets "s3" "head_object_${_s3_tier}" HEAD \
+          "$OS_BASE/bench-bucket-$$/$_s3_key" \
+          "$LS_BASE/bench-bucket-$$/$_s3_key" \
+          "$MOTO_BASE/bench-bucket-$$/$_s3_key"
+
+        # ListObjectsV2  (size-tagged for report parity with other ops)
+        bench_targets "s3" "list_objects_v2_${_s3_tier}" GET \
+          "$OS_BASE/bench-bucket-$$?list-type=2" \
+          "$LS_BASE/bench-bucket-$$?list-type=2" \
+          "$MOTO_BASE/bench-bucket-$$?list-type=2"
+
+        # Restore profile-level values for next tier
+        REQ_COUNT=$_s3_saved_req
+        CONC=$_s3_saved_conc
+      done
+
+    else
+      skip_service "s3" "Failed to create seed bucket"
+    fi
+
+    rm -rf "$S3_TMPDIR"
+  fi  # disk pre-flight
 
   MOTO_EXTRA=()  # clear after S3 block
 fi
