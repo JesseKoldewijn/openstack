@@ -991,6 +991,12 @@ if is_active "sns"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1  # reset per-service
   log_section "SNS (Query-XML)"
 
+  # Moto's multi-service standalone server needs a Host header to route
+  # Query-style SNS requests to its SNS backend (same pattern as S3).
+  # The Authorization header is included defensively in case moto validates it.
+  MOTO_EXTRA=(-H "Host: sns.us-east-1.amazonaws.com" \
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/sns/aws4_request, SignedHeaders=host, Signature=dummy")
+
   # Seed: create topic
   # Use curl -s (not -sf) so non-2xx responses don't silently kill the pipe.
   # Collapse newlines before grep so the ARN is found even if the XML is multiline.
@@ -1013,7 +1019,7 @@ if is_active "sns"; then
   if target_active moto; then
     MOTO_TOPIC_ARN=$(curl -s -X POST "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "Action=CreateTopic&Name=bench-topic-$$" 2>/dev/null \
+      -d "Action=CreateTopic&Name=bench-topic-$$" "${MOTO_EXTRA[@]}" 2>/dev/null \
       | tr -d '\n' | grep -oP '(?<=<TopicArn>)[^<]+' || echo "")
     if [[ -z "$MOTO_TOPIC_ARN" ]]; then
       log "  WARN: SNS moto seed returned no TopicArn — publish/get_topic_attributes will skip moto"
@@ -1037,7 +1043,8 @@ if is_active "sns"; then
       log "  sns/publish (moto)..."
       bench "sns" "publish" "moto" POST "$MOTO_BASE" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "Action=Publish&TopicArn=$MOTO_TOPIC_ARN&Message=benchmark-message"
+        -d "Action=Publish&TopicArn=$MOTO_TOPIC_ARN&Message=benchmark-message" \
+        "${MOTO_EXTRA[@]}"
     fi
 
     # GetTopicAttributes
@@ -1055,16 +1062,19 @@ if is_active "sns"; then
       log "  sns/get_topic_attributes (moto)..."
       bench "sns" "get_topic_attributes" "moto" POST "$MOTO_BASE" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "Action=GetTopicAttributes&TopicArn=$MOTO_TOPIC_ARN"
+        -d "Action=GetTopicAttributes&TopicArn=$MOTO_TOPIC_ARN" \
+        "${MOTO_EXTRA[@]}"
     fi
 
-    # ListTopics
+    # ListTopics — bench_targets appends MOTO_EXTRA automatically
     bench_targets "sns" "list_topics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=ListTopics"
   else
     skip_service "sns" "Failed to create seed topic"
   fi
+
+  MOTO_EXTRA=()  # clear after SNS block
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1212,14 +1222,21 @@ if is_active "secretsmanager"; then
   # Seed: create secret (each target independently; only openstack is required)
   # ClientRequestToken is required by LocalStack 3.x (and recommended by AWS);
   # openstack and moto accept requests without it but LocalStack returns HTTP 400.
+  # AWS requires the token to be 32–64 alphanumeric/hyphen characters; shorter
+  # values (e.g. "bench-seed-12345" = 16 chars) cause LocalStack to reject with
+  # HTTP 400.  Pad the PID to 25 digits so the full token is always ≥32 chars.
+  _sm_seed_token=$(printf 'bench-seed-%025d' "$$")
+  # Dynamic bench tokens: pad PID to 20 digits so token length is 34–37 chars
+  # regardless of {i} (1–100), comfortably within the 32–64 char window.
+  _sm_pid_pad=$(printf '%020d' "$$")
   if seed_all_targets "secretsmanager" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: secretsmanager.CreateSecret" \
-       -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value","ClientRequestToken":"bench-seed-'"$$"'"}'; then
+       -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value","ClientRequestToken":"'"$_sm_seed_token"'"}'; then
 
     # CreateSecret — unique name and token per iteration via {i}; 0 errors expected
     bench_dynamic_targets "secretsmanager" "create_secret" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-      '{"Name":"bench-secret-create-'"$$"'-{i}","SecretString":"new-secret-value","ClientRequestToken":"bench-create-'"$$"'-{i}"}' \
+      '{"Name":"bench-secret-create-'"$$"'-{i}","SecretString":"new-secret-value","ClientRequestToken":"bench-create-'"$_sm_pid_pad"'-{i}"}' \
       -H "Content-Type: application/x-amz-json-1.1" \
       -H "X-Amz-Target: secretsmanager.CreateSecret"
 
