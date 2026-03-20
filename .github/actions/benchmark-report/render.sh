@@ -52,32 +52,23 @@ $HAS_LS   && TARGETS_STR="$TARGETS_STR, LocalStack"
 $HAS_MOTO && TARGETS_STR="$TARGETS_STR, moto"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper: format a per-operation speedup ratio as a percentage with label.
+# Helper: format a per-operation speedup ratio as a signed multiplier.
 # $1 = ratio (float or "null")
-# $2 = type: "latency" (ratio = competitor/openstack) or "rps" (ratio = openstack/competitor)
-# Outputs: "+350% slower", "20% faster", etc., or empty string if ratio invalid.
+#   For latency: ratio = competitor / openstack  (>1 = competitor slower)
+#   For RPS:     ratio = openstack / competitor   (>1 = openstack faster)
+# Outputs: "(-4.5x)" if competitor is slower, "(0.8x)" if competitor is faster.
+# Suppressed when ratio is within ±5% of 1.0 (i.e. 0.95–1.05).
 # ─────────────────────────────────────────────────────────────────────────────
-fmt_pct() {
-  local v="$1" mtype="${2:-latency}"
+fmt_ratio() {
+  local v="$1"
   if [[ "$v" == "null" ]] || ! awk "BEGIN {exit !($v > 0)}" 2>/dev/null; then
     echo ""
     return
   fi
-  if [[ "$mtype" == "rps" ]]; then
-    # ratio = openstack_rps / competitor_rps; 1/ratio = competitor fraction of openstack RPS
-    awk -v r="$v" 'BEGIN {
-      pct = (1/r - 1) * 100
-      if      (pct >=  0.5) printf "+%.0f%% faster", pct
-      else if (pct <= -0.5) printf "%.0f%% slower",  -pct
-    }'
-  else
-    # ratio = competitor_latency / openstack_latency; >1 means competitor is slower
-    awk -v r="$v" 'BEGIN {
-      pct = (r - 1) * 100
-      if      (pct >=  0.5) printf "+%.0f%% slower", pct
-      else if (pct <= -0.5) printf "%.0f%% faster",  -pct
-    }'
-  fi
+  awk -v r="$v" 'BEGIN {
+    if      (r >= 1.05) printf "(-%.1fx)", r
+    else if (r <= 0.95) printf "(%.1fx)",  r
+  }'
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -212,16 +203,16 @@ while IFS= read -r SVC; do
       LS_RPS=$(echo "$OP_DATA" | jq -r '.localstack.rps // "—"')
       LS_ERR=$(echo "$OP_DATA" | jq -r '.localstack.errors // "—"')
       if [[ "$LS_P50" != "null" && "$LS_P50" != "—" ]]; then
-        # Per-operation speedup as percentage vs openstack for inline display
+        # Per-operation speedup as ratio vs openstack for inline display
         SU_LS=$(echo "$OP_DATA" | jq -c '.speedup_vs_localstack // {}')
-        SU_LS_P50=$(fmt_pct "$(echo "$SU_LS" | jq -r '.p50 // "null"')" "latency")
-        SU_LS_P95=$(fmt_pct "$(echo "$SU_LS" | jq -r '.p95 // "null"')" "latency")
-        SU_LS_P99=$(fmt_pct "$(echo "$SU_LS" | jq -r '.p99 // "null"')" "latency")
-        SU_LS_RPS=$(fmt_pct "$(echo "$SU_LS" | jq -r '.rps // "null"')" "rps")
-        [[ -n "$SU_LS_P50" ]] && LS_P50="${LS_P50} <sub>${SU_LS_P50}</sub>"
-        [[ -n "$SU_LS_P95" ]] && LS_P95="${LS_P95} <sub>${SU_LS_P95}</sub>"
-        [[ -n "$SU_LS_P99" ]] && LS_P99="${LS_P99} <sub>${SU_LS_P99}</sub>"
-        [[ -n "$SU_LS_RPS" ]] && LS_RPS="${LS_RPS} <sub>${SU_LS_RPS}</sub>"
+        SU_LS_P50=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.p50 // "null"')")
+        SU_LS_P95=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.p95 // "null"')")
+        SU_LS_P99=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.p99 // "null"')")
+        SU_LS_RPS=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.rps // "null"')")
+        [[ -n "$SU_LS_P50" ]] && LS_P50="${LS_P50} ${SU_LS_P50}"
+        [[ -n "$SU_LS_P95" ]] && LS_P95="${LS_P95} ${SU_LS_P95}"
+        [[ -n "$SU_LS_P99" ]] && LS_P99="${LS_P99} ${SU_LS_P99}"
+        [[ -n "$SU_LS_RPS" ]] && LS_RPS="${LS_RPS} ${SU_LS_RPS}"
         echo "| | LocalStack | ${LS_P50} | ${LS_P95} | ${LS_P99} | ${LS_RPS} | ${LS_ERR} |"
       fi
     fi
@@ -235,14 +226,14 @@ while IFS= read -r SVC; do
       MOTO_ERR=$(echo "$OP_DATA" | jq -r '.moto.errors // "—"')
       if [[ "$MOTO_P50" != "null" && "$MOTO_P50" != "—" ]]; then
         SU_MOTO=$(echo "$OP_DATA" | jq -c '.speedup_vs_moto // {}')
-        SU_MOTO_P50=$(fmt_pct "$(echo "$SU_MOTO" | jq -r '.p50 // "null"')" "latency")
-        SU_MOTO_P95=$(fmt_pct "$(echo "$SU_MOTO" | jq -r '.p95 // "null"')" "latency")
-        SU_MOTO_P99=$(fmt_pct "$(echo "$SU_MOTO" | jq -r '.p99 // "null"')" "latency")
-        SU_MOTO_RPS=$(fmt_pct "$(echo "$SU_MOTO" | jq -r '.rps // "null"')" "rps")
-        [[ -n "$SU_MOTO_P50" ]] && MOTO_P50="${MOTO_P50} <sub>${SU_MOTO_P50}</sub>"
-        [[ -n "$SU_MOTO_P95" ]] && MOTO_P95="${MOTO_P95} <sub>${SU_MOTO_P95}</sub>"
-        [[ -n "$SU_MOTO_P99" ]] && MOTO_P99="${MOTO_P99} <sub>${SU_MOTO_P99}</sub>"
-        [[ -n "$SU_MOTO_RPS" ]] && MOTO_RPS="${MOTO_RPS} <sub>${SU_MOTO_RPS}</sub>"
+        SU_MOTO_P50=$(fmt_ratio "$(echo "$SU_MOTO" | jq -r '.p50 // "null"')")
+        SU_MOTO_P95=$(fmt_ratio "$(echo "$SU_MOTO" | jq -r '.p95 // "null"')")
+        SU_MOTO_P99=$(fmt_ratio "$(echo "$SU_MOTO" | jq -r '.p99 // "null"')")
+        SU_MOTO_RPS=$(fmt_ratio "$(echo "$SU_MOTO" | jq -r '.rps // "null"')")
+        [[ -n "$SU_MOTO_P50" ]] && MOTO_P50="${MOTO_P50} ${SU_MOTO_P50}"
+        [[ -n "$SU_MOTO_P95" ]] && MOTO_P95="${MOTO_P95} ${SU_MOTO_P95}"
+        [[ -n "$SU_MOTO_P99" ]] && MOTO_P99="${MOTO_P99} ${SU_MOTO_P99}"
+        [[ -n "$SU_MOTO_RPS" ]] && MOTO_RPS="${MOTO_RPS} ${SU_MOTO_RPS}"
         echo "| | moto | ${MOTO_P50} | ${MOTO_P95} | ${MOTO_P99} | ${MOTO_RPS} | ${MOTO_ERR} |"
       fi
     fi
