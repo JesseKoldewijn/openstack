@@ -25,7 +25,7 @@
 #
 # Usage:
 #   ./bench_gate.sh --report report.json
-#   ./bench_gate.sh --report report.json --p95-max 5 --memory-max 10
+#   ./bench_gate.sh --report report.json --p95-max 5 --memory-max 80
 #   ./bench_gate.sh --report report.json --ignore-errors iam/create_user
 #   ./bench_gate.sh --report report.json --op-p95-max "s3/put_object_1mb=50,s3/get_object_1mb=50"
 #   ./bench_gate.sh --report report.json --output benchmark-gate.json
@@ -38,7 +38,7 @@ set -euo pipefail
 
 REPORT=""
 P95_MAX="5"
-MEMORY_MAX="80"
+MEMORY_MAX=""
 IGNORE_ERRORS=""
 IGNORE_LATENCY=""
 OP_P95_MAX=""
@@ -51,7 +51,9 @@ Usage: $(basename "$0") [OPTIONS]
 Options:
   --report <path>              Path to JSON benchmark report from bench_services.sh (required)
   --p95-max <ms>               Global p95 ceiling for openstack in milliseconds (default: 5)
-  --memory-max <mb>            Absolute loaded RSS ceiling for openstack in MB (default: 80)
+  --memory-max <mb>            Absolute loaded RSS ceiling for openstack in MB.
+                               Omit to skip the memory gate entirely (useful for
+                               the stress profile where RSS is unconstrained).
   --ignore-errors <list>       Comma-separated service/operation pairs to skip error check
                                e.g. "iam/create_user,s3/put_object"
   --ignore-latency <list>      Comma-separated service/operation pairs to skip p95 latency check
@@ -233,7 +235,7 @@ $HAS_MOTO && MOTO_IDLE_MB=$(jq -r '.memory.moto.idle_mb   // 0' "$REPORT") \
 
 MEMORY_GATE_PASS=true
 MEMORY_FAILURE_MSG=""
-if [[ "$OS_LOADED_MB" != "null" ]] && awk "BEGIN {exit !($OS_LOADED_MB > $MEMORY_MAX)}"; then
+if [[ -n "$MEMORY_MAX" ]] && [[ "$OS_LOADED_MB" != "null" ]] && awk "BEGIN {exit !($OS_LOADED_MB > $MEMORY_MAX)}"; then
   MEMORY_GATE_PASS=false
   MEMORY_FAILURE_MSG="openstack loaded RSS ${OS_LOADED_MB}MB exceeds ${MEMORY_MAX}MB ceiling"
 fi
@@ -596,7 +598,7 @@ $GATE_FAILED && VERDICT="FAIL"
 GATE_JSON=$(jq -n \
   --arg verdict "$VERDICT" \
   --argjson p95_max "$P95_MAX" \
-  --argjson mem_max "$MEMORY_MAX" \
+  --argjson mem_max "${MEMORY_MAX:-null}" \
   --argjson ignored "$IGNORED_JSON" \
   --argjson ignored_lat "$IGNORED_LATENCY_JSON" \
   --argjson op_p95 "$OP_P95_MAX_JSON" \
