@@ -52,48 +52,57 @@ $HAS_LS   && TARGETS_STR="$TARGETS_STR, LocalStack"
 $HAS_MOTO && TARGETS_STR="$TARGETS_STR, moto"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper: format a speedup ratio to 2dp, or return empty string
+# Helper: format a per-operation speedup ratio as a percentage with label.
+# $1 = ratio (float or "null")
+# $2 = type: "latency" (ratio = competitor/openstack) or "rps" (ratio = openstack/competitor)
+# Outputs: "+350% slower", "20% faster", etc., or empty string if ratio invalid.
 # ─────────────────────────────────────────────────────────────────────────────
-fmt_ratio() {
-  local v="$1"
+fmt_pct() {
+  local v="$1" mtype="${2:-latency}"
   if [[ "$v" == "null" ]] || ! awk "BEGIN {exit !($v > 0)}" 2>/dev/null; then
     echo ""
+    return
+  fi
+  if [[ "$mtype" == "rps" ]]; then
+    # ratio = openstack_rps / competitor_rps; 1/ratio = competitor fraction of openstack RPS
+    awk -v r="$v" 'BEGIN {
+      pct = (1/r - 1) * 100
+      if      (pct >=  0.5) printf "+%.0f%% faster", pct
+      else if (pct <= -0.5) printf "%.0f%% slower",  -pct
+    }'
   else
-    awk "BEGIN {printf \"%.2f\", $v}"
+    # ratio = competitor_latency / openstack_latency; >1 means competitor is slower
+    awk -v r="$v" 'BEGIN {
+      pct = (r - 1) * 100
+      if      (pct >=  0.5) printf "+%.0f%% slower", pct
+      else if (pct <= -0.5) printf "%.0f%% faster",  -pct
+    }'
   fi
 }
 
-# Helper: build a "· "-joined multi-metric speedup string from a speedup object.
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: format a service/overall speedup object into a single summary line.
 # $1 = JSON speedup object {p50:{min,max,avg}, p95:..., p99:..., rps:...} or "null"
-# Prints a compact string like:
-#   p50 4.5x–7.7x (avg **6.0x**) · p95 4.5x–7.7x (avg **6.0x**) · ...
-# or empty string if all null.
-fmt_speedup_line() {
+# Uses p50 latency stats (range across operations) as the representative metric.
+# Outputs: "2.1×–8.3× faster (avg **4.7×**)" or empty string.
+# ─────────────────────────────────────────────────────────────────────────────
+fmt_summary_line() {
   local obj="$1"
   if [[ "$obj" == "null" ]]; then echo ""; return; fi
 
-  local parts=()
-  local label metric_json mn mx av
+  local mn mx av
+  mn=$(echo "$obj" | jq -r '.p50.min // "null"')
+  mx=$(echo "$obj" | jq -r '.p50.max // "null"')
+  av=$(echo "$obj" | jq -r '.p50.avg // "null"')
+  [[ "$mn" == "null" || "$av" == "null" ]] && echo "" && return
 
-  for label in "p50" "p95" "p99" "rps"; do
-    metric_json=$(echo "$obj" | jq -c ".${label}")
-    [[ "$metric_json" == "null" ]] && continue
-    mn=$(echo "$metric_json" | jq -r '.min')
-    mx=$(echo "$metric_json" | jq -r '.max')
-    av=$(echo "$metric_json" | jq -r '.avg')
-    [[ "$mn" == "null" || "$av" == "null" ]] && continue
-    parts+=("${label} ${mn}x–${mx}x (avg **${av}x**)")
-  done
-
-  if [[ ${#parts[@]} -eq 0 ]]; then echo ""; return; fi
-
-  # Manually join with " · " separator (IFS doesn't work with multi-byte unicode)
-  local result="${parts[0]}"
-  local i
-  for (( i=1; i<${#parts[@]}; i++ )); do
-    result+=" · ${parts[$i]}"
-  done
-  echo "$result"
+  # avg > 1 → openstack is faster (competitor latency higher); < 1 → competitor is faster
+  local direction mul en_dash
+  direction=$(awk -v a="$av" 'BEGIN { print (a+0 >= 1) ? "faster" : "slower" }')
+  mul=$(printf '\xc3\x97')    # × multiplication sign
+  en_dash=$(printf '\xe2\x80\x93')  # – en dash
+  printf "%.1f%s%s%.1f%s %s (avg **%.1f%s**)\n" \
+    "$mn" "$mul" "$en_dash" "$mx" "$mul" "$direction" "$av" "$mul"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,16 +212,16 @@ while IFS= read -r SVC; do
       LS_RPS=$(echo "$OP_DATA" | jq -r '.localstack.rps // "—"')
       LS_ERR=$(echo "$OP_DATA" | jq -r '.localstack.errors // "—"')
       if [[ "$LS_P50" != "null" && "$LS_P50" != "—" ]]; then
-        # Per-operation speedup ratios for inline display
+        # Per-operation speedup as percentage vs openstack for inline display
         SU_LS=$(echo "$OP_DATA" | jq -c '.speedup_vs_localstack // {}')
-        SU_LS_P50=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.p50 // "null"')")
-        SU_LS_P95=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.p95 // "null"')")
-        SU_LS_P99=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.p99 // "null"')")
-        SU_LS_RPS=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.rps // "null"')")
-        [[ -n "$SU_LS_P50" ]] && LS_P50="${LS_P50} _(${SU_LS_P50}x)_"
-        [[ -n "$SU_LS_P95" ]] && LS_P95="${LS_P95} _(${SU_LS_P95}x)_"
-        [[ -n "$SU_LS_P99" ]] && LS_P99="${LS_P99} _(${SU_LS_P99}x)_"
-        [[ -n "$SU_LS_RPS" ]] && LS_RPS="${LS_RPS} _(${SU_LS_RPS}x)_"
+        SU_LS_P50=$(fmt_pct "$(echo "$SU_LS" | jq -r '.p50 // "null"')" "latency")
+        SU_LS_P95=$(fmt_pct "$(echo "$SU_LS" | jq -r '.p95 // "null"')" "latency")
+        SU_LS_P99=$(fmt_pct "$(echo "$SU_LS" | jq -r '.p99 // "null"')" "latency")
+        SU_LS_RPS=$(fmt_pct "$(echo "$SU_LS" | jq -r '.rps // "null"')" "rps")
+        [[ -n "$SU_LS_P50" ]] && LS_P50="${LS_P50} <sub>${SU_LS_P50}</sub>"
+        [[ -n "$SU_LS_P95" ]] && LS_P95="${LS_P95} <sub>${SU_LS_P95}</sub>"
+        [[ -n "$SU_LS_P99" ]] && LS_P99="${LS_P99} <sub>${SU_LS_P99}</sub>"
+        [[ -n "$SU_LS_RPS" ]] && LS_RPS="${LS_RPS} <sub>${SU_LS_RPS}</sub>"
         echo "| | LocalStack | ${LS_P50} | ${LS_P95} | ${LS_P99} | ${LS_RPS} | ${LS_ERR} |"
       fi
     fi
@@ -226,28 +235,28 @@ while IFS= read -r SVC; do
       MOTO_ERR=$(echo "$OP_DATA" | jq -r '.moto.errors // "—"')
       if [[ "$MOTO_P50" != "null" && "$MOTO_P50" != "—" ]]; then
         SU_MOTO=$(echo "$OP_DATA" | jq -c '.speedup_vs_moto // {}')
-        SU_MOTO_P50=$(fmt_ratio "$(echo "$SU_MOTO" | jq -r '.p50 // "null"')")
-        SU_MOTO_P95=$(fmt_ratio "$(echo "$SU_MOTO" | jq -r '.p95 // "null"')")
-        SU_MOTO_P99=$(fmt_ratio "$(echo "$SU_MOTO" | jq -r '.p99 // "null"')")
-        SU_MOTO_RPS=$(fmt_ratio "$(echo "$SU_MOTO" | jq -r '.rps // "null"')")
-        [[ -n "$SU_MOTO_P50" ]] && MOTO_P50="${MOTO_P50} _(${SU_MOTO_P50}x)_"
-        [[ -n "$SU_MOTO_P95" ]] && MOTO_P95="${MOTO_P95} _(${SU_MOTO_P95}x)_"
-        [[ -n "$SU_MOTO_P99" ]] && MOTO_P99="${MOTO_P99} _(${SU_MOTO_P99}x)_"
-        [[ -n "$SU_MOTO_RPS" ]] && MOTO_RPS="${MOTO_RPS} _(${SU_MOTO_RPS}x)_"
+        SU_MOTO_P50=$(fmt_pct "$(echo "$SU_MOTO" | jq -r '.p50 // "null"')" "latency")
+        SU_MOTO_P95=$(fmt_pct "$(echo "$SU_MOTO" | jq -r '.p95 // "null"')" "latency")
+        SU_MOTO_P99=$(fmt_pct "$(echo "$SU_MOTO" | jq -r '.p99 // "null"')" "latency")
+        SU_MOTO_RPS=$(fmt_pct "$(echo "$SU_MOTO" | jq -r '.rps // "null"')" "rps")
+        [[ -n "$SU_MOTO_P50" ]] && MOTO_P50="${MOTO_P50} <sub>${SU_MOTO_P50}</sub>"
+        [[ -n "$SU_MOTO_P95" ]] && MOTO_P95="${MOTO_P95} <sub>${SU_MOTO_P95}</sub>"
+        [[ -n "$SU_MOTO_P99" ]] && MOTO_P99="${MOTO_P99} <sub>${SU_MOTO_P99}</sub>"
+        [[ -n "$SU_MOTO_RPS" ]] && MOTO_RPS="${MOTO_RPS} <sub>${SU_MOTO_RPS}</sub>"
         echo "| | moto | ${MOTO_P50} | ${MOTO_P95} | ${MOTO_P99} | ${MOTO_RPS} | ${MOTO_ERR} |"
       fi
     fi
   done <<< "$OPERATIONS"
 
-  # Per-service multi-metric speedup summary lines
+  # Per-service speedup summary (p50 latency range across operations)
   LS_SPEEDUP_OBJ=$(jq -c ".services.\"$SVC\".speedup_vs_localstack" "$GATE_JSON")
   MOTO_SPEEDUP_OBJ=$(jq -c ".services.\"$SVC\".speedup_vs_moto" "$GATE_JSON")
 
   SPEEDUP_LINES=()
-  LS_LINE=$(fmt_speedup_line "$LS_SPEEDUP_OBJ")
-  MOTO_LINE=$(fmt_speedup_line "$MOTO_SPEEDUP_OBJ")
-  [[ -n "$LS_LINE"   ]] && SPEEDUP_LINES+=("**vs LocalStack:** ${LS_LINE}")
-  [[ -n "$MOTO_LINE" ]] && SPEEDUP_LINES+=("**vs moto:** ${MOTO_LINE}")
+  LS_LINE=$(fmt_summary_line "$LS_SPEEDUP_OBJ")
+  MOTO_LINE=$(fmt_summary_line "$MOTO_SPEEDUP_OBJ")
+  [[ -n "$LS_LINE"   ]] && SPEEDUP_LINES+=("**openstack vs LocalStack:** ${LS_LINE}")
+  [[ -n "$MOTO_LINE" ]] && SPEEDUP_LINES+=("**openstack vs moto:** ${MOTO_LINE}")
 
   if [[ ${#SPEEDUP_LINES[@]} -gt 0 ]]; then
     echo ""
@@ -264,15 +273,15 @@ done <<< "$SERVICES"
 OVERALL_LS_OBJ=$(jq -c '.overall.speedup_vs_localstack' "$GATE_JSON")
 OVERALL_MOTO_OBJ=$(jq -c '.overall.speedup_vs_moto' "$GATE_JSON")
 
-OVERALL_LS_LINE=$(fmt_speedup_line "$OVERALL_LS_OBJ")
-OVERALL_MOTO_LINE=$(fmt_speedup_line "$OVERALL_MOTO_OBJ")
+OVERALL_LS_LINE=$(fmt_summary_line "$OVERALL_LS_OBJ")
+OVERALL_MOTO_LINE=$(fmt_summary_line "$OVERALL_MOTO_OBJ")
 
 if [[ -n "$OVERALL_LS_LINE" || -n "$OVERALL_MOTO_LINE" ]]; then
   echo ""
   echo "### Overall Performance"
   echo ""
-  [[ -n "$OVERALL_LS_LINE"   ]] && echo "> **vs LocalStack:** ${OVERALL_LS_LINE}"
-  [[ -n "$OVERALL_MOTO_LINE" ]] && echo "> **vs moto:** ${OVERALL_MOTO_LINE}"
+  [[ -n "$OVERALL_LS_LINE"   ]] && echo "> **openstack vs LocalStack:** ${OVERALL_LS_LINE}"
+  [[ -n "$OVERALL_MOTO_LINE" ]] && echo "> **openstack vs moto:** ${OVERALL_MOTO_LINE}"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
