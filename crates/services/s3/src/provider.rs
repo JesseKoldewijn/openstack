@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,6 +26,38 @@ use crate::store::{ObjectDataRef, S3Store};
 /// Objects above the threshold are still written to disk and streamed
 /// from disk on reads, which is appropriate for large blobs.
 const INLINE_OBJECT_THRESHOLD: u64 = 256 * 1024; // 256 KiB
+
+/// A [`std::io::Read`] adapter that feeds every byte through a running MD5
+/// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
+/// so that hashing and disk writes happen on a blocking thread rather than
+/// a tokio worker.
+struct Md5Read<R> {
+    inner: R,
+    hasher: md5::Md5,
+}
+
+impl<R: std::io::Read> Md5Read<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: md5::Md5::new(),
+        }
+    }
+
+    fn finalize(self) -> md5::digest::Output<md5::Md5> {
+        self.hasher.finalize()
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for Md5Read<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.hasher.update(&buf[..n]);
+        }
+        Ok(n)
+    }
+}
 
 pub struct S3Provider {
     store: Arc<AccountRegionBundle<S3Store>>,
@@ -289,10 +322,12 @@ async fn handle_put_object_async(
     };
     let key = key_from_path(&ctx.path);
 
-    // Check bucket exists (short-lived guard)
+    // Check bucket exists — use read lock to avoid blocking concurrent readers.
     {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        if !store.bucket_exists(&bucket) {
+        let bucket_exists = store_bundle
+            .get(&ctx.account_id, &ctx.region)
+            .is_some_and(|store| store.bucket_exists(&bucket));
+        if !bucket_exists {
             return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
         }
     }
@@ -312,13 +347,16 @@ async fn handle_put_object_async(
         })
         .collect();
 
-    // Determine versioning state (short-lived guard)
+    // Determine versioning state — use read lock for read-only check.
     let versioning_enabled = {
-        let store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        store
-            .get_bucket(&bucket)
-            .map(|b| b.versioning.as_str() == "Enabled")
-            .unwrap_or(false)
+        store_bundle
+            .get(&ctx.account_id, &ctx.region)
+            .is_some_and(|store| {
+                store
+                    .get_bucket(&bucket)
+                    .map(|b| b.versioning.as_str() == "Enabled")
+                    .unwrap_or(false)
+            })
     };
 
     // Generate version_id now so we can use it for the file path
@@ -358,28 +396,44 @@ async fn handle_put_object_async(
             let size = body_bytes.len() as u64;
             (etag, size, ObjectDataRef::Inline(body_bytes))
         } else {
-            // Large object: stream directly to disk — never fully materialised in memory.
-            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
-            let (file_path, bytes_written) = match file_store
-                .write_object_from_reader(
-                    &ctx.account_id,
-                    &ctx.region,
-                    &bucket,
-                    &key,
-                    &version_id,
-                    &mut hashing_reader,
-                )
-                .await
-            {
-                Ok(result) => result,
-                Err(e) => {
+            // Large object: run sync I/O in spawn_blocking to avoid blocking
+            // tokio worker threads during the copy loop.  A 512 KiB buffer
+            // reduces disk syscalls from ~1280 to ~20 for a 10 MiB object.
+            let file_store_clone = file_store.clone();
+            let account_id_c = ctx.account_id.clone();
+            let region_c = ctx.region.clone();
+            let bucket_c = bucket.clone();
+            let key_c = key.clone();
+            let version_id_c = version_id.clone();
+
+            let result = tokio::task::spawn_blocking(move || {
+                let mut md5_reader = Md5Read::new(spooled);
+                let (file_path, bytes_written) = file_store_clone.write_object_from_sync_reader(
+                    &account_id_c,
+                    &region_c,
+                    &bucket_c,
+                    &key_c,
+                    &version_id_c,
+                    &mut md5_reader,
+                )?;
+                let digest = md5_reader.finalize();
+                let etag = format!("\"{}\"", hex::encode(digest));
+                io::Result::Ok((etag, bytes_written, file_path))
+            })
+            .await;
+
+            match result {
+                Ok(Ok((etag, bytes_written, file_path))) => {
+                    (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+                }
+                Ok(Err(e)) => {
                     warn!(error = %e, "Failed to stream object to filesystem");
                     return s3_error("InternalError", "Failed to store object", 500);
                 }
-            };
-            let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
-            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+                Err(_) => {
+                    return s3_error("InternalError", "Object write task panicked", 500);
+                }
+            }
         }
     } else {
         // Fallback for unit-test contexts where spooled_body is None.

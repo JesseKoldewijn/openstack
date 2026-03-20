@@ -148,6 +148,18 @@ impl SpooledBody {
     }
 }
 
+/// Allow `SpooledBody` to be used as a synchronous [`Read`](std::io::Read)
+/// source directly (e.g. inside `tokio::task::spawn_blocking` closures).
+///
+/// For in-memory payloads this is a cheap `Vec` copy. For file-backed
+/// payloads this does synchronous disk I/O which is intentional when called
+/// from a blocking thread.
+impl std::io::Read for SpooledBody {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
 /// An [`AsyncRead`](tokio::io::AsyncRead) wrapper around [`SpooledBody`].
 ///
 /// Because `SpooledTempFile` implements synchronous `Read`, reads are

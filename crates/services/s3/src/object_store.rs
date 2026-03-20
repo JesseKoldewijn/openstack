@@ -145,7 +145,13 @@ impl ObjectFileStore {
         let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
 
         let mut file = fs::File::create(&tmp_path).await?;
-        let bytes_written = tokio::io::copy(reader, &mut file).await?;
+
+        // Use a 512 KiB read buffer to amortise the spawn_blocking overhead of
+        // tokio::fs::File and reduce the number of poll_read → disk-I/O roundtrips
+        // from ~1280 to ~20 for a 10 MiB object.
+        const COPY_BUF: usize = 512 * 1024;
+        let mut buf_reader = tokio::io::BufReader::with_capacity(COPY_BUF, reader);
+        let bytes_written = tokio::io::copy_buf(&mut buf_reader, &mut file).await?;
         file.flush().await?;
         drop(file);
 
@@ -155,6 +161,59 @@ impl ObjectFileStore {
             path = %final_path.display(),
             size = bytes_written,
             "Object written to filesystem (streamed)"
+        );
+
+        Ok((final_path, bytes_written))
+    }
+
+    /// Write object data from a synchronous reader, streaming to disk.
+    ///
+    /// Intended for use inside [`tokio::task::spawn_blocking`] closures so
+    /// that disk I/O does not block tokio worker threads.
+    ///
+    /// Returns `(final_path, bytes_written)`.
+    pub fn write_object_from_sync_reader<R>(
+        &self,
+        account_id: &str,
+        region: &str,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        reader: &mut R,
+    ) -> io::Result<(PathBuf, u64)>
+    where
+        R: std::io::Read,
+    {
+        use std::io::Write;
+
+        let dir = self.object_dir(account_id, region, bucket, key);
+        std::fs::create_dir_all(&dir)?;
+
+        let final_path = dir.join(version_id);
+        let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
+
+        let mut file = std::fs::File::create(&tmp_path)?;
+
+        // 512 KiB copy buffer — same size as the async path for consistency.
+        let mut buf = vec![0u8; 512 * 1024];
+        let mut bytes_written = 0u64;
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            bytes_written += n as u64;
+        }
+        file.flush()?;
+        drop(file);
+
+        std::fs::rename(&tmp_path, &final_path)?;
+
+        debug!(
+            path = %final_path.display(),
+            size = bytes_written,
+            "Object written to filesystem (sync streamed)"
         );
 
         Ok((final_path, bytes_written))

@@ -660,7 +660,11 @@ async fn handle_request(
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &content_type)
-                .header("x-amzn-requestid", &request_id);
+                .header("x-amzn-requestid", &request_id)
+                // Prevent tower-http CompressionLayer from compressing binary
+                // object data (S3 GET). Compressing random/incompressible bytes
+                // burns CPU for zero benefit and adds significant latency.
+                .header("content-encoding", "identity");
             if let Some(len) = content_length {
                 builder = builder.header("content-length", len.to_string());
             }
