@@ -27,19 +27,15 @@ The system SHALL capture benchmark metrics for each scenario and target using na
 - **THEN** the harness SHALL pass `--output-format json` (not `--json`) to oha and SHALL extract p50 from `.latencyPercentiles.p50`, p95 from `.latencyPercentiles.p95`, p99 from `.latencyPercentiles.p99`, and throughput from `.summary.requestsPerSec`
 
 ### Requirement: Profile-based all-services benchmark coverage
-The system SHALL support three benchmark execution profiles (smoke, standard, deep) that control service scope and load parameters. All profiles that include a service SHALL exercise at least one write and one read operation for that service.
+The system SHALL support two benchmark execution profiles (default, stress) that control service scope and load parameters. All profiles exercise the 8 core parity services (dynamodb, firehose, iam, kinesis, s3, secretsmanager, sns, sts). All profiles SHALL exercise at least one write and one read operation per service.
 
-#### Scenario: Smoke profile covers core services with light load
-- **WHEN** the smoke benchmark profile is requested
-- **THEN** the harness SHALL execute benchmark operations for the 8 core parity services with reduced request count and concurrency
+#### Scenario: Default profile covers core services with standard load
+- **WHEN** the default benchmark profile is requested
+- **THEN** the harness SHALL execute benchmark operations for the 8 core parity services with 100 requests and concurrency of 2
 
-#### Scenario: Standard profile covers all services with medium load
-- **WHEN** the standard benchmark profile is requested
-- **THEN** the harness SHALL execute benchmark operations for all 24 services with moderate request count and concurrency
-
-#### Scenario: Deep profile covers all services with heavy load
-- **WHEN** the deep benchmark profile is requested
-- **THEN** the harness SHALL execute benchmark operations for all 24 services with high request count and increased concurrency
+#### Scenario: Stress profile covers core services with heavy load
+- **WHEN** the stress benchmark profile is requested
+- **THEN** the harness SHALL execute benchmark operations for the 8 core parity services with 1000 requests and concurrency of 6
 
 #### Scenario: Every benchmarked service includes write and read operations
 - **WHEN** any profile runs

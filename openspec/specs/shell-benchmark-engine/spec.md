@@ -1,14 +1,14 @@
 ## Purpose
-Shell-based benchmark engine that executes HTTP-based benchmarks against all supported AWS services using oha/hey.
+Shell-based benchmark engine that executes HTTP-based benchmarks against the 8 core AWS parity services using oha/hey.
 
 ## Requirements
 
-### Requirement: Shell-based benchmark script SHALL benchmark all supported services
-The benchmark system SHALL provide a single shell script (`tests/bench/bench_services.sh`) that executes HTTP-based benchmarks against all 24 supported AWS services, with each service exercising multiple representative operations covering write/mutate and read/query patterns.
+### Requirement: Shell-based benchmark script SHALL benchmark the 8 core parity services
+The benchmark system SHALL provide a single shell script (`tests/bench/bench_services.sh`) that executes HTTP-based benchmarks against the 8 core parity services (dynamodb, firehose, iam, kinesis, s3, secretsmanager, sns, sts), with each service exercising multiple representative operations covering write/mutate and read/query patterns.
 
-#### Scenario: Script benchmarks all 24 services in standard profile
-- **WHEN** the benchmark script is invoked with `--profile standard`
-- **THEN** the script SHALL execute benchmark operations for all 24 services: s3, sqs, sns, dynamodb, iam, sts, kms, secretsmanager, ssm, acm, kinesis, firehose, cloudwatch, events, states, apigateway, ec2, route53, ses, ecr, opensearch, redshift, cloudformation, lambda
+#### Scenario: Script benchmarks the 8 core services in default profile
+- **WHEN** the benchmark script is invoked with `--profile default`
+- **THEN** the script SHALL execute benchmark operations for all 8 core parity services: dynamodb, firehose, iam, kinesis, s3, secretsmanager, sns, sts
 
 #### Scenario: Each service exercises at least one write and one read operation
 - **WHEN** a service benchmark section executes
@@ -23,19 +23,15 @@ The benchmark system SHALL provide a single shell script (`tests/bench/bench_ser
 - **THEN** the script SHALL skip the remaining operations for that service, log the failure, and record a skip entry in the JSON output
 
 ### Requirement: Benchmark script SHALL support profile-based execution
-The benchmark system SHALL support named profiles that control which services are benchmarked and the load parameters applied.
+The benchmark system SHALL support named profiles that control the load parameters applied.
 
-#### Scenario: Smoke profile benchmarks core services with light load
-- **WHEN** the script is invoked with `--profile smoke`
-- **THEN** the script SHALL benchmark the 8 core parity services (dynamodb, firehose, iam, kinesis, s3, secretsmanager, sns, sts) with reduced request count and concurrency
+#### Scenario: Default profile benchmarks core services with moderate load
+- **WHEN** the script is invoked with `--profile default` (or without `--profile`)
+- **THEN** the script SHALL benchmark the 8 core parity services with 100 requests and 2 concurrent connections
 
-#### Scenario: Standard profile benchmarks all services with medium load
-- **WHEN** the script is invoked with `--profile standard`
-- **THEN** the script SHALL benchmark all 24 services with moderate request count and concurrency
-
-#### Scenario: Deep profile benchmarks all services with heavy load
-- **WHEN** the script is invoked with `--profile deep`
-- **THEN** the script SHALL benchmark all 24 services with high request count and increased concurrency
+#### Scenario: Stress profile benchmarks core services with heavy load
+- **WHEN** the script is invoked with `--profile stress`
+- **THEN** the script SHALL benchmark the 8 core parity services with 1000 requests and 6 concurrent connections
 
 #### Scenario: Custom service filter overrides profile service list
 - **WHEN** the script is invoked with `--services s3,dynamodb,iam`
@@ -65,7 +61,7 @@ The benchmark system SHALL use the `oha` HTTP benchmarking tool for executing lo
 
 #### Scenario: Script selects oha when available
 - **WHEN** `oha` is found in PATH
-- **THEN** the script SHALL use `oha` with `--json` output for all benchmark operations
+- **THEN** the script SHALL use `oha` with `--output-format json` for all benchmark operations
 
 #### Scenario: Script falls back to hey when oha is unavailable
 - **WHEN** `oha` is not found in PATH but `hey` is

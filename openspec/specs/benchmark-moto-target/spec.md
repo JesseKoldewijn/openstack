@@ -31,7 +31,11 @@ The benchmark system SHALL execute benchmark operations against moto using the s
 
 #### Scenario: Moto uses path-style S3 URLs
 - **WHEN** S3 operations are benchmarked against moto
-- **THEN** the harness SHALL use path-style URLs (not virtual-hosted-style) for all S3 operations against moto
+- **THEN** the harness SHALL use path-style URLs (not virtual-hosted-style) for all S3 operations against moto, and SHALL set a `Host: s3.amazonaws.com` header via `MOTO_EXTRA` for correct moto S3 routing
+
+#### Scenario: Moto S3 operations include required auth header via MOTO_EXTRA
+- **WHEN** S3 operations are benchmarked against moto
+- **THEN** the harness SHALL append a static dummy `Authorization: AWS4-HMAC-SHA256 ...` header via the `MOTO_EXTRA` array, required by moto 5.x for GET/HEAD object operations (without it moto returns 403); the signature value is not validated so a static dummy is sufficient. `MOTO_EXTRA` SHALL be set at the start of the S3 service block and cleared after it.
 
 #### Scenario: Moto errors are captured in benchmark results
 - **WHEN** moto returns non-2xx responses for a benchmark operation

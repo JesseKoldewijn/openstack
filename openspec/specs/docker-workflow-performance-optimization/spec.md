@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Optimize the Docker build and publication workflow for speed, cache efficiency, and correct multi-architecture image delivery.
+
+## Requirements
 
 ### Requirement: Docker multi-architecture fan-out and manifest fan-in
 The system SHALL execute Docker architecture builds as parallel jobs and SHALL publish a multi-architecture image manifest only after all required architecture jobs succeed.
@@ -32,3 +35,22 @@ The system SHALL capture and report Docker workflow runtime metrics that support
 #### Scenario: Runtime regression can be detected
 - **WHEN** post-change Docker runs exceed established baseline thresholds
 - **THEN** maintainers can identify regressions from recorded duration comparisons and initiate mitigation or rollback
+
+### Requirement: Docker image tagging strategy
+The workflow SHALL publish images under a defined set of stable tags based on the triggering event, and SHALL clean up temporary CI staging tags after publication.
+
+#### Scenario: Main branch push publishes latest tag
+- **WHEN** the Docker workflow runs on a push to the `main` branch (or on the scheduled nightly run)
+- **THEN** the published image SHALL be tagged `:latest`
+
+#### Scenario: Develop branch push publishes beta tag
+- **WHEN** the Docker workflow runs on a push to the `develop` branch
+- **THEN** the published image SHALL be tagged `:beta`
+
+#### Scenario: Pull request builds publish a PR tag
+- **WHEN** the Docker workflow runs for a pull request event
+- **THEN** the published image SHALL be tagged `:pr-<number>` (e.g. `:pr-42`)
+
+#### Scenario: Temporary CI staging tags are deleted after publication
+- **WHEN** the multi-arch manifest or amd64-fast-path publication job completes
+- **THEN** the workflow SHALL delete the temporary per-architecture staging tags (`ci-<sha>-amd64`, `ci-<sha>-arm64`) from GHCR as a cleanup step; deletion failures SHALL be non-fatal
