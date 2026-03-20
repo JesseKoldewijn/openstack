@@ -6,38 +6,117 @@
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg?logo=rust)](https://www.rust-lang.org)
 [![Docker Image](https://img.shields.io/badge/ghcr.io-JesseKoldewijn%2Fopenstack-blue?logo=github)](https://github.com/JesseKoldewijn/openstack/pkgs/container/openstack)
 
+> **Work in progress.** openstack is under active development. APIs may be incomplete, behaviour may differ from AWS or LocalStack in edge cases, and breaking changes may occur between releases. Production use is not recommended at this time.
+
 A Rust reimplementation of [LocalStack](https://localstack.cloud) Community Edition — a 100% API-compatible, drop-in replacement for the Python original.
 
 ---
 
-## Supported Services
+## Service Coverage
 
-| Service | Protocol |
-|---|---|
-| S3 | rest-xml |
-| SQS | query (XML) |
-| SNS | query (XML) |
-| DynamoDB | json |
-| Lambda | json + Docker |
-| IAM | query (XML) |
-| STS | query (XML) |
-| KMS | json |
-| Secrets Manager | json |
-| SSM Parameter Store | json |
-| ACM | json |
-| Kinesis | json |
-| Firehose | json |
-| CloudFormation | query (XML) |
-| CloudWatch (metrics + logs) | json |
-| EventBridge | json |
-| Step Functions | json |
-| API Gateway | rest-json |
-| EC2 (metadata) | ec2 query |
-| Route 53 | rest-xml |
-| SES | query (XML) |
-| ECR | json |
-| OpenSearch | rest-json |
-| Redshift (metadata) | query (XML) |
+The table below lists every service available in LocalStack's Community Edition and the current status of its implementation in openstack.
+
+| Service | Status | Protocol |
+|---|---|---|
+| Account Management | not implemented | — |
+| Amplify | not implemented | — |
+| API Gateway | ✅ supported | rest-json |
+| AppConfig | not implemented | — |
+| Application Auto Scaling | not implemented | — |
+| AppSync | not implemented | — |
+| Athena | not implemented | — |
+| Auto Scaling | not implemented | — |
+| Backup | not implemented | — |
+| Batch | not implemented | — |
+| Bedrock | not implemented | — |
+| Certificate Manager (ACM) | ✅ supported | json |
+| Cloud Control | not implemented | — |
+| CloudFormation | ✅ supported | query (XML) |
+| CloudFront | not implemented | — |
+| CloudTrail | not implemented | — |
+| CloudWatch (metrics + alarms) | ✅ supported | json |
+| CloudWatch Logs | ✅ supported | json |
+| CodeArtifact | not implemented | — |
+| CodeBuild | not implemented | — |
+| CodeCommit | not implemented | — |
+| CodeConnections | not implemented | — |
+| CodeDeploy | not implemented | — |
+| CodePipeline | not implemented | — |
+| Cognito | not implemented | — |
+| Config | not implemented | — |
+| Cost Explorer | not implemented | — |
+| Data Firehose | ✅ supported | json |
+| Database Migration Service (DMS) | not implemented | — |
+| DocumentDB (DocDB) | not implemented | — |
+| DynamoDB | ✅ supported | json |
+| DynamoDB Streams | ✅ supported | json |
+| EC2 | ✅ supported | ec2 query |
+| ECR | ✅ supported | json |
+| Elastic Beanstalk | not implemented | — |
+| Elastic Container Service (ECS) | not implemented | — |
+| Elastic File System (EFS) | not implemented | — |
+| Elastic Kubernetes Service (EKS) | not implemented | — |
+| Elastic Load Balancing (ELB) | not implemented | — |
+| Elastic MapReduce (EMR) | not implemented | — |
+| ElastiCache | not implemented | — |
+| Elasticsearch Service | not implemented | — |
+| Elemental MediaConvert | not implemented | — |
+| EventBridge | ✅ supported | json |
+| EventBridge Pipes | not implemented | — |
+| EventBridge Scheduler | not implemented | — |
+| Fault Injection Service (FIS) | not implemented | — |
+| Glacier | not implemented | — |
+| Glue | not implemented | — |
+| Identity and Access Management (IAM) | ✅ supported | query (XML) |
+| Identity Store | not implemented | — |
+| IoT | not implemented | — |
+| IoT Data | not implemented | — |
+| IoT Wireless | not implemented | — |
+| Key Management Service (KMS) | ✅ supported | json |
+| Kinesis Data Streams | ✅ supported | json |
+| Lake Formation | not implemented | — |
+| Lambda | ✅ supported | json + Docker |
+| Managed Blockchain (AMB) | not implemented | — |
+| Managed Service for Apache Flink | not implemented | — |
+| Managed Streaming for Kafka (MSK) | not implemented | — |
+| Managed Workflows for Apache Airflow (MWAA) | not implemented | — |
+| MemoryDB | not implemented | — |
+| MQ | not implemented | — |
+| Neptune | not implemented | — |
+| OpenSearch Service | ✅ supported | rest-json |
+| Organizations | not implemented | — |
+| Pinpoint | not implemented | — |
+| Private Certificate Authority (ACM PCA) | not implemented | — |
+| Redshift | ✅ supported | query (XML) |
+| Relational Database Service (RDS) | not implemented | — |
+| Resource Access Manager (RAM) | not implemented | — |
+| Resource Groups | not implemented | — |
+| Resource Groups Tagging API | not implemented | — |
+| Route 53 | ✅ supported | rest-xml |
+| Route 53 Resolver | not implemented | — |
+| S3 | ✅ supported | rest-xml |
+| S3 Tables | not implemented | — |
+| SageMaker | not implemented | — |
+| Secrets Manager | ✅ supported | json |
+| Security Token Service (STS) | ✅ supported | query (XML) |
+| Serverless Application Repository | not implemented | — |
+| Service Discovery | not implemented | — |
+| Shield | not implemented | — |
+| Simple Email Service (SES) | ✅ supported | query (XML) |
+| Simple Notification Service (SNS) | ✅ supported | query (XML) |
+| Simple Queue Service (SQS) | ✅ supported | query (XML) |
+| Simple Workflow Service (SWF) | not implemented | — |
+| SSO Admin | not implemented | — |
+| Step Functions | ✅ supported | json |
+| Support | not implemented | — |
+| Systems Manager (SSM) | ✅ supported | json |
+| Textract | not implemented | — |
+| Timestream | not implemented | — |
+| Transcribe | not implemented | — |
+| Transfer | not implemented | — |
+| Verified Permissions | not implemented | — |
+| Web Application Firewall (WAF) | not implemented | — |
+| X-Ray | not implemented | — |
 
 ---
 
