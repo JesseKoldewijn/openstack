@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -19,8 +20,12 @@ pub struct RequestContext {
     pub account_id: String,
     /// The parsed request body (protocol-specific)
     pub request_body: serde_json::Value,
-    /// Raw request bytes (for protocols that need it)
-    pub raw_body: Bytes,
+    /// Raw request bytes (for protocols that need them).
+    ///
+    /// `None` for S3 PutObject / UploadPart — the binary object payload is
+    /// never materialised eagerly; use `spooled_body` instead.
+    /// For all other protocols this is `Some(bytes)` populated by the gateway.
+    pub raw_body: Option<Bytes>,
     /// Request headers (key lowercased)
     pub headers: std::collections::HashMap<String, String>,
     /// URL path
@@ -29,8 +34,12 @@ pub struct RequestContext {
     pub method: String,
     /// Query string parameters
     pub query_params: std::collections::HashMap<String, String>,
-    /// Spooled request body (for large payloads, may be on disk)
-    pub spooled_body: Option<SpooledBody>,
+    /// Spooled request body (for large payloads, may be on disk).
+    ///
+    /// Wrapped in a `Mutex` so that it can be locked and consumed
+    /// (via `SpooledBody::into_reader()`) even when the provider receives
+    /// `ctx: &RequestContext`.
+    pub spooled_body: Option<Mutex<SpooledBody>>,
 }
 
 impl RequestContext {
@@ -46,13 +55,22 @@ impl RequestContext {
             region: region.into(),
             account_id: account_id.into(),
             request_body: serde_json::Value::Null,
-            raw_body: Bytes::new(),
+            raw_body: None,
             headers: Default::default(),
             path: String::new(),
             method: String::new(),
             query_params: Default::default(),
             spooled_body: None,
         }
+    }
+
+    /// Return a slice of the raw body bytes, or an empty slice if not present.
+    ///
+    /// Providers that need the raw bytes should call this instead of
+    /// accessing `raw_body` directly so that future lazy-materialisation
+    /// changes do not break them.
+    pub fn raw_body_bytes(&self) -> &[u8] {
+        self.raw_body.as_deref().unwrap_or(b"")
     }
 }
 

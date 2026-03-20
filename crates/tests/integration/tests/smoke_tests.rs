@@ -997,3 +997,148 @@ async fn smoke_s3_copy_object_cross_bucket() {
 
     harness.shutdown();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S3 Multi-Size Upload Round-Trip (task 5.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Upload objects of several sizes (1 KB, 256 KB, 1 MB, 10 MB, 50 MB) via HTTP
+/// and verify that GetObject returns the exact same bytes for each.
+///
+/// This exercises both the inline path (≤ 256 KiB) and the disk-streaming path
+/// (> 256 KiB) through the full gateway stack.
+#[tokio::test]
+async fn smoke_s3_multi_size_upload_round_trip() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("s3").await;
+
+    // Create bucket
+    let resp = harness
+        .aws_put("/size-bucket", "s3", "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "CreateBucket failed");
+
+    let sizes: &[(&str, usize)] = &[
+        ("1kb.bin", 1_024),
+        ("256kb.bin", 256 * 1_024),
+        ("1mb.bin", 1_024 * 1_024),
+        ("10mb.bin", 10 * 1_024 * 1_024),
+        ("50mb.bin", 50 * 1_024 * 1_024),
+    ];
+
+    for (key, size) in sizes {
+        let body: Vec<u8> = (0..(*size)).map(|i| (i % 251) as u8).collect();
+
+        // PutObject
+        let resp = harness
+            .aws_put(&format!("/size-bucket/{key}"), "s3", "us-east-1")
+            .header("content-type", "application/octet-stream")
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "PutObject {key} ({size} bytes) failed"
+        );
+        assert!(
+            resp.headers().contains_key("etag"),
+            "PutObject {key} should return ETag"
+        );
+
+        // GetObject and verify content
+        let resp = harness
+            .aws_get(&format!("/size-bucket/{key}"), "s3", "us-east-1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "GetObject {key} failed");
+        let got = resp.bytes().await.unwrap();
+        assert_eq!(got.len(), *size, "GetObject {key}: length mismatch");
+        assert_eq!(&got[..], &body[..], "GetObject {key}: content mismatch");
+    }
+
+    harness.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S3 Concurrent PutObject to Same Key (task 5.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Upload 10 objects concurrently to the same key.  All requests should succeed
+/// (no 500 errors), and the final GetObject should return one valid body.
+///
+/// This validates that the UUID-suffixed temp file fix (Phase 2) eliminates the
+/// race condition that caused ~50% error rates in the CI benchmark gate.
+#[tokio::test]
+async fn smoke_s3_concurrent_put_same_key() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("s3").await;
+
+    // Create bucket
+    let resp = harness
+        .aws_put("/race-bucket", "s3", "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "CreateBucket failed");
+
+    // Upload 10 concurrent PutObject requests to the same key.
+    // Clone the underlying reqwest::Client (cheap, shares a connection pool).
+    let num_tasks = 10usize;
+    let base_url = harness.base_url.clone();
+    let client = harness.client.clone();
+    let mut handles = Vec::with_capacity(num_tasks);
+
+    for i in 0..num_tasks {
+        let url = format!("{base_url}/race-bucket/contested.bin");
+        let c = client.clone();
+        handles.push(tokio::spawn(async move {
+            let body: Vec<u8> = vec![(i as u8) * 10; 4096]; // 4 KiB distinct payload per task
+            c.put(&url)
+                .header("content-type", "application/octet-stream")
+                .header(
+                    "authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/s3/aws4_request, \
+                     SignedHeaders=host;x-amz-date, \
+                     Signature=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .header("x-amz-date", "20260306T000000Z")
+                .body(body)
+                .send()
+                .await
+                .expect("HTTP send failed")
+                .status()
+                .as_u16()
+        }));
+    }
+
+    let mut error_count = 0usize;
+    for handle in handles {
+        let status = handle.await.expect("task panicked");
+        if status != 200 {
+            error_count += 1;
+        }
+    }
+    assert_eq!(
+        error_count, 0,
+        "{error_count} out of {num_tasks} concurrent PutObject requests failed"
+    );
+
+    // Final GetObject — must return 200 with a valid body
+    let resp = harness
+        .aws_get("/race-bucket/contested.bin", "s3", "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "GetObject after concurrent put failed"
+    );
+    let got = resp.bytes().await.unwrap();
+    assert_eq!(got.len(), 4096, "final object size should be 4 KiB");
+
+    harness.shutdown();
+}

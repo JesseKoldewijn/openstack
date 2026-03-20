@@ -486,12 +486,20 @@ async fn handle_request(
         return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
     }
 
-    // Materialize raw_body as Bytes for protocol parsing
-    let body_bytes = match spooled.to_bytes() {
-        Ok(b) => b,
-        Err(e) => {
-            error!("Failed to materialize request body: {}", e);
-            return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+    // Materialize raw_body as Bytes for protocol parsing.
+    // For S3 object-body requests (PUT/POST to a bucket+key path) the body
+    // is binary object data — never XML or JSON — so we skip the copy and
+    // let the S3 provider stream it directly from the SpooledBody instead.
+    let body_bytes = if is_s3_object_body_request(&method, &path, &header_map, &query_params) {
+        // Keep the body in the SpooledBody; pass an empty slice to parsers.
+        Bytes::new()
+    } else {
+        match spooled.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                error!("Failed to materialize request body: {}", e);
+                return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+            }
         }
     };
 
@@ -803,7 +811,11 @@ fn build_request_context(
         access_key,
         protocol,
         params,
-        raw_body: body.clone(),
+        raw_body: if body.is_empty() {
+            None
+        } else {
+            Some(body.clone())
+        },
         headers: headers.clone(),
         path: path.to_string(),
         method: method.to_string(),
@@ -1203,4 +1215,83 @@ async fn handle_internal_api(
 fn is_studio_guided_execution_route(path: &str) -> bool {
     path == "/_localstack/studio-api/flows/execute"
         || path == "/_localstack/studio-api/flows/replay"
+}
+
+/// Returns `true` for S3 requests where the body is raw object data
+/// (binary), not XML/JSON.  For these requests we skip materializing the
+/// body into a `Bytes` heap allocation and let the S3 provider stream it
+/// directly from the `SpooledBody`.
+///
+/// The heuristic: the Authorization header identifies the service as "s3",
+/// the method is PUT or POST with a non-empty key segment in the path.
+/// Content-Type is NOT checked because the S3 SDK may omit it or set it
+/// to "application/octet-stream" for arbitrary object data.
+fn is_s3_object_body_request(
+    method: &Method,
+    path: &str,
+    _headers: &HashMap<String, String>,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    // Must be PUT or POST (GET, HEAD, DELETE have no object body).
+    if method != Method::PUT && method != Method::POST {
+        return false;
+    }
+
+    // Path must have at least two non-empty segments: /bucket/key
+    // (bucket-level PUT operations like ?versioning, ?policy have no key).
+    //
+    // S3 path-style URLs have a plain /bucket/key structure.  No other
+    // service uses this pattern for binary object uploads:
+    //   - Lambda paths start with 2015-03-31/
+    //   - SQS/SNS/DynamoDB POST to the root (/) or /?QueueUrl= style
+    //   - ELB paths start with 2012-12-01/
+    //
+    // We intentionally do NOT require an Authorization header here so that
+    // benchmark and integration clients that omit auth (e.g. curl/oha without
+    // signing) still get the streaming path and never load binary object
+    // bodies into heap memory.
+    let path_no_query = path.split('?').next().unwrap_or(path);
+    let segments: Vec<&str> = path_no_query
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if segments.len() < 2 {
+        return false;
+    }
+
+    // Exclude paths that belong to known non-S3 services (versioned REST APIs).
+    let first = segments[0];
+    // Lambda, ELB, EC2 (rare REST calls)
+    if first.starts_with("2015-03-31")
+        || first.starts_with("2012-12-01")
+        || first.starts_with("2016-11-15")
+    {
+        return false;
+    }
+
+    // Exclude POST sub-resource operations that carry XML bodies, not binary
+    // object data.  These are identified by specific query params:
+    //
+    //  - CompleteMultipartUpload: POST /bucket/key?uploadId=<id>  (no partNumber)
+    //  - DeleteObjects:           POST /bucket?delete             (single-segment path)
+    //
+    // UploadPart is a POST with BOTH ?uploadId= AND ?partNumber= — that IS a
+    // binary body and must NOT be excluded.
+    if method == Method::POST {
+        let has_upload_id = query_params.contains_key("uploadId");
+        let has_part_number = query_params.contains_key("partNumber");
+        if has_upload_id && !has_part_number {
+            // CompleteMultipartUpload — XML body, not binary.
+            return false;
+        }
+        if !has_upload_id && !has_part_number {
+            // Any other key-level POST without multipart params (e.g. restore-object)
+            // may also carry XML.  Be conservative and only treat UploadPart as binary.
+            return false;
+        }
+    }
+
+    true
 }

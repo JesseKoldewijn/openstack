@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use digest::Digest as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -229,7 +230,7 @@ impl ObjectVersion {
 }
 
 fn md5_bytes(data: &[u8]) -> [u8; 16] {
-    md5::compute(data).0
+    md5::Md5::digest(data).into()
 }
 
 // ---------------------------------------------------------------------------

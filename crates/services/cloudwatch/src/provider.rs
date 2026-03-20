@@ -65,7 +65,7 @@ fn is_query_protocol_request(ctx: &RequestContext) -> bool {
         .map(|value| value.starts_with("application/x-www-form-urlencoded"))
         .unwrap_or(false)
         || ctx.query_params.contains_key("Action")
-        || ctx.raw_body.starts_with(b"Action=")
+        || ctx.raw_body_bytes().starts_with(b"Action=")
 }
 
 fn query_ok(action: &str, inner: &str) -> DispatchResponse {

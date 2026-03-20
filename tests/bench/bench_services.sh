@@ -653,12 +653,21 @@ start_binary_mode() {
     exit 1
   fi
 
-  log "Starting openstack binary ($BINARY_PATH)..."
+  # Use a writable temp directory for the data dir so the binary can be run
+  # without root privileges (the default /var/lib/localstack requires root).
+  local os_data_dir
+  os_data_dir=$(mktemp -d -t openstack-bench-XXXXXX)
+  log "Starting openstack binary ($BINARY_PATH) with data dir $os_data_dir..."
   GATEWAY_LISTEN="127.0.0.1:$OS_PORT" \
+  LOCALSTACK_DATA_DIR="$os_data_dir" \
   PERSISTENCE=0 \
   LS_LOG=error \
     "$BINARY_PATH" &
   OS_PID=$!
+
+  # Clean up the data dir on exit
+  # shellcheck disable=SC2064
+  trap "rm -rf '$os_data_dir'" EXIT
 
   if target_active ls; then
     log "Starting LocalStack container..."

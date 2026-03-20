@@ -15,7 +15,7 @@ fn make_ctx(body: &[u8]) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::Value::Null,
-        raw_body: Bytes::from(body.to_vec()),
+        raw_body: Some(Bytes::from(body.to_vec())),
         headers: HashMap::new(),
         path: "/".to_string(),
         method: "POST".to_string(),

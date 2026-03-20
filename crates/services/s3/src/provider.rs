@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use digest::Digest as _;
+use openstack_service_framework::HashingReader;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
@@ -325,36 +327,87 @@ async fn handle_put_object_async(
         "null".to_string()
     };
 
-    // Get body data — prefer spooled_body, fall back to raw_body
-    let body_bytes = ctx.raw_body.to_vec();
-
-    // Compute MD5 etag from the data
-    let etag = format!("\"{}\"", hex::encode(md5::compute(&body_bytes).0));
-    let size = body_bytes.len() as u64;
-
-    // For small objects store bytes inline in memory (no disk I/O).
-    // For large objects write to the filesystem for memory efficiency.
-    let object_data = if size <= INLINE_OBJECT_THRESHOLD {
-        ObjectDataRef::Inline(body_bytes)
-    } else {
-        let file_path = match file_store
-            .write_object(
-                &ctx.account_id,
-                &ctx.region,
-                &bucket,
-                &key,
-                &version_id,
-                &body_bytes,
-            )
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(error = %e, "Failed to write object to filesystem");
-                return s3_error("InternalError", "Failed to store object", 500);
-            }
+    // Get body data — prefer spooled_body (streaming, no full copy in memory),
+    // fall back to raw_body for unit-test contexts where spooled_body is None.
+    let (etag, size, object_data) = if let Some(mutex) = ctx.spooled_body.as_ref() {
+        // Take the SpooledBody out of the Mutex so we can consume it into a reader.
+        // The guard must be dropped before any .await, so use a block scope.
+        let (spooled, spooled_len) = {
+            let mut guard = mutex.lock().expect("spooled_body mutex poisoned");
+            let spooled = std::mem::replace(
+                &mut *guard,
+                openstack_service_framework::SpooledBody::new(0),
+            );
+            let spooled_len = spooled.len() as u64;
+            (spooled, spooled_len)
         };
-        ObjectDataRef::FileRef(file_path)
+
+        if spooled_len <= INLINE_OBJECT_THRESHOLD {
+            // Small object: read into memory, hash on the way.
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
+            let mut body_bytes = Vec::with_capacity(spooled_len as usize);
+            if let Err(e) =
+                tokio::io::AsyncReadExt::read_to_end(&mut hashing_reader, &mut body_bytes).await
+            {
+                warn!(error = %e, "Failed to read spooled body");
+                return s3_error("InternalError", "Failed to read request body", 500);
+            }
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            let size = body_bytes.len() as u64;
+            (etag, size, ObjectDataRef::Inline(body_bytes))
+        } else {
+            // Large object: stream directly to disk — never fully materialised in memory.
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
+            let (file_path, bytes_written) = match file_store
+                .write_object_from_reader(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &key,
+                    &version_id,
+                    &mut hashing_reader,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!(error = %e, "Failed to stream object to filesystem");
+                    return s3_error("InternalError", "Failed to store object", 500);
+                }
+            };
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+        }
+    } else {
+        // Fallback for unit-test contexts where spooled_body is None.
+        let body_bytes = ctx.raw_body_bytes().to_vec();
+        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&body_bytes)));
+        let size = body_bytes.len() as u64;
+        let object_data = if size <= INLINE_OBJECT_THRESHOLD {
+            ObjectDataRef::Inline(body_bytes)
+        } else {
+            let file_path = match file_store
+                .write_object(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &key,
+                    &version_id,
+                    &body_bytes,
+                )
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "Failed to write object to filesystem");
+                    return s3_error("InternalError", "Failed to store object", 500);
+                }
+            };
+            ObjectDataRef::FileRef(file_path)
+        };
+        (etag, size, object_data)
     };
 
     // Build version and store in S3Store (short-lived guard)
@@ -626,7 +679,7 @@ async fn handle_delete_objects_async(
     }
 
     // Parse the XML body for object keys
-    let body = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
 
     let keys: Vec<(String, Option<String>)> = {
         let mut result = Vec::new();
@@ -1165,35 +1218,86 @@ async fn handle_upload_part_async(
         }
     };
 
-    let data = ctx.raw_body.to_vec();
-    let etag = format!("\"{}\"", hex::encode(md5::compute(&data).0));
-    let size = data.len() as u64;
-
-    // Store part inline for small payloads; write to disk for large ones.
-    let part_data = if size <= INLINE_OBJECT_THRESHOLD {
-        ObjectDataRef::Inline(data)
-    } else {
-        // Write part to filesystem: use a part-specific version_id
-        let part_version_id = format!("part-{}", part_number);
-        let file_path = match file_store
-            .write_object(
-                &ctx.account_id,
-                &ctx.region,
-                &bucket,
-                // Use a sub-path under the upload_id to keep parts separate
-                &format!("__multipart/{upload_id}/{key}"),
-                &part_version_id,
-                &data,
-            )
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(error = %e, "Failed to write upload part to filesystem");
-                return s3_error("InternalError", "Failed to store part", 500);
-            }
+    // Get part data — prefer spooled_body (streaming), fall back to raw_body.
+    let (etag, size, part_data) = if let Some(mutex) = ctx.spooled_body.as_ref() {
+        // Take the SpooledBody out of the Mutex so we can consume it into a reader.
+        // The guard must be dropped before any .await, so use a block scope.
+        let (spooled, spooled_len) = {
+            let mut guard = mutex.lock().expect("spooled_body mutex poisoned");
+            let spooled = std::mem::replace(
+                &mut *guard,
+                openstack_service_framework::SpooledBody::new(0),
+            );
+            let spooled_len = spooled.len() as u64;
+            (spooled, spooled_len)
         };
-        ObjectDataRef::FileRef(file_path)
+
+        if spooled_len <= INLINE_OBJECT_THRESHOLD {
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
+            let mut data = Vec::with_capacity(spooled_len as usize);
+            if let Err(e) =
+                tokio::io::AsyncReadExt::read_to_end(&mut hashing_reader, &mut data).await
+            {
+                warn!(error = %e, "Failed to read spooled body for upload part");
+                return s3_error("InternalError", "Failed to read request body", 500);
+            }
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            let size = data.len() as u64;
+            (etag, size, ObjectDataRef::Inline(data))
+        } else {
+            let part_version_id = format!("part-{}", part_number);
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
+            let (file_path, bytes_written) = match file_store
+                .write_object_from_reader(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &format!("__multipart/{upload_id}/{key}"),
+                    &part_version_id,
+                    &mut hashing_reader,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!(error = %e, "Failed to stream upload part to filesystem");
+                    return s3_error("InternalError", "Failed to store part", 500);
+                }
+            };
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+        }
+    } else {
+        // Fallback for unit-test contexts where spooled_body is None.
+        let data = ctx.raw_body_bytes().to_vec();
+        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&data)));
+        let size = data.len() as u64;
+        let part_data = if size <= INLINE_OBJECT_THRESHOLD {
+            ObjectDataRef::Inline(data)
+        } else {
+            let part_version_id = format!("part-{}", part_number);
+            let file_path = match file_store
+                .write_object(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &format!("__multipart/{upload_id}/{key}"),
+                    &part_version_id,
+                    &data,
+                )
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "Failed to write upload part to filesystem");
+                    return s3_error("InternalError", "Failed to store part", 500);
+                }
+            };
+            ObjectDataRef::FileRef(file_path)
+        };
+        (etag, size, part_data)
     };
 
     // Store part metadata in S3Store (short-lived guard)
@@ -1229,7 +1333,7 @@ async fn handle_complete_multipart_upload_async(
     };
 
     // Parse parts from body XML
-    let body = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
     let parts: Vec<(u32, String)> = {
         let mut result = Vec::new();
         let mut remaining = body;
@@ -1305,7 +1409,7 @@ async fn handle_complete_multipart_upload_async(
         }
     }
 
-    let etag = format!("\"{}\"", hex::encode(md5::compute(&combined).0));
+    let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&combined)));
     let size = combined.len() as u64;
 
     // Store assembled object inline if small; write to disk for large objects.
@@ -1547,7 +1651,7 @@ fn handle_put_bucket_policy(store: &mut S3Store, ctx: &RequestContext) -> Dispat
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
     if let Some(b) = store.get_bucket_mut(&bucket) {
-        let policy = String::from_utf8_lossy(&ctx.raw_body).to_string();
+        let policy = String::from_utf8_lossy(ctx.raw_body_bytes()).to_string();
         b.policy = Some(policy);
         empty_204()
     } else {
@@ -1598,7 +1702,7 @@ fn handle_put_bucket_versioning(store: &mut S3Store, ctx: &RequestContext) -> Di
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
-    let body = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
     let status = extract_xml_text(body, "Status").unwrap_or_default();
 
     if let Some(b) = store.get_bucket_mut(&bucket) {

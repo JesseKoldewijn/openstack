@@ -11,7 +11,7 @@ fn make_ctx(operation: &str, params: HashMap<String, String>) -> RequestContext 
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::new(),
+        raw_body: None,
         headers: HashMap::new(),
         path: "/".to_string(),
         method: "POST".to_string(),

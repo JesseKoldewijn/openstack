@@ -7,6 +7,11 @@
 #   2. Openstack loaded RSS: absolute memory ceiling
 #   3. Error rate: zero tolerance for openstack errors (with optional ignore list)
 #
+# Per-operation latency overrides (--op-p95-max) let body-transfer operations be
+# gated against a size-appropriate threshold instead of the global metadata ceiling.
+# When a per-op threshold is set, it becomes the mandatory gate for that operation
+# and the global --p95-max no longer applies to it.
+#
 # LocalStack and Moto data is included in the output as comparison context
 # (to demonstrate how much faster openstack is) but never used for gating.
 #
@@ -22,6 +27,7 @@
 #   ./bench_gate.sh --report report.json
 #   ./bench_gate.sh --report report.json --p95-max 5 --memory-max 10
 #   ./bench_gate.sh --report report.json --ignore-errors iam/create_user
+#   ./bench_gate.sh --report report.json --op-p95-max "s3/put_object_1mb=50,s3/get_object_1mb=50"
 #   ./bench_gate.sh --report report.json --output benchmark-gate.json
 
 set -euo pipefail
@@ -34,6 +40,8 @@ REPORT=""
 P95_MAX="5"
 MEMORY_MAX="10"
 IGNORE_ERRORS=""
+IGNORE_LATENCY=""
+OP_P95_MAX=""
 OUTPUT=""
 
 usage() {
@@ -42,10 +50,20 @@ Usage: $(basename "$0") [OPTIONS]
 
 Options:
   --report <path>              Path to JSON benchmark report from bench_services.sh (required)
-  --p95-max <ms>               Absolute p95 ceiling for openstack in milliseconds (default: 5)
+  --p95-max <ms>               Global p95 ceiling for openstack in milliseconds (default: 5)
   --memory-max <mb>            Absolute loaded RSS ceiling for openstack in MB (default: 10)
   --ignore-errors <list>       Comma-separated service/operation pairs to skip error check
                                e.g. "iam/create_user,s3/put_object"
+  --ignore-latency <list>      Comma-separated service/operation pairs to skip p95 latency check
+                               entirely (no latency gate applied). Prefer --op-p95-max for a
+                               size-appropriate threshold instead of skipping entirely.
+                               e.g. "s3/put_object_10mb,s3/get_object_10mb"
+  --op-p95-max <list>          Comma-separated per-operation p95 overrides in the form
+                               "service/operation=<ms>". When set, this threshold replaces the
+                               global --p95-max for that operation; the global gate no longer
+                               applies. Use this for body-transfer operations whose latency
+                               scales with payload size.
+                               e.g. "s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=200"
   --output <path>              Write gate JSON to file (default: stdout)
   -h, --help                   Show this help
 EOF
@@ -54,11 +72,13 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --report)        REPORT="$2";        shift 2 ;;
-    --p95-max)       P95_MAX="$2";       shift 2 ;;
-    --memory-max)    MEMORY_MAX="$2";    shift 2 ;;
-    --ignore-errors) IGNORE_ERRORS="$2"; shift 2 ;;
-    --output)        OUTPUT="$2";        shift 2 ;;
+    --report)          REPORT="$2";          shift 2 ;;
+    --p95-max)         P95_MAX="$2";         shift 2 ;;
+    --memory-max)      MEMORY_MAX="$2";      shift 2 ;;
+    --ignore-errors)   IGNORE_ERRORS="$2";   shift 2 ;;
+    --ignore-latency)  IGNORE_LATENCY="$2";  shift 2 ;;
+    --op-p95-max)      OP_P95_MAX="$2";      shift 2 ;;
+    --output)          OUTPUT="$2";          shift 2 ;;
     -h|--help) usage ;;
     *) echo "ERROR: Unknown option: $1" >&2; exit 2 ;;
   esac
@@ -142,6 +162,60 @@ IGNORED_JSON=$(
     echo "[]"
   fi
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build ignore-latency set (backward-compat: skip latency gate entirely)
+# ─────────────────────────────────────────────────────────────────────────────
+
+declare -A IGNORE_LATENCY_SET
+if [[ -n "$IGNORE_LATENCY" ]]; then
+  IFS=',' read -ra _ignore_lat_list <<< "$IGNORE_LATENCY"
+  for _entry in "${_ignore_lat_list[@]}"; do
+    _entry="${_entry// /}"  # trim spaces
+    IGNORE_LATENCY_SET["$_entry"]=1
+  done
+fi
+
+# Build JSON array of latency-ignored entries for output
+IGNORED_LATENCY_JSON=$(
+  if [[ -n "$IGNORE_LATENCY" ]]; then
+    IFS=',' read -ra _items <<< "$IGNORE_LATENCY"
+    printf '%s\n' "${_items[@]}" | jq -R . | jq -s .
+  else
+    echo "[]"
+  fi
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build per-operation p95 override map (--op-p95-max "svc/op=ms,svc/op=ms")
+# When set for an operation, replaces the global --p95-max for that operation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+declare -A OP_P95_MAX_SET   # key: "service/operation", value: threshold_ms
+OP_P95_MAX_JSON="{}"        # JSON object for report output
+
+if [[ -n "$OP_P95_MAX" ]]; then
+  IFS=',' read -ra _op_list <<< "$OP_P95_MAX"
+  _op_json_parts=()
+  for _entry in "${_op_list[@]}"; do
+    _entry="${_entry// /}"   # trim spaces
+    _op_key="${_entry%%=*}"
+    _op_val="${_entry##*=}"
+    if [[ -z "$_op_key" || -z "$_op_val" ]]; then
+      echo "ERROR: --op-p95-max entry malformed (expected service/op=ms): '$_entry'" >&2
+      exit 2
+    fi
+    if ! awk "BEGIN {exit !($_op_val > 0)}" 2>/dev/null; then
+      echo "ERROR: --op-p95-max threshold must be a positive number: '$_op_val'" >&2
+      exit 2
+    fi
+    OP_P95_MAX_SET["$_op_key"]="$_op_val"
+    _op_json_parts+=("$(jq -n --arg k "$_op_key" --argjson v "$_op_val" '{($k):$v}')")
+  done
+  if [[ ${#_op_json_parts[@]} -gt 0 ]]; then
+    OP_P95_MAX_JSON=$(printf '%s\n' "${_op_json_parts[@]}" | jq -s 'add // {}')
+  fi
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Memory evaluation
@@ -264,13 +338,30 @@ while IFS= read -r SERVICE; do
     OP_FAILURES_JSON="[]"
     OP_GATE_PASS=true
 
-    # 1. Absolute p95 threshold
-    if [[ "$OS_P95" != "null" ]] && awk "BEGIN {exit !($OS_P95 > $P95_MAX)}"; then
-      OP_GATE_PASS=false
-      GATE_FAILED=true
-      _msg="${KEY}: p95=${OS_P95}ms exceeds ${P95_MAX}ms threshold"
-      LATENCY_FAILURES+=("$_msg")
-      OP_FAILURES_JSON=$(echo "$OP_FAILURES_JSON" | jq -c --arg m "$_msg" '. + [$m]')
+    # 1. p95 latency gate — three possible modes per operation:
+    #    a) --op-p95-max set: use per-op threshold (mandatory, overrides global)
+    #    b) --ignore-latency set: skip latency gate entirely (backward compat)
+    #    c) default: apply global --p95-max
+    LATENCY_IGNORED=false
+    LATENCY_THRESHOLD="$P95_MAX"
+    LATENCY_THRESHOLD_SOURCE="global"
+
+    if [[ -n "${OP_P95_MAX_SET[$KEY]+x}" ]]; then
+      # Per-op threshold takes precedence — global gate replaced for this op
+      LATENCY_THRESHOLD="${OP_P95_MAX_SET[$KEY]}"
+      LATENCY_THRESHOLD_SOURCE="per_op"
+    elif [[ -n "${IGNORE_LATENCY_SET[$KEY]+x}" ]]; then
+      LATENCY_IGNORED=true
+    fi
+
+    if [[ "$LATENCY_IGNORED" == "false" ]]; then
+      if [[ "$OS_P95" != "null" ]] && awk "BEGIN {exit !($OS_P95 > $LATENCY_THRESHOLD)}"; then
+        OP_GATE_PASS=false
+        GATE_FAILED=true
+        _msg="${KEY}: p95=${OS_P95}ms exceeds ${LATENCY_THRESHOLD}ms threshold (${LATENCY_THRESHOLD_SOURCE})"
+        LATENCY_FAILURES+=("$_msg")
+        OP_FAILURES_JSON=$(echo "$OP_FAILURES_JSON" | jq -c --arg m "$_msg" '. + [$m]')
+      fi
     fi
 
     # 2. Error check (unless ignored)
@@ -377,12 +468,17 @@ while IFS= read -r SERVICE; do
       --argjson moto       "$MOTO_JSON" \
       --argjson ls_su      "$LS_OP_SPEEDUP_JSON" \
       --argjson moto_su    "$MOTO_OP_SPEEDUP_JSON" \
-      --argjson pass       "$([ "$OP_GATE_PASS"    == "true" ] && echo true || echo false)" \
-      --argjson errig      "$([ "$ERROR_IGNORED"   == "true" ] && echo true || echo false)" \
+      --argjson pass       "$([ "$OP_GATE_PASS"      == "true" ] && echo true || echo false)" \
+      --argjson errig      "$([ "$ERROR_IGNORED"     == "true" ] && echo true || echo false)" \
+      --argjson latig      "$([ "$LATENCY_IGNORED"   == "true" ] && echo true || echo false)" \
+      --argjson thresh     "$LATENCY_THRESHOLD" \
+      --arg     thresh_src "$LATENCY_THRESHOLD_SOURCE" \
       --argjson failures   "$OP_FAILURES_JSON" \
       '{openstack:$os, localstack:$ls, moto:$moto,
         speedup_vs_localstack:$ls_su, speedup_vs_moto:$moto_su,
-        gate_pass:$pass, error_ignored:$errig, gate_failures:$failures}')
+        gate_pass:$pass, error_ignored:$errig, latency_ignored:$latig,
+        p95_threshold_ms:$thresh, p95_threshold_source:$thresh_src,
+        gate_failures:$failures}')
 
     OPS_JSON_PARTS+=("$(jq -n --arg k "$OPERATION" --argjson v "$OP_JSON" '{($k):$v}')")
   done <<< "$OPS"
@@ -493,6 +589,8 @@ GATE_JSON=$(jq -n \
   --argjson p95_max "$P95_MAX" \
   --argjson mem_max "$MEMORY_MAX" \
   --argjson ignored "$IGNORED_JSON" \
+  --argjson ignored_lat "$IGNORED_LATENCY_JSON" \
+  --argjson op_p95 "$OP_P95_MAX_JSON" \
   --arg profile "$PROFILE" \
   --arg mode "$MODE" \
   --arg timestamp "$TIMESTAMP" \
@@ -518,7 +616,9 @@ GATE_JSON=$(jq -n \
     thresholds: {
       p95_max_ms: $p95_max,
       memory_max_mb: $mem_max,
-      ignored_errors: $ignored
+      ignored_errors: $ignored,
+      ignored_latency: $ignored_lat,
+      per_op_p95_thresholds: $op_p95
     },
     metadata: {
       profile: $profile,

@@ -11,7 +11,7 @@ fn make_ctx(operation: &str, xml_body: &str, path: &str, method: &str) -> Reques
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::from(xml_body.as_bytes().to_vec()),
+        raw_body: Some(Bytes::from(xml_body.as_bytes().to_vec())),
         headers: HashMap::new(),
         path: path.to_string(),
         method: method.to_string(),

@@ -554,7 +554,7 @@ impl ServiceProvider for LambdaProvider {
                     .map(|s| s.as_str())
                     .unwrap_or("RequestResponse");
 
-                let payload = String::from_utf8_lossy(&ctx.raw_body).to_string();
+                let payload = String::from_utf8_lossy(ctx.raw_body_bytes()).to_string();
 
                 // Clone function data while holding the store lock briefly
                 let func_data = {

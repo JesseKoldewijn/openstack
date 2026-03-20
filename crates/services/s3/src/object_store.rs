@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 /// Manages object data on the filesystem.
 #[derive(Debug, Clone)]
@@ -102,7 +103,7 @@ impl ObjectFileStore {
         fs::create_dir_all(&dir).await?;
 
         let final_path = dir.join(version_id);
-        let tmp_path = dir.join(format!("{}.tmp", version_id));
+        let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
 
         let mut file = fs::File::create(&tmp_path).await?;
         file.write_all(data).await?;
@@ -141,7 +142,7 @@ impl ObjectFileStore {
         fs::create_dir_all(&dir).await?;
 
         let final_path = dir.join(version_id);
-        let tmp_path = dir.join(format!("{}.tmp", version_id));
+        let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
 
         let mut file = fs::File::create(&tmp_path).await?;
         let bytes_written = tokio::io::copy(reader, &mut file).await?;
@@ -501,6 +502,52 @@ mod tests {
         // Normal file should still be there.
         let real_path = store.object_path("acct1", "us-east-1", "bkt", "k", "v1");
         assert!(real_path.exists());
+    }
+
+    #[tokio::test]
+    async fn concurrent_writes_same_key_no_race() {
+        // Spawning 10 concurrent tasks writing to the same version_id
+        // ("null") used to race on the shared `null.tmp` temp file.
+        // With UUID-suffixed temp files each task gets its own temp path
+        // and all writes should complete successfully.
+        let (store, _tmp) = make_store().await;
+        let store = std::sync::Arc::new(store);
+
+        // Write 10 different data payloads concurrently to the same key.
+        let handles: Vec<_> = (0u8..10)
+            .map(|i| {
+                let store = std::sync::Arc::clone(&store);
+                tokio::spawn(async move {
+                    store
+                        .write_object("acct1", "us-east-1", "bkt", "same-key", "null", &[i; 64])
+                        .await
+                })
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await);
+        }
+        for join_result in results {
+            // Every task must have finished without a filesystem error.
+            join_result
+                .expect("task panicked")
+                .expect("write_object failed");
+        }
+
+        // The final object file must exist (last writer wins via rename).
+        let key_dir = store.object_dir("acct1", "us-east-1", "bkt", "same-key");
+        let final_path = key_dir.join("null");
+        assert!(final_path.exists(), "final object file should exist");
+
+        // No .tmp files should remain.
+        let mut entries = tokio::fs::read_dir(&key_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.ends_with(".tmp"), "orphaned temp file found: {name}");
+        }
     }
 
     #[tokio::test]

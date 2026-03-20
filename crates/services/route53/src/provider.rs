@@ -148,7 +148,7 @@ impl ServiceProvider for Route53Provider {
             // CreateHostedZone  POST /2013-04-01/hostedzone
             // ----------------------------------------------------------------
             "CreateHostedZone" => {
-                let raw = String::from_utf8_lossy(&ctx.raw_body);
+                let raw = String::from_utf8_lossy(ctx.raw_body_bytes());
                 let name_raw = xml_text(&raw, "Name").unwrap_or_default();
                 // Normalize: ensure trailing dot
                 let name = if name_raw.ends_with('.') {
@@ -254,7 +254,7 @@ impl ServiceProvider for Route53Provider {
                     .unwrap_or("")
                     .to_string();
 
-                let raw = String::from_utf8_lossy(&ctx.raw_body);
+                let raw = String::from_utf8_lossy(ctx.raw_body_bytes());
                 let changes = parse_rrsets(&raw);
 
                 let mut store = self.store.get_or_create(account_id, ROUTE53_REGION);

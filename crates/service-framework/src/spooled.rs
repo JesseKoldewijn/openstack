@@ -99,6 +99,28 @@ impl SpooledBody {
         Ok(Bytes::from(buf))
     }
 
+    /// Return the first `n` bytes without consuming the body.
+    ///
+    /// For inline data this is a cheap slice operation.  For file-backed
+    /// data the file cursor is rewound to 0 after the read so subsequent
+    /// reads start from the beginning.
+    pub fn peek_bytes(&mut self, n: usize) -> io::Result<Bytes> {
+        self.inner.rewind()?;
+        let take = n.min(self.len);
+        let mut buf = vec![0u8; take];
+        self.inner.read_exact(&mut buf)?;
+        self.inner.rewind()?;
+        Ok(Bytes::from(buf))
+    }
+
+    /// Materialise the full body as `Bytes`, consuming self.
+    ///
+    /// Alias for [`into_bytes`](Self::into_bytes) with a name that makes
+    /// it clear this is an on-demand, lazy operation.
+    pub fn materialize(self) -> io::Result<Bytes> {
+        self.into_bytes()
+    }
+
     /// Rewind the internal cursor to the beginning.
     pub fn rewind(&mut self) -> io::Result<()> {
         self.inner.rewind()?;
@@ -262,6 +284,64 @@ mod tests {
         assert_eq!(body.len(), 18);
         let bytes = body.into_bytes().unwrap();
         assert_eq!(&bytes[..], b"chunk1chunk2chunk3");
+    }
+
+    #[test]
+    fn peek_bytes_inline() {
+        let mut body = SpooledBody::new(1024);
+        body.write_chunk(b"peek at me").unwrap();
+        body.rewind().unwrap();
+
+        let peeked = body.peek_bytes(4).unwrap();
+        assert_eq!(&peeked[..], b"peek");
+
+        // Body must still be fully readable after peek.
+        let all = body.to_bytes().unwrap();
+        assert_eq!(&all[..], b"peek at me");
+    }
+
+    #[test]
+    fn peek_bytes_file_backed() {
+        let mut body = SpooledBody::new(4); // threshold=4 so it spills
+        body.write_chunk(b"spilled to disk").unwrap();
+        assert!(body.is_rolled());
+
+        let peeked = body.peek_bytes(7).unwrap();
+        assert_eq!(&peeked[..], b"spilled");
+
+        // Body must still be fully readable after peek.
+        let all = body.to_bytes().unwrap();
+        assert_eq!(&all[..], b"spilled to disk");
+    }
+
+    #[test]
+    fn peek_bytes_larger_than_len_returns_all() {
+        let mut body = SpooledBody::new(1024);
+        body.write_chunk(b"hi").unwrap();
+        body.rewind().unwrap();
+
+        let peeked = body.peek_bytes(100).unwrap();
+        assert_eq!(&peeked[..], b"hi");
+    }
+
+    #[test]
+    fn peek_bytes_zero_returns_empty() {
+        let mut body = SpooledBody::new(1024);
+        body.write_chunk(b"data").unwrap();
+        body.rewind().unwrap();
+
+        let peeked = body.peek_bytes(0).unwrap();
+        assert!(peeked.is_empty());
+        let all = body.to_bytes().unwrap();
+        assert_eq!(&all[..], b"data");
+    }
+
+    #[test]
+    fn materialize_alias_works() {
+        let data = Bytes::from_static(b"materialize me");
+        let body = SpooledBody::from_bytes(data.clone(), 1024).unwrap();
+        let result = body.materialize().unwrap();
+        assert_eq!(result, data);
     }
 
     #[test]

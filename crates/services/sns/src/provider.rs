@@ -95,7 +95,7 @@ fn escape_xml(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn parse_params(ctx: &RequestContext) -> HashMap<String, String> {
-    let body_str = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    let body_str = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
     let mut params: HashMap<String, String> = body_str
         .split('&')
         .filter_map(|kv| {

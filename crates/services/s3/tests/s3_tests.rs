@@ -1,11 +1,16 @@
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use bytes::Bytes;
+use digest::Digest as _;
 use openstack_s3::{
     provider::S3Provider,
     store::{ObjectDataRef, S3Store},
 };
-use openstack_service_framework::traits::{RequestContext, ServiceProvider};
+use openstack_service_framework::{
+    SpooledBody,
+    traits::{RequestContext, ServiceProvider},
+};
 
 fn make_ctx(method: &str, path: &str, body: &[u8]) -> RequestContext {
     RequestContext {
@@ -14,7 +19,7 @@ fn make_ctx(method: &str, path: &str, body: &[u8]) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::Value::Null,
-        raw_body: Bytes::from(body.to_vec()),
+        raw_body: Some(Bytes::from(body.to_vec())),
         headers: HashMap::new(),
         path: path.to_string(),
         method: method.to_string(),
@@ -35,7 +40,7 @@ fn make_ctx_with_headers(
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::Value::Null,
-        raw_body: Bytes::from(body.to_vec()),
+        raw_body: Some(Bytes::from(body.to_vec())),
         headers,
         path: path.to_string(),
         method: method.to_string(),
@@ -56,7 +61,7 @@ fn make_ctx_with_query(
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::Value::Null,
-        raw_body: Bytes::from(body.to_vec()),
+        raw_body: Some(Bytes::from(body.to_vec())),
         headers: HashMap::new(),
         path: path.to_string(),
         method: method.to_string(),
@@ -695,4 +700,127 @@ fn test_store_multipart() {
         .complete_multipart_upload(&uid, &[(1, String::new()), (2, String::new())])
         .unwrap();
     assert_eq!(v.data, ObjectDataRef::Inline(b"part1part2".to_vec()));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Streaming PutObject via spooled_body (tasks 4.5 and 4.6)
+// ---------------------------------------------------------------------------
+
+/// Helper: build a RequestContext with raw_body=None and spooled_body=Some.
+/// This mimics the real gateway path for S3 PutObject where the body is
+/// streamed through SpooledBody and never materialised into raw_body.
+fn make_ctx_spooled(method: &str, path: &str, data: Vec<u8>, threshold: usize) -> RequestContext {
+    let spooled = SpooledBody::from_bytes(Bytes::from(data), threshold)
+        .expect("SpooledBody::from_bytes failed");
+    RequestContext {
+        service: "s3".to_string(),
+        operation: String::new(),
+        region: "us-east-1".to_string(),
+        account_id: "000000000000".to_string(),
+        request_body: serde_json::Value::Null,
+        raw_body: None, // gateway does NOT materialise for S3 object bodies
+        headers: HashMap::new(),
+        path: path.to_string(),
+        method: method.to_string(),
+        query_params: HashMap::new(),
+        spooled_body: Some(Mutex::new(spooled)),
+    }
+}
+
+/// Task 4.5 — PutObject with spooled_body=Some and raw_body=None: object is
+/// written, ETag is correct, and raw_body is never needed.
+#[tokio::test]
+async fn test_put_object_via_spooled_body() {
+    let provider = new_provider().await;
+
+    // Create bucket
+    let ctx = make_ctx("PUT", "/spool-bucket", b"");
+    provider.dispatch(&ctx).await.unwrap();
+
+    // Put object using the spooled path (raw_body=None)
+    let body_data = b"spooled content for streaming put".to_vec();
+    let expected_etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&body_data)));
+
+    let ctx = make_ctx_spooled(
+        "PUT",
+        "/spool-bucket/streamed.txt",
+        body_data.clone(),
+        1024 * 1024,
+    );
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200, "PutObject via spooled_body failed");
+
+    // Verify ETag header matches expected MD5
+    let etag_header = resp
+        .headers
+        .iter()
+        .find(|(k, _)| k == "ETag")
+        .map(|(_, v)| v.clone())
+        .expect("ETag header missing");
+    assert_eq!(etag_header, expected_etag, "ETag mismatch");
+
+    // GetObject — verify content round-trips correctly
+    let ctx = make_ctx("GET", "/spool-bucket/streamed.txt", b"");
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    let got = resp.body.into_bytes().await.unwrap();
+    assert_eq!(&got[..], &body_data[..]);
+}
+
+/// Task 4.6 — Parameterized test: small (inline, 100 B) and large (disk-spilled,
+/// 300 KiB, above 256 KiB threshold) bodies both produce correct ETags and content.
+#[tokio::test]
+async fn test_put_object_spooled_inline_and_disk() {
+    let provider = new_provider().await;
+
+    // Create bucket
+    let ctx = make_ctx("PUT", "/threshold-bucket", b"");
+    provider.dispatch(&ctx).await.unwrap();
+
+    // Inline case: 100 bytes — well below the 256 KiB threshold
+    let inline_data: Vec<u8> = (0u8..100).collect();
+    let inline_etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&inline_data)));
+
+    // Use a threshold high enough that the SpooledBody stays in memory
+    let ctx = make_ctx_spooled(
+        "PUT",
+        "/threshold-bucket/inline.bin",
+        inline_data.clone(),
+        1024 * 1024,
+    );
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200, "inline PutObject failed");
+    let etag = resp
+        .headers
+        .iter()
+        .find(|(k, _)| k == "ETag")
+        .map(|(_, v)| v.clone())
+        .unwrap();
+    assert_eq!(etag, inline_etag, "inline ETag mismatch");
+
+    let ctx = make_ctx("GET", "/threshold-bucket/inline.bin", b"");
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    let got = resp.body.into_bytes().await.unwrap();
+    assert_eq!(&got[..], &inline_data[..]);
+
+    // Disk-spilled case: 300 KiB — above the 256 KiB provider threshold
+    let large_data: Vec<u8> = (0u8..255).cycle().take(300 * 1024).collect();
+    let large_etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&large_data)));
+
+    // Use threshold=0 so SpooledBody spills immediately to disk
+    let ctx = make_ctx_spooled("PUT", "/threshold-bucket/large.bin", large_data.clone(), 0);
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200, "disk-spilled PutObject failed");
+    let etag = resp
+        .headers
+        .iter()
+        .find(|(k, _)| k == "ETag")
+        .map(|(_, v)| v.clone())
+        .unwrap();
+    assert_eq!(etag, large_etag, "disk-spilled ETag mismatch");
+
+    let ctx = make_ctx("GET", "/threshold-bucket/large.bin", b"");
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    let got = resp.body.into_bytes().await.unwrap();
+    assert_eq!(&got[..], &large_data[..]);
 }

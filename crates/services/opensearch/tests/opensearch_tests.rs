@@ -12,7 +12,7 @@ fn make_ctx(operation: &str, body: Value, path: &str, method: &str) -> RequestCo
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
         headers: HashMap::new(),
         path: path.to_string(),
         method: method.to_string(),

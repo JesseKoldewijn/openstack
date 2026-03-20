@@ -120,7 +120,7 @@ fn parse_params(ctx: &RequestContext) -> HashMap<String, String> {
     let mut params: HashMap<String, String> = HashMap::new();
 
     // Query protocol form body
-    let body_str = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    let body_str = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
     for (k, v) in body_str.split('&').filter_map(|kv| {
         let mut it = kv.splitn(2, '=');
         let k = it.next()?;
@@ -144,7 +144,7 @@ fn parse_params(ctx: &RequestContext) -> HashMap<String, String> {
         }
 
         if let Ok(serde_json::Value::Object(map)) =
-            serde_json::from_slice::<serde_json::Value>(&ctx.raw_body)
+            serde_json::from_slice::<serde_json::Value>(ctx.raw_body_bytes())
         {
             for (k, v) in map {
                 if let Some(s) = v.as_str() {
