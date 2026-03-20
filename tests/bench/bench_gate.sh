@@ -304,8 +304,8 @@ ratio() {
 }
 
 while IFS= read -r SERVICE; do
-  # Collect all non-skipped operations for this service
-  OPS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation != \"SKIPPED\")] | .[].operation" "$REPORT")
+  # Collect all benchmarkable operations for this service (exclude meta-entries)
+  OPS=$(jq -r "[.results[] | select(.service == \"$SERVICE\" and .operation != \"SKIPPED\" and .operation != \"SEED_FAILED\")] | .[].operation" "$REPORT")
 
   if [[ -z "$OPS" ]]; then
     # Only skipped entries for this service — handled in skipped section
@@ -486,6 +486,11 @@ while IFS= read -r SERVICE; do
   # Merge all operations into a single object
   OPS_MERGED=$(printf '%s\n' "${OPS_JSON_PARTS[@]}" | jq -s 'add // {}')
 
+  # Collect seed failures for this service from the report
+  SVC_SEED_FAILURES_JSON=$(jq -c \
+    "[.results[] | select(.service == \"$SERVICE\" and .operation == \"SEED_FAILED\") | {target:.target, reason:.seed_reason}]" \
+    "$REPORT")
+
   # Compute per-service speedup stats for each metric
   _build_speedup_obj() {
     # args: p50_arr_name p95_arr_name p99_arr_name rps_arr_name
@@ -516,7 +521,8 @@ while IFS= read -r SERVICE; do
     --argjson ops     "$OPS_MERGED" \
     --argjson ls_su   "$LS_SPEEDUP_JSON" \
     --argjson moto_su "$MOTO_SPEEDUP_JSON" \
-    '{operations:$ops, speedup_vs_localstack:$ls_su, speedup_vs_moto:$moto_su}')
+    --argjson sf      "$SVC_SEED_FAILURES_JSON" \
+    '{operations:$ops, speedup_vs_localstack:$ls_su, speedup_vs_moto:$moto_su, seed_failures:$sf}')
 
   SERVICES_JSON_PARTS+=("$(jq -n --arg k "$SERVICE" --argjson v "$SVC_JSON" '{($k):$v}')")
 
@@ -557,6 +563,9 @@ OVERALL_JSON=$(jq -n \
 # ─────────────────────────────────────────────────────────────────────────────
 
 SKIPPED_JSON=$(jq -c '[.results[] | select(.operation == "SKIPPED") | {service:.service, reason:.skip_reason}]' "$REPORT")
+
+# Build global seed_failures array (all SEED_FAILED entries across all services)
+SEED_FAILURES_JSON=$(jq -c '[.results[] | select(.operation == "SEED_FAILED") | {service:.service, target:.target, reason:.seed_reason}]' "$REPORT")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Build failures summary JSON
@@ -607,6 +616,7 @@ GATE_JSON=$(jq -n \
   --argjson services "$SERVICES_MERGED" \
   --argjson overall "$OVERALL_JSON" \
   --argjson skipped "$SKIPPED_JSON" \
+  --argjson seed_fail "$SEED_FAILURES_JSON" \
   --argjson lat_fail "$LATENCY_FAILURES_JSON" \
   --argjson err_fail "$ERROR_FAILURES_JSON" \
   --argjson mem_fail "$MEMORY_FAILURES_JSON" \
@@ -637,6 +647,7 @@ GATE_JSON=$(jq -n \
     services: $services,
     overall: $overall,
     skipped: $skipped,
+    seed_failures: $seed_fail,
     failures: {
       latency: $lat_fail,
       errors:  $err_fail,

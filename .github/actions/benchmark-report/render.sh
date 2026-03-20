@@ -52,11 +52,11 @@ $HAS_LS   && TARGETS_STR="$TARGETS_STR, LocalStack"
 $HAS_MOTO && TARGETS_STR="$TARGETS_STR, moto"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper: format a per-operation speedup ratio as a signed multiplier.
+# Helper: format a per-operation speedup ratio as a human-readable multiplier.
 # $1 = ratio (float or "null")
-#   For latency: ratio = competitor / openstack  (>1 = competitor slower)
+#   For latency: ratio = competitor / openstack  (>1 = competitor slower = openstack faster)
 #   For RPS:     ratio = openstack / competitor   (>1 = openstack faster)
-# Outputs: "(-4.5x)" if competitor is slower, "(0.8x)" if competitor is faster.
+# Outputs: "(-4.5x)" if competitor is slower, "(+5.0x)" if competitor is faster (value inverted).
 # Suppressed when ratio is within ±5% of 1.0 (i.e. 0.95–1.05).
 # ─────────────────────────────────────────────────────────────────────────────
 fmt_ratio() {
@@ -67,33 +67,63 @@ fmt_ratio() {
   fi
   awk -v r="$v" 'BEGIN {
     if      (r >= 1.05) printf "(-%.1fx)", r
-    else if (r <= 0.95) printf "(%.1fx)",  r
+    else if (r <= 0.95) printf "(+%.1fx)", 1/r
   }'
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper: format a service/overall speedup object into a single summary line.
-# $1 = JSON speedup object {p50:{min,max,avg}, p95:..., p99:..., rps:...} or "null"
-# Uses p50 latency stats (range across operations) as the representative metric.
-# Outputs: "2.1×–8.3× faster (avg **4.7×**)" or empty string.
+# Helper: format a service speedup summary as up to two lines (faster / slower).
+# $1 = service name (key in .services)
+# $2 = competitor key: "localstack" or "moto"  (matches speedup_vs_<key> fields)
+# Reads per-op p50 ratios from the gate JSON to split into faster/slower buckets.
+# Outputs 0, 1 or 2 lines of the form:
+#   "2.1×–8.3× faster on N ops (avg 4.7×)"
+#   "1.3×–5.0× slower on M ops (avg 2.1×)"
 # ─────────────────────────────────────────────────────────────────────────────
 fmt_summary_line() {
-  local obj="$1"
-  if [[ "$obj" == "null" ]]; then echo ""; return; fi
+  local svc="$1" comp="$2"
+  local mul en_dash
+  mul=$(printf '\xc3\x97')      # ×
+  en_dash=$(printf '\xe2\x80\x93')  # –
 
-  local mn mx av
-  mn=$(echo "$obj" | jq -r '.p50.min // "null"')
-  mx=$(echo "$obj" | jq -r '.p50.max // "null"')
-  av=$(echo "$obj" | jq -r '.p50.avg // "null"')
-  [[ "$mn" == "null" || "$av" == "null" ]] && echo "" && return
+  # Collect all per-op p50 ratios for this service/competitor
+  local ratios
+  if [[ "$svc" == "*" ]]; then
+    # Overall: collect across all services
+    ratios=$(jq -r \
+      ".services | to_entries[] | .value.operations | to_entries[] | .value.speedup_vs_${comp}.p50 // empty | select(. > 0)" \
+      "$GATE_JSON" 2>/dev/null)
+  else
+    ratios=$(jq -r \
+      ".services.\"$svc\".operations | to_entries[] | .value.speedup_vs_${comp}.p50 // empty | select(. > 0)" \
+      "$GATE_JSON" 2>/dev/null)
+  fi
 
-  # avg > 1 → openstack is faster (competitor latency higher); < 1 → competitor is faster
-  local direction mul en_dash
-  direction=$(awk -v a="$av" 'BEGIN { print (a+0 >= 1) ? "faster" : "slower" }')
-  mul=$(printf '\xc3\x97')    # × multiplication sign
-  en_dash=$(printf '\xe2\x80\x93')  # – en dash
-  printf "%.1f%s%s%.1f%s %s (avg **%.1f%s**)\n" \
-    "$mn" "$mul" "$en_dash" "$mx" "$mul" "$direction" "$av" "$mul"
+  if [[ -z "$ratios" ]]; then echo ""; return; fi
+
+  # Split into two awk passes: ratios > 1 (openstack faster) and < 1 (openstack slower)
+  local faster_line slower_line
+  faster_line=$(echo "$ratios" | awk -v mul="$mul" -v dash="$en_dash" '
+    BEGIN { mn=9999; mx=0; sum=0; n=0 }
+    $1+0 > 1 { v=$1+0; if(v<mn) mn=v; if(v>mx) mx=v; sum+=v; n++ }
+    END {
+      if (n==0) exit
+      avg=sum/n
+      printf "%.1f%s%s%.1f%s faster on %d op%s (avg **%.1f%s**)\n", mn, mul, dash, mx, mul, n, (n==1?"":"s"), avg, mul
+    }')
+
+  slower_line=$(echo "$ratios" | awk -v mul="$mul" -v dash="$en_dash" '
+    BEGIN { mn=9999; mx=0; sum=0; n=0 }
+    $1+0 < 1 { v=1/($1+0); if(v<mn) mn=v; if(v>mx) mx=v; sum+=v; n++ }
+    END {
+      if (n==0) exit
+      avg=sum/n
+      printf "%.1f%s%s%.1f%s slower on %d op%s (avg **%.1f%s**)\n", mn, mul, dash, mx, mul, n, (n==1?"":"s"), avg, mul
+    }')
+
+  # Emit whichever lines are non-empty
+  [[ -n "$faster_line" ]] && echo "$faster_line"
+  [[ -n "$slower_line" ]] && echo "$slower_line"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,49 +183,48 @@ if [[ "$MEM_GATE_PASS" == "false" ]]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Per-service sections
+# Helper: render a benchmark table for a given set of operations.
+# $1 = service name (key in gate JSON)
+# $2 = newline-separated list of operation names to render
+# Outputs table rows (no header — caller emits header).
 # ─────────────────────────────────────────────────────────────────────────────
+render_ops_table_rows() {
+  local svc="$1" ops="$2"
 
-SERVICES=$(jq -r '.services | keys[]' "$GATE_JSON")
-
-while IFS= read -r SVC; do
-  echo ""
-  echo "### $(echo "$SVC" | tr '[:lower:]' '[:upper:]')"
-  echo ""
-
-  # Table header — always: Operation | Platform | p50 | p95 | p99 | RPS | Errors
-  echo "| Operation | Platform | p50 (ms) | p95 (ms) | p99 (ms) | RPS | Errors |"
-  echo "|-----------|----------|----------|----------|----------|-----|--------|"
-
-  OPERATIONS=$(jq -r ".services.\"$SVC\".operations | keys[]" "$GATE_JSON")
+  # Pre-compute which targets have a seed failure for this service.
+  # A seed failure means missing data for that target is expected and should be
+  # omitted silently (the warning blockquote covers it).  If a target is active
+  # (HAS_LS / HAS_MOTO) but has NO seed failure, any operation that is missing
+  # data for that target gets an explicit "—" row so the gap is visible.
+  local LS_SEED_FAILED=false MOTO_SEED_FAILED=false
+  if $HAS_LS; then
+    jq -e ".services.\"$svc\".seed_failures // [] | map(select(.target == \"localstack\")) | length > 0" \
+      "$GATE_JSON" >/dev/null 2>&1 && LS_SEED_FAILED=true
+  fi
+  if $HAS_MOTO; then
+    jq -e ".services.\"$svc\".seed_failures // [] | map(select(.target == \"moto\")) | length > 0" \
+      "$GATE_JSON" >/dev/null 2>&1 && MOTO_SEED_FAILED=true
+  fi
 
   while IFS= read -r OP; do
-    OP_DATA=$(jq -c ".services.\"$SVC\".operations.\"$OP\"" "$GATE_JSON")
+    OP_DATA=$(jq -c ".services.\"$svc\".operations.\"$OP\"" "$GATE_JSON")
     GATE_PASS=$(echo "$OP_DATA" | jq -r '.gate_pass')
     ERROR_IGNORED=$(echo "$OP_DATA" | jq -r '.error_ignored')
 
-    # openstack row (always present)
     OS_P50=$(echo "$OP_DATA" | jq -r '.openstack.p50_ms')
     OS_P95=$(echo "$OP_DATA" | jq -r '.openstack.p95_ms')
     OS_P99=$(echo "$OP_DATA" | jq -r '.openstack.p99_ms')
     OS_RPS=$(echo "$OP_DATA" | jq -r '.openstack.rps')
     OS_ERR=$(echo "$OP_DATA" | jq -r '.openstack.errors')
 
-    # Status indicator for openstack row
     STATUS_ICON=""
-    if [[ "$GATE_PASS" == "false" ]]; then
-      STATUS_ICON=" ❌"
-    fi
+    [[ "$GATE_PASS" == "false" ]] && STATUS_ICON=" ❌"
 
-    # Format errors — show note if ignored
     ERR_DISPLAY="$OS_ERR"
-    if [[ "$ERROR_IGNORED" == "true" && "$OS_ERR" != "0" ]]; then
-      ERR_DISPLAY="${OS_ERR} *(ignored)*"
-    fi
+    [[ "$ERROR_IGNORED" == "true" && "$OS_ERR" != "0" ]] && ERR_DISPLAY="${OS_ERR} *(ignored)*"
 
     echo "| **${OP}**${STATUS_ICON} | **openstack** | **${OS_P50}** | **${OS_P95}** | **${OS_P99}** | **${OS_RPS}** | **${ERR_DISPLAY}** |"
 
-    # LocalStack row
     if $HAS_LS; then
       LS_P50=$(echo "$OP_DATA" | jq -r '.localstack.p50_ms // "—"')
       LS_P95=$(echo "$OP_DATA" | jq -r '.localstack.p95_ms // "—"')
@@ -203,7 +232,6 @@ while IFS= read -r SVC; do
       LS_RPS=$(echo "$OP_DATA" | jq -r '.localstack.rps // "—"')
       LS_ERR=$(echo "$OP_DATA" | jq -r '.localstack.errors // "—"')
       if [[ "$LS_P50" != "null" && "$LS_P50" != "—" ]]; then
-        # Per-operation speedup as ratio vs openstack for inline display
         SU_LS=$(echo "$OP_DATA" | jq -c '.speedup_vs_localstack // {}')
         SU_LS_P50=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.p50 // "null"')")
         SU_LS_P95=$(fmt_ratio "$(echo "$SU_LS" | jq -r '.p95 // "null"')")
@@ -214,10 +242,12 @@ while IFS= read -r SVC; do
         [[ -n "$SU_LS_P99" ]] && LS_P99="${LS_P99} ${SU_LS_P99}"
         [[ -n "$SU_LS_RPS" ]] && LS_RPS="${LS_RPS} ${SU_LS_RPS}"
         echo "| | LocalStack | ${LS_P50} | ${LS_P95} | ${LS_P99} | ${LS_RPS} | ${LS_ERR} |"
+      elif ! $LS_SEED_FAILED; then
+        # LocalStack is active, no data, and no seed failure explains it — show explicit gap
+        echo "| | LocalStack | — | — | — | — | — |"
       fi
     fi
 
-    # Moto row
     if $HAS_MOTO; then
       MOTO_P50=$(echo "$OP_DATA" | jq -r '.moto.p50_ms // "—"')
       MOTO_P95=$(echo "$OP_DATA" | jq -r '.moto.p95_ms // "—"')
@@ -235,19 +265,139 @@ while IFS= read -r SVC; do
         [[ -n "$SU_MOTO_P99" ]] && MOTO_P99="${MOTO_P99} ${SU_MOTO_P99}"
         [[ -n "$SU_MOTO_RPS" ]] && MOTO_RPS="${MOTO_RPS} ${SU_MOTO_RPS}"
         echo "| | moto | ${MOTO_P50} | ${MOTO_P95} | ${MOTO_P99} | ${MOTO_RPS} | ${MOTO_ERR} |"
+      elif ! $MOTO_SEED_FAILED; then
+        # moto is active, no data, and no seed failure explains it — show explicit gap
+        echo "| | moto | — | — | — | — | — |"
       fi
     fi
-  done <<< "$OPERATIONS"
+  done <<< "$ops"
+}
 
-  # Per-service speedup summary (p50 latency range across operations)
-  LS_SPEEDUP_OBJ=$(jq -c ".services.\"$SVC\".speedup_vs_localstack" "$GATE_JSON")
-  MOTO_SPEEDUP_OBJ=$(jq -c ".services.\"$SVC\".speedup_vs_moto" "$GATE_JSON")
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: emit a summary blockquote for a named sub-section of a service.
+# $1 = service name   $2 = competitor key (localstack|moto)   $3 = ops (newline-sep)
+# Re-computes faster/slower split from only the provided operation set.
+# ─────────────────────────────────────────────────────────────────────────────
+fmt_subset_summary() {
+  local svc="$1" comp="$2" ops="$3"
+  local mul en_dash
+  mul=$(printf '\xc3\x97')
+  en_dash=$(printf '\xe2\x80\x93')
 
+  # Collect p50 ratios only for ops in the subset
+  local ratios=""
+  while IFS= read -r op; do
+    local r
+    r=$(jq -r ".services.\"$svc\".operations.\"$op\".speedup_vs_${comp}.p50 // empty" "$GATE_JSON" 2>/dev/null || true)
+    [[ -n "$r" && "$r" != "null" ]] && ratios+="$r"$'\n'
+  done <<< "$ops"
+
+  [[ -z "$ratios" ]] && return
+
+  echo "$ratios" | awk -v mul="$mul" -v dash="$en_dash" '
+    BEGIN { fmn=9999; fmx=0; fsum=0; fn=0; smn=9999; smx=0; ssum=0; sn=0 }
+    NF>0 {
+      v=$1+0
+      if (v > 1) { if(v<fmn) fmn=v; if(v>fmx) fmx=v; fsum+=v; fn++ }
+      if (v > 0 && v < 1) { iv=1/v; if(iv<smn) smn=iv; if(iv>smx) smx=iv; ssum+=iv; sn++ }
+    }
+    END {
+      if (fn>0) printf "%.1f%s%s%.1f%s faster on %d op%s (avg **%.1f%s**)\n", fmn,mul,dash,fmx,mul,fn,(fn==1?"":"s"),fsum/fn,mul
+      if (sn>0) printf "%.1f%s%s%.1f%s slower on %d op%s (avg **%.1f%s**)\n", smn,mul,dash,smx,mul,sn,(sn==1?"":"s"),ssum/sn,mul
+    }'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-service sections
+# ─────────────────────────────────────────────────────────────────────────────
+
+SERVICES=$(jq -r '.services | keys[]' "$GATE_JSON")
+
+while IFS= read -r SVC; do
+
+  # ── Special handling: S3 split into per-filesize sub-tables ────────────────
+  if [[ "$SVC" == "s3" ]]; then
+    echo ""
+    echo "### S3"
+
+    # S3 seed failure warnings (service-level, not per-tier)
+    SVC_SEED_FAILURES=$(jq -r ".services.\"$SVC\".seed_failures // [] | .[] | \"\(.target): \(.reason)\"" "$GATE_JSON" 2>/dev/null || true)
+    if [[ -n "$SVC_SEED_FAILURES" ]]; then
+      echo ""
+      while IFS= read -r sf; do
+        target_name="${sf%%:*}"
+        reason="${sf#*: }"
+        [[ "$target_name" == "localstack" ]] && target_name="LocalStack"
+        echo "> ⚠️ **${target_name}:** seed failed (${reason}) — excluded from this service's benchmarks"
+      done <<< "$SVC_SEED_FAILURES"
+    fi
+
+    ALL_S3_OPS=$(jq -r ".services.\"s3\".operations | keys[]" "$GATE_JSON")
+
+    for tier in 1mb 10mb 50mb 100mb; do
+      # Filter ops for this tier (suffix match)
+      TIER_OPS=$(echo "$ALL_S3_OPS" | grep "_${tier}$" || true)
+      [[ -z "$TIER_OPS" ]] && continue
+
+      # Display label: 1mb→1MB, 10mb→10MB etc.
+      TIER_LABEL=$(echo "$tier" | tr '[:lower:]' '[:upper:]')
+      echo ""
+      echo "#### S3 — ${TIER_LABEL}"
+      echo ""
+      echo "| Operation | Platform | p50 (ms) | p95 (ms) | p99 (ms) | RPS | Errors |"
+      echo "|-----------|----------|----------|----------|----------|-----|--------|"
+      render_ops_table_rows "s3" "$TIER_OPS"
+
+      # Per-tier summary
+      TIER_SPEEDUP_LINES=()
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && TIER_SPEEDUP_LINES+=("**openstack vs LocalStack:** ${line}")
+      done < <($HAS_LS && fmt_subset_summary "s3" "localstack" "$TIER_OPS" || true)
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && TIER_SPEEDUP_LINES+=("**openstack vs moto:** ${line}")
+      done < <($HAS_MOTO && fmt_subset_summary "s3" "moto" "$TIER_OPS" || true)
+      if [[ ${#TIER_SPEEDUP_LINES[@]} -gt 0 ]]; then
+        echo ""
+        for line in "${TIER_SPEEDUP_LINES[@]}"; do echo "> ${line}"; done
+      fi
+    done
+    continue
+  fi
+
+  # ── Generic service rendering ───────────────────────────────────────────────
+  echo ""
+  echo "### $(echo "$SVC" | tr '[:lower:]' '[:upper:]')"
+  echo ""
+
+  echo "| Operation | Platform | p50 (ms) | p95 (ms) | p99 (ms) | RPS | Errors |"
+  echo "|-----------|----------|----------|----------|----------|-----|--------|"
+
+  OPERATIONS=$(jq -r ".services.\"$SVC\".operations | keys[]" "$GATE_JSON")
+  render_ops_table_rows "$SVC" "$OPERATIONS"
+
+  # Seed failure warnings — one blockquote per failed target for this service
+  SVC_SEED_FAILURES=$(jq -r ".services.\"$SVC\".seed_failures // [] | .[] | \"\(.target): \(.reason)\"" "$GATE_JSON" 2>/dev/null || true)
+  if [[ -n "$SVC_SEED_FAILURES" ]]; then
+    echo ""
+    while IFS= read -r sf; do
+      # Capitalise target name for display (localstack → LocalStack)
+      target_name="${sf%%:*}"
+      reason="${sf#*: }"
+      [[ "$target_name" == "localstack" ]] && target_name="LocalStack"
+      [[ "$target_name" == "moto" ]]       && target_name="moto"
+      [[ "$target_name" == "openstack" ]]  && target_name="openstack"
+      echo "> ⚠️ **${target_name}:** seed failed (${reason}) — excluded from this service's benchmarks"
+    done <<< "$SVC_SEED_FAILURES"
+  fi
+
+  # Per-service speedup summary (p50 latency split into faster/slower buckets)
   SPEEDUP_LINES=()
-  LS_LINE=$(fmt_summary_line "$LS_SPEEDUP_OBJ")
-  MOTO_LINE=$(fmt_summary_line "$MOTO_SPEEDUP_OBJ")
-  [[ -n "$LS_LINE"   ]] && SPEEDUP_LINES+=("**openstack vs LocalStack:** ${LS_LINE}")
-  [[ -n "$MOTO_LINE" ]] && SPEEDUP_LINES+=("**openstack vs moto:** ${MOTO_LINE}")
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && SPEEDUP_LINES+=("**openstack vs LocalStack:** ${line}")
+  done < <($HAS_LS && fmt_summary_line "$SVC" "localstack" || true)
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && SPEEDUP_LINES+=("**openstack vs moto:** ${line}")
+  done < <($HAS_MOTO && fmt_summary_line "$SVC" "moto" || true)
 
   if [[ ${#SPEEDUP_LINES[@]} -gt 0 ]]; then
     echo ""
@@ -261,18 +411,21 @@ done <<< "$SERVICES"
 # Overall performance summary
 # ─────────────────────────────────────────────────────────────────────────────
 
-OVERALL_LS_OBJ=$(jq -c '.overall.speedup_vs_localstack' "$GATE_JSON")
-OVERALL_MOTO_OBJ=$(jq -c '.overall.speedup_vs_moto' "$GATE_JSON")
+if $HAS_LS || $HAS_MOTO; then
+  OVERALL_LS_LINES=()
+  OVERALL_MOTO_LINES=()
+  while IFS= read -r line; do [[ -n "$line" ]] && OVERALL_LS_LINES+=("$line"); done \
+    < <($HAS_LS && fmt_summary_line "*" "localstack" || true)
+  while IFS= read -r line; do [[ -n "$line" ]] && OVERALL_MOTO_LINES+=("$line"); done \
+    < <($HAS_MOTO && fmt_summary_line "*" "moto" || true)
 
-OVERALL_LS_LINE=$(fmt_summary_line "$OVERALL_LS_OBJ")
-OVERALL_MOTO_LINE=$(fmt_summary_line "$OVERALL_MOTO_OBJ")
-
-if [[ -n "$OVERALL_LS_LINE" || -n "$OVERALL_MOTO_LINE" ]]; then
-  echo ""
-  echo "### Overall Performance"
-  echo ""
-  [[ -n "$OVERALL_LS_LINE"   ]] && echo "> **openstack vs LocalStack:** ${OVERALL_LS_LINE}"
-  [[ -n "$OVERALL_MOTO_LINE" ]] && echo "> **openstack vs moto:** ${OVERALL_MOTO_LINE}"
+  if [[ ${#OVERALL_LS_LINES[@]} -gt 0 || ${#OVERALL_MOTO_LINES[@]} -gt 0 ]]; then
+    echo ""
+    echo "### Overall Performance"
+    echo ""
+    for line in "${OVERALL_LS_LINES[@]}";   do echo "> **openstack vs LocalStack:** ${line}"; done
+    for line in "${OVERALL_MOTO_LINES[@]}"; do echo "> **openstack vs moto:** ${line}"; done
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

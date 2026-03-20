@@ -446,6 +446,22 @@ skip_service() {
     '.results += [{service: $svc, operation: "SKIPPED", skip_reason: $reason}]'
 }
 
+# Record a seed failure for a specific target within a service.
+# Creates a SEED_FAILED result entry so downstream tools can surface warnings.
+# $1 = service   $2 = target (os|ls|moto)   $3 = reason (human-readable)
+record_seed_failure() {
+  local service="$1" target="$2" reason="$3"
+  local target_field="openstack"
+  [[ "$target" == "ls"   ]] && target_field="localstack"
+  [[ "$target" == "moto" ]] && target_field="moto"
+  log "  SEED_FAIL: $service/$target_field — $reason"
+  update_results \
+    --arg svc "$service" \
+    --arg tf "$target_field" \
+    --arg reason "$reason" \
+    '.results += [{service: $svc, operation: "SEED_FAILED", target: $tf, seed_reason: $reason}]'
+}
+
 # Per-target seed state flags (reset to 1 so bench_targets is unaffected when
 # a service section uses the old-style seed or has no seed at all).
 SEED_OS=1; SEED_LS=1; SEED_MOTO=1
@@ -476,22 +492,25 @@ seed_request() {
   return 1
 }
 
-# seed_all_targets <method> <os_url> <ls_url> <moto_url> [extra_args...]
+# seed_all_targets <service> <method> <os_url> <ls_url> <moto_url> [extra_args...]
 # Seeds each active target independently.  Sets SEED_OS/SEED_LS/SEED_MOTO to
 # 1 (succeeded) or 0 (failed/inactive).  Returns 0 if openstack seed succeeded.
+# Records SEED_FAILED entries in the report for any competitor whose seed fails.
 seed_all_targets() {
-  local method="$1" os_url="$2" ls_url="$3" moto_url="$4"
-  shift 4
+  local service="$1" method="$2" os_url="$3" ls_url="$4" moto_url="$5"
+  shift 5
   SEED_OS=0; SEED_LS=0; SEED_MOTO=0
 
   seed_request "os" "$method" "$os_url" "$@" && SEED_OS=1 || true
 
   if target_active ls; then
-    seed_request "ls" "$method" "$ls_url" "$@" && SEED_LS=1 || true
+    seed_request "ls" "$method" "$ls_url" "$@" && SEED_LS=1 \
+      || record_seed_failure "$service" "ls" "seed request failed"
   fi
 
   if target_active moto; then
-    seed_request "moto" "$method" "$moto_url" "$@" "${MOTO_EXTRA[@]}" && SEED_MOTO=1 || true
+    seed_request "moto" "$method" "$moto_url" "$@" "${MOTO_EXTRA[@]}" && SEED_MOTO=1 \
+      || record_seed_failure "$service" "moto" "seed request failed"
   fi
 
   # Service proceeds as long as openstack seed succeeded
@@ -808,7 +827,7 @@ if is_active "s3"; then
 
     # Seed: create bucket once (each target independently; only openstack is required)
     SEED_OS=1; SEED_LS=1; SEED_MOTO=1
-    if seed_all_targets PUT \
+    if seed_all_targets "s3" PUT \
          "$OS_BASE/bench-bucket-$$" \
          "$LS_BASE/bench-bucket-$$" \
          "$MOTO_BASE/bench-bucket-$$"; then
@@ -858,12 +877,14 @@ if is_active "s3"; then
         if target_active ls; then
           seed_request "ls" PUT "$LS_BASE/bench-bucket-$$/$_s3_key" \
             -H "Content-Type: application/octet-stream" --data-binary "@$_s3_file" \
-            && SEED_LS=1 || true
+            && SEED_LS=1 \
+            || record_seed_failure "s3" "ls" "object upload failed for tier ${_s3_tier}"
         fi
         if target_active moto; then
           seed_request "moto" PUT "$MOTO_BASE/bench-bucket-$$/$_s3_key" \
             -H "Content-Type: application/octet-stream" --data-binary "@$_s3_file" \
-            "${MOTO_EXTRA[@]}" && SEED_MOTO=1 || true
+            "${MOTO_EXTRA[@]}" && SEED_MOTO=1 \
+            || record_seed_failure "s3" "moto" "object upload failed for tier ${_s3_tier}"
         fi
 
         # PutObject — body from file via -D (oha) or -d @file (hey)
@@ -927,7 +948,7 @@ if is_active "dynamodb"; then
   DDB_HEADERS=(-H "Content-Type: application/x-amz-json-1.0")
 
   # Seed: create table (each target independently; only openstack is required)
-  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+  if seed_all_targets "dynamodb" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.0" \
        -H "X-Amz-Target: DynamoDB_20120810.CreateTable" \
        -d '{"TableName":"bench-table-'"$$"'","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}'; then
@@ -983,6 +1004,10 @@ if is_active "sns"; then
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=CreateTopic&Name=bench-topic-$$" 2>/dev/null \
       | tr -d '\n' | grep -oP '(?<=<TopicArn>)[^<]+' || echo "")
+    if [[ -z "$LS_TOPIC_ARN" ]]; then
+      log "  WARN: SNS LocalStack seed returned no TopicArn — publish/get_topic_attributes will skip LocalStack"
+      record_seed_failure "sns" "ls" "CreateTopic returned no TopicArn"
+    fi
   fi
   MOTO_TOPIC_ARN=""
   if target_active moto; then
@@ -992,6 +1017,7 @@ if is_active "sns"; then
       | tr -d '\n' | grep -oP '(?<=<TopicArn>)[^<]+' || echo "")
     if [[ -z "$MOTO_TOPIC_ARN" ]]; then
       log "  WARN: SNS moto seed returned no TopicArn — publish/get_topic_attributes will skip moto"
+      record_seed_failure "sns" "moto" "CreateTopic returned no TopicArn"
     fi
   fi
 
@@ -1050,7 +1076,7 @@ if is_active "iam"; then
   log_section "IAM (Query-XML)"
 
   # Seed: create user (each target independently; only openstack is required)
-  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+  if seed_all_targets "iam" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -d "Action=CreateUser&UserName=bench-user-$$&Version=2010-05-08"; then
 
     # CreateUser — unique username per iteration via {i}; 0 errors expected
@@ -1104,7 +1130,7 @@ if is_active "kinesis"; then
   KINESIS_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
   # Seed: create stream (each target independently; only openstack is required)
-  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+  if seed_all_targets "kinesis" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: Kinesis_20131202.CreateStream" \
        -d '{"StreamName":"bench-stream-'"$$"'","ShardCount":1}'; then
@@ -1144,7 +1170,7 @@ if is_active "firehose"; then
   FIREHOSE_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
   # Seed: create delivery stream (each target independently; only openstack is required)
-  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+  if seed_all_targets "firehose" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: Firehose_20150804.CreateDeliveryStream" \
        -d '{"DeliveryStreamName":"bench-firehose-'"$$"'","DeliveryStreamType":"DirectPut"}'; then
@@ -1186,7 +1212,7 @@ if is_active "secretsmanager"; then
   # Seed: create secret (each target independently; only openstack is required)
   # ClientRequestToken is required by LocalStack 3.x (and recommended by AWS);
   # openstack and moto accept requests without it but LocalStack returns HTTP 400.
-  if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+  if seed_all_targets "secretsmanager" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: secretsmanager.CreateSecret" \
        -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value","ClientRequestToken":"bench-seed-'"$$"'"}'; then
