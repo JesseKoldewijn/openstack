@@ -856,20 +856,28 @@ if is_active "sns"; then
   log_section "SNS (Query-XML)"
 
   # Seed: create topic
-  OS_TOPIC_ARN=$(curl -sf -X POST "$OS_BASE" \
+  # Use curl -s (not -sf) so non-2xx responses don't silently kill the pipe.
+  # Collapse newlines before grep so the ARN is found even if the XML is multiline.
+  OS_TOPIC_ARN=$(curl -s -X POST "$OS_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
     -d "Action=CreateTopic&Name=bench-topic-$$" 2>/dev/null \
-    | grep -oP '(?<=<TopicArn>)[^<]+' || echo "")
+    | tr -d '\n' | grep -oP '(?<=<TopicArn>)[^<]+' || echo "")
   LS_TOPIC_ARN=""
   if target_active ls; then
-    LS_TOPIC_ARN=$(curl -sf -X POST "$LS_BASE" \
+    LS_TOPIC_ARN=$(curl -s -X POST "$LS_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=CreateTopic&Name=bench-topic-$$" 2>/dev/null \
-      | grep -oP '(?<=<TopicArn>)[^<]+' || echo "")
+      | tr -d '\n' | grep -oP '(?<=<TopicArn>)[^<]+' || echo "")
   fi
   MOTO_TOPIC_ARN=""
   if target_active moto; then
-    MOTO_TOPIC_ARN=$(curl -sf -X POST "$MOTO_BASE" \
+    MOTO_TOPIC_ARN=$(curl -s -X POST "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=CreateTopic&Name=bench-topic-$$" 2>/dev/null \
-      | grep -oP '(?<=<TopicArn>)[^<]+' || echo "")
+      | tr -d '\n' | grep -oP '(?<=<TopicArn>)[^<]+' || echo "")
+    if [[ -z "$MOTO_TOPIC_ARN" ]]; then
+      log "  WARN: SNS moto seed returned no TopicArn — publish/get_topic_attributes will skip moto"
+    fi
   fi
 
   if [[ -n "$OS_TOPIC_ARN" ]]; then
@@ -1061,14 +1069,16 @@ if is_active "secretsmanager"; then
   SM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
   # Seed: create secret (each target independently; only openstack is required)
+  # ClientRequestToken is required by LocalStack 3.x (and recommended by AWS);
+  # openstack and moto accept requests without it but LocalStack returns HTTP 400.
   if seed_all_targets POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: secretsmanager.CreateSecret" \
-       -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value"}'; then
+       -d '{"Name":"bench-secret-'"$$"'","SecretString":"benchmark-secret-value","ClientRequestToken":"bench-seed-'"$$"'"}'; then
 
-    # CreateSecret — unique name per iteration via {i}; 0 errors expected
+    # CreateSecret — unique name and token per iteration via {i}; 0 errors expected
     bench_dynamic_targets "secretsmanager" "create_secret" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-      '{"Name":"bench-secret-create-'"$$"'-{i}","SecretString":"new-secret-value"}' \
+      '{"Name":"bench-secret-create-'"$$"'-{i}","SecretString":"new-secret-value","ClientRequestToken":"bench-create-'"$$"'-{i}"}' \
       -H "Content-Type: application/x-amz-json-1.1" \
       -H "X-Amz-Target: secretsmanager.CreateSecret"
 
