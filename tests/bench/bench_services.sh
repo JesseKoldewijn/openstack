@@ -758,7 +758,10 @@ if is_active "s3"; then
   # Moto's multi-service standalone server needs a Host header to route
   # path-style S3 URLs (/bucket/key) to its S3 backend.  LocalStack and
   # openstack both infer S3 from path style without it; moto does not.
-  MOTO_EXTRA=(-H "Host: s3.amazonaws.com")
+  # Additionally, moto 5.x requires an Authorization header for S3 GET/HEAD
+  # on objects (returns 403 without it).  The signature is not validated, so
+  # a static dummy value works fine.
+  MOTO_EXTRA=(-H "Host: s3.amazonaws.com" -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=dummy")
 
   # Seed: create bucket (each target independently; only openstack is required)
   if seed_all_targets PUT \
