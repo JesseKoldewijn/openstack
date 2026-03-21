@@ -7,6 +7,7 @@ use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
+use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -43,6 +44,15 @@ fn json_ok(body: Value) -> DispatchResponse {
     }
 }
 
+fn json_ok_bytes(bytes: Bytes) -> DispatchResponse {
+    DispatchResponse {
+        status_code: 200,
+        body: ResponseBody::Buffered(bytes),
+        content_type: "application/x-amz-json-1.1".to_string(),
+        headers: Vec::new(),
+    }
+}
+
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
@@ -58,29 +68,52 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     }
 }
 
-fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
-    ctx.request_body
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(String::from)
+/// Extract a string parameter from the request body as a borrowed `&str`.
+/// Call `.map(str::to_owned)` at the call site when an owned `String` is needed.
+fn str_param<'a>(ctx: &'a RequestContext, key: &str) -> Option<&'a str> {
+    ctx.request_body.get(key).and_then(|v| v.as_str())
 }
 
-fn secret_summary(s: &Secret, include_secret: bool) -> Value {
-    let mut v = json!({
-        "ARN": s.arn,
-        "Name": s.name,
-        "Description": s.description,
-        "CreatedDate": s.created.timestamp(),
-        "LastChangedDate": s.last_changed.timestamp(),
-        "DeletedDate": s.deletion_date.map(|d| d.timestamp()),
-    });
-    if include_secret && let Some(cv) = s.current_version() {
-        if let Some(ss) = &cv.secret_string {
-            v["SecretString"] = json!(ss);
+// ---------------------------------------------------------------------------
+// Serialization structs for zero-copy list responses (Change E)
+// ---------------------------------------------------------------------------
+
+/// A compact summary of a secret for use in list/describe responses.
+/// Borrows from the `Secret` in the store so no extra heap allocation is needed
+/// per field.
+#[derive(Serialize)]
+struct SecretSummary<'a> {
+    #[serde(rename = "ARN")]
+    arn: &'a str,
+    #[serde(rename = "Name")]
+    name: &'a str,
+    #[serde(rename = "Description")]
+    description: &'a str,
+    #[serde(rename = "CreatedDate")]
+    created_date: i64,
+    #[serde(rename = "LastChangedDate")]
+    last_changed_date: i64,
+    #[serde(rename = "DeletedDate", skip_serializing_if = "Option::is_none")]
+    deleted_date: Option<i64>,
+}
+
+impl<'a> SecretSummary<'a> {
+    fn from_secret(s: &'a Secret) -> Self {
+        Self {
+            arn: &s.arn,
+            name: &s.name,
+            description: &s.description,
+            created_date: s.created.timestamp(),
+            last_changed_date: s.last_changed.timestamp(),
+            deleted_date: s.deletion_date.map(|d| d.timestamp()),
         }
-        v["VersionId"] = json!(cv.version_id);
     }
-    v
+}
+
+#[derive(Serialize)]
+struct ListSecretsResponse<'a> {
+    #[serde(rename = "SecretList")]
+    secret_list: Vec<SecretSummary<'a>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,11 +134,11 @@ impl ServiceProvider for SecretsManagerProvider {
         match op {
             "CreateSecret" => {
                 let name = match str_param(ctx, "Name") {
-                    Some(n) => n,
+                    Some(n) => n.to_owned(),
                     None => return Ok(json_error("ValidationException", "Name is required", 400)),
                 };
-                let description = str_param(ctx, "Description").unwrap_or_default();
-                let secret_string = str_param(ctx, "SecretString");
+                let description = str_param(ctx, "Description").unwrap_or("").to_owned();
+                let secret_string = str_param(ctx, "SecretString").map(str::to_owned);
                 let arn = format!(
                     "arn:aws:secretsmanager:{region}:{account_id}:secret:{name}-{}",
                     &Uuid::new_v4().to_string()[..6]
@@ -157,7 +190,7 @@ impl ServiceProvider for SecretsManagerProvider {
 
             "GetSecretValue" => {
                 let secret_id = match str_param(ctx, "SecretId") {
-                    Some(s) => s,
+                    Some(s) => s.to_owned(),
                     None => {
                         return Ok(json_error(
                             "ValidationException",
@@ -213,7 +246,7 @@ impl ServiceProvider for SecretsManagerProvider {
 
             "PutSecretValue" => {
                 let secret_id = match str_param(ctx, "SecretId") {
-                    Some(s) => s,
+                    Some(s) => s.to_owned(),
                     None => {
                         return Ok(json_error(
                             "ValidationException",
@@ -222,7 +255,7 @@ impl ServiceProvider for SecretsManagerProvider {
                         ));
                     }
                 };
-                let secret_string = str_param(ctx, "SecretString");
+                let secret_string = str_param(ctx, "SecretString").map(str::to_owned);
                 let version_id = Uuid::new_v4().to_string();
                 let new_version = SecretVersion {
                     version_id: version_id.clone(),
@@ -252,9 +285,9 @@ impl ServiceProvider for SecretsManagerProvider {
                         400,
                     )),
                     Some(s) => {
-                        // Demote old AWSCURRENT to AWSPREVIOUS
+                        // Demote old AWSCURRENT to AWSPREVIOUS (Change F: no heap alloc)
                         for v in &mut s.versions {
-                            if v.version_stages.contains(&"AWSCURRENT".to_string()) {
+                            if v.version_stages.iter().any(|st| st == "AWSCURRENT") {
                                 v.version_stages.retain(|st| st != "AWSCURRENT");
                                 v.version_stages.push("AWSPREVIOUS".to_string());
                             }
@@ -275,7 +308,7 @@ impl ServiceProvider for SecretsManagerProvider {
 
             "UpdateSecret" => {
                 let secret_id = match str_param(ctx, "SecretId") {
-                    Some(s) => s,
+                    Some(s) => s.to_owned(),
                     None => {
                         return Ok(json_error(
                             "ValidationException",
@@ -284,8 +317,8 @@ impl ServiceProvider for SecretsManagerProvider {
                         ));
                     }
                 };
-                let description = str_param(ctx, "Description");
-                let secret_string = str_param(ctx, "SecretString");
+                let description = str_param(ctx, "Description").map(str::to_owned);
+                let secret_string = str_param(ctx, "SecretString").map(str::to_owned);
                 let mut store = self.store.get_or_create(account_id, region);
                 let secret = store.secrets.get_mut(&secret_id);
                 match secret {
@@ -300,6 +333,7 @@ impl ServiceProvider for SecretsManagerProvider {
                         }
                         if let Some(ss) = secret_string {
                             let version_id = Uuid::new_v4().to_string();
+                            // Change F: no heap alloc for "AWSCURRENT" comparison
                             for v in &mut s.versions {
                                 v.version_stages.retain(|st| st != "AWSCURRENT");
                             }
@@ -321,7 +355,7 @@ impl ServiceProvider for SecretsManagerProvider {
 
             "DescribeSecret" => {
                 let secret_id = match str_param(ctx, "SecretId") {
-                    Some(s) => s,
+                    Some(s) => s.to_owned(),
                     None => {
                         return Ok(json_error(
                             "ValidationException",
@@ -347,26 +381,42 @@ impl ServiceProvider for SecretsManagerProvider {
                         &format!("Secret {secret_id} not found"),
                         400,
                     )),
-                    Some(s) => Ok(json_ok(secret_summary(s, false))),
+                    // Change E: serialize via struct, not Value DOM tree
+                    Some(s) => {
+                        let summary = SecretSummary::from_secret(s);
+                        Ok(json_ok_bytes(Bytes::from(
+                            serde_json::to_vec(&summary).unwrap(),
+                        )))
+                    }
                 }
             }
 
             "ListSecrets" => {
                 let Some(store) = self.store.get(account_id, region) else {
-                    return Ok(json_ok(json!({ "SecretList": [] })));
+                    // Change E: serialize via struct, not json! macro
+                    let resp = ListSecretsResponse {
+                        secret_list: Vec::new(),
+                    };
+                    return Ok(json_ok_bytes(Bytes::from(
+                        serde_json::to_vec(&resp).unwrap(),
+                    )));
                 };
-                let secrets: Vec<Value> = store
+                // Change E: build borrow-based structs, serialize once directly to Bytes
+                let secret_list: Vec<SecretSummary<'_>> = store
                     .secrets
                     .values()
                     .filter(|s| !s.deleted)
-                    .map(|s| secret_summary(s, false))
+                    .map(SecretSummary::from_secret)
                     .collect();
-                Ok(json_ok(json!({ "SecretList": secrets })))
+                let resp = ListSecretsResponse { secret_list };
+                Ok(json_ok_bytes(Bytes::from(
+                    serde_json::to_vec(&resp).unwrap(),
+                )))
             }
 
             "DeleteSecret" => {
                 let secret_id = match str_param(ctx, "SecretId") {
-                    Some(s) => s,
+                    Some(s) => s.to_owned(),
                     None => {
                         return Ok(json_error(
                             "ValidationException",
@@ -410,7 +460,7 @@ impl ServiceProvider for SecretsManagerProvider {
 
             "RestoreSecret" => {
                 let secret_id = match str_param(ctx, "SecretId") {
-                    Some(s) => s,
+                    Some(s) => s.to_owned(),
                     None => {
                         return Ok(json_error(
                             "ValidationException",

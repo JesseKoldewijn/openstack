@@ -30,7 +30,7 @@ impl Secret {
     pub fn current_version(&self) -> Option<&SecretVersion> {
         self.versions
             .iter()
-            .find(|v| v.version_stages.contains(&"AWSCURRENT".to_string()))
+            .find(|v| v.version_stages.iter().any(|s| s == "AWSCURRENT"))
     }
 }
 

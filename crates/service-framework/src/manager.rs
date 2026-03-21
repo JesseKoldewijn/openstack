@@ -55,12 +55,10 @@ impl ServicePluginManager {
 
     /// Dispatch a request to the appropriate service provider.
     pub async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
-        let service = ctx.service.to_lowercase();
-
         let container = self
             .containers
-            .get(&service)
-            .ok_or_else(|| DispatchError::ServiceNotFound(service.clone()))?
+            .get(&ctx.service)
+            .ok_or_else(|| DispatchError::ServiceNotFound(ctx.service.clone()))?
             .clone();
 
         // Ensure the service is running (lazy start)

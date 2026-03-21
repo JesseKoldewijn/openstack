@@ -537,13 +537,16 @@ async fn handle_request(
         .await;
     }
 
+    // Extract the origin header before consuming header_map (needed for CORS later).
+    let origin_header: Option<String> = header_map.get("origin").cloned();
+
     // Build request context
     let context_start = std::time::Instant::now();
     let ctx = match build_request_context(
         &method,
         &path,
-        &query_params,
-        &header_map,
+        query_params,
+        header_map,
         &body_bytes,
         &request_id,
         &state.config,
@@ -556,16 +559,14 @@ async fn handle_request(
 
     let service = ctx.service.clone();
     let operation = ctx.operation.clone();
-    let region = ctx.region.clone();
-    let account_id = ctx.account_id.clone();
     let protocol = ctx.protocol.clone();
 
     debug!(
         request_id = %request_id,
         service = %service,
         operation = %operation,
-        region = %region,
-        account_id = %account_id,
+        region = %ctx.region,
+        account_id = %ctx.account_id,
         context_latency_us = context_latency_us,
         "Dispatching request"
     );
@@ -683,10 +684,9 @@ async fn handle_request(
     }
 
     // Add CORS headers
-    state.cors.add_cors_headers(
-        response.headers_mut(),
-        header_map.get("origin").map(|s| s.as_str()),
-    );
+    state
+        .cors
+        .add_cors_headers(response.headers_mut(), origin_header.as_deref());
 
     response
 }
@@ -747,8 +747,8 @@ fn studio_asset_response(path: &str) -> Response {
 fn build_request_context(
     method: &Method,
     path: &str,
-    query_params: &HashMap<String, String>,
-    headers: &HashMap<String, String>,
+    query_params: HashMap<String, String>,
+    headers: HashMap<String, String>,
     body: &Bytes,
     request_id: &str,
     config: &Config,
@@ -779,8 +779,8 @@ fn build_request_context(
     // Determine the target service
     let service = detect_service(
         path,
-        query_params,
-        headers,
+        &query_params,
+        &headers,
         body,
         service_from_auth.as_deref(),
     );
@@ -798,7 +798,7 @@ fn build_request_context(
 
     // Parse the request body according to protocol
     let (operation, params) =
-        match parse_operation_and_params(method, path, query_params, headers, body, &protocol) {
+        match parse_operation_and_params(method, path, &query_params, &headers, body, &protocol) {
             Ok(result) => result,
             Err(e) => {
                 error!("Failed to parse request: {}", e);
@@ -820,10 +820,10 @@ fn build_request_context(
         } else {
             Some(body.clone())
         },
-        headers: headers.clone(),
+        headers,
         path: path.to_string(),
         method: method.to_string(),
-        query_params: query_params.clone(),
+        query_params,
         request_id: request_id.to_string(),
         spooled_body: Some(spooled_body),
     })
