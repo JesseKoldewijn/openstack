@@ -490,11 +490,20 @@ async fn handle_request(
     // For S3 object-body requests (PUT/POST to a bucket+key path) the body
     // is binary object data — never XML or JSON — so we skip the copy and
     // let the S3 provider stream it directly from the SpooledBody instead.
-    let body_bytes = if is_s3_object_body_request(&method, &path, &header_map, &query_params) {
+    //
+    // For all other services we consume the SpooledBody via `into_bytes()`,
+    // replacing it with an empty sentinel.  No non-S3 provider ever reads
+    // `spooled_body`, so this avoids keeping two copies of the body in
+    // memory (the materialised `Bytes` and the original spool buffer).
+    let is_s3_body = is_s3_object_body_request(&method, &path, &header_map, &query_params);
+    let body_bytes = if is_s3_body {
         // Keep the body in the SpooledBody; pass an empty slice to parsers.
         Bytes::new()
     } else {
-        match spooled.to_bytes() {
+        // Swap the data-bearing spool for an empty sentinel and consume it,
+        // so only one copy of the body lives in memory at a time.
+        let owned = std::mem::replace(&mut spooled, SpooledBody::new(0));
+        match owned.into_bytes() {
             Ok(b) => b,
             Err(e) => {
                 error!("Failed to materialize request body: {}", e);
@@ -550,7 +559,9 @@ async fn handle_request(
         &body_bytes,
         &request_id,
         &state.config,
-        spooled,
+        // Only S3 object-body requests need spooled_body; for all others the
+        // body was already consumed into body_bytes above.
+        if is_s3_body { Some(spooled) } else { None },
     ) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
@@ -752,7 +763,7 @@ fn build_request_context(
     body: &Bytes,
     request_id: &str,
     config: &Config,
-    spooled_body: SpooledBody,
+    spooled_body: Option<SpooledBody>,
 ) -> Result<RequestContext, Response> {
     // Parse SigV4 Authorization or inject default
     let (access_key, region, service_from_auth) = if let Some(auth) = headers.get("authorization") {
@@ -825,7 +836,7 @@ fn build_request_context(
         method: method.to_string(),
         query_params,
         request_id: request_id.to_string(),
-        spooled_body: Some(spooled_body),
+        spooled_body,
     })
 }
 

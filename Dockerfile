@@ -109,7 +109,8 @@ ENV PERSISTENCE=0 \
     DNS_PORT=53 \
     DNS_RESOLVE_IP=127.0.0.1 \
     LOCALSTACK_HOST=localhost.localstack.cloud:4566 \
-    LS_LOG=info
+    LS_LOG=info \
+    MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000
 
 # Health check matching LocalStack's endpoint
 HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=5 \
