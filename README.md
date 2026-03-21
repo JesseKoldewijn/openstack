@@ -223,7 +223,8 @@ crates/
 ├── state/              AccountRegionBundle, persistence, snapshots
 ├── internal-api/       /_localstack/* management endpoints
 ├── dns/                Embedded hickory-dns server
-├── services/           One crate per AWS service (24 total)
+├── studio-ui/          Web management UI (Node/TypeScript)
+├── services/           One crate per AWS service (24 crates, 26 APIs)
 └── tests/integration/  Integration test harness
 ```
 
@@ -240,7 +241,7 @@ cargo test --workspace
 
 # Lint
 cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --all --check
+cargo fmt --all -- --check
 
 # Run locally
 GATEWAY_LISTEN=127.0.0.1:4566 LS_LOG=debug cargo run
