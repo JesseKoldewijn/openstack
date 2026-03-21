@@ -75,20 +75,22 @@ fn str_param<'a>(ctx: &'a RequestContext, key: &str) -> Option<&'a str> {
 }
 
 // ---------------------------------------------------------------------------
-// Serialization structs for zero-copy list responses (Change E)
+// Serialization structs for list responses
 // ---------------------------------------------------------------------------
 
-/// A compact summary of a secret for use in list/describe responses.
-/// Borrows from the `Secret` in the store so no extra heap allocation is needed
-/// per field.
+/// Owned summary of a secret for list responses.
+///
+/// Uses `String` fields so the DashMap read lock can be released before
+/// `serde_json` serializes the response, preventing lock contention from
+/// inflating P95 under concurrent load.
 #[derive(Serialize)]
-struct SecretSummary<'a> {
+struct SecretSummary {
     #[serde(rename = "ARN")]
-    arn: &'a str,
+    arn: String,
     #[serde(rename = "Name")]
-    name: &'a str,
+    name: String,
     #[serde(rename = "Description")]
-    description: &'a str,
+    description: String,
     #[serde(rename = "CreatedDate")]
     created_date: i64,
     #[serde(rename = "LastChangedDate")]
@@ -97,12 +99,12 @@ struct SecretSummary<'a> {
     deleted_date: Option<i64>,
 }
 
-impl<'a> SecretSummary<'a> {
-    fn from_secret(s: &'a Secret) -> Self {
+impl SecretSummary {
+    fn from_secret(s: &Secret) -> Self {
         Self {
-            arn: &s.arn,
-            name: &s.name,
-            description: &s.description,
+            arn: s.arn.clone(),
+            name: s.name.clone(),
+            description: s.description.clone(),
             created_date: s.created.timestamp(),
             last_changed_date: s.last_changed.timestamp(),
             deleted_date: s.deletion_date.map(|d| d.timestamp()),
@@ -111,9 +113,9 @@ impl<'a> SecretSummary<'a> {
 }
 
 #[derive(Serialize)]
-struct ListSecretsResponse<'a> {
+struct ListSecretsResponse {
     #[serde(rename = "SecretList")]
-    secret_list: Vec<SecretSummary<'a>>,
+    secret_list: Vec<SecretSummary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -392,22 +394,18 @@ impl ServiceProvider for SecretsManagerProvider {
             }
 
             "ListSecrets" => {
-                let Some(store) = self.store.get(account_id, region) else {
-                    // Change E: serialize via struct, not json! macro
-                    let resp = ListSecretsResponse {
-                        secret_list: Vec::new(),
-                    };
-                    return Ok(json_ok_bytes(Bytes::from(
-                        serde_json::to_vec(&resp).unwrap(),
-                    )));
+                // Collect into owned structs so the DashMap read lock is released
+                // before serde_json serializes the response.
+                let secret_list: Vec<SecretSummary> = match self.store.get(account_id, region) {
+                    None => Vec::new(),
+                    Some(store) => store
+                        .secrets
+                        .values()
+                        .filter(|s| !s.deleted)
+                        .map(SecretSummary::from_secret)
+                        .collect(),
+                    // `store` Ref dropped here — lock released.
                 };
-                // Change E: build borrow-based structs, serialize once directly to Bytes
-                let secret_list: Vec<SecretSummary<'_>> = store
-                    .secrets
-                    .values()
-                    .filter(|s| !s.deleted)
-                    .map(SecretSummary::from_secret)
-                    .collect();
                 let resp = ListSecretsResponse { secret_list };
                 Ok(json_ok_bytes(Bytes::from(
                     serde_json::to_vec(&resp).unwrap(),

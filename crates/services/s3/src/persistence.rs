@@ -39,7 +39,7 @@ impl PersistableStore for S3PersistableStore {
     async fn save(&self, data_dir: &Path) -> Result<(), anyhow::Error> {
         for entry in self.bundle.iter() {
             let key = entry.key();
-            let path = openstack_state::state_path(data_dir, "s3", &key.account_id, &key.region);
+            let path = openstack_state::state_path(data_dir, "s3", key.account_id(), key.region());
 
             // Clone the store so we can relativize FileRef paths without
             // holding the DashMap guard or mutating the live store.

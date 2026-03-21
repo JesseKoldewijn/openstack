@@ -2336,12 +2336,12 @@ dependencies = [
  "openstack-config",
  "openstack-service-framework",
  "openstack-state",
+ "rand 0.10.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]

@@ -1,16 +1,18 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{Datelike, Timelike, Utc};
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use uuid::Uuid;
+use rand::rngs::SmallRng;
+use rand::{RngExt, SeedableRng};
 
 use crate::store::{IamGroup, IamPolicy, IamRole, IamStore, IamUser};
 
@@ -37,13 +39,16 @@ impl Default for IamProvider {
 // ---------------------------------------------------------------------------
 
 fn xml_resp(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
-    let xml = format!(
+    let mut xml = String::with_capacity(150 + action.len() * 3 + request_id.len() + inner.len());
+    write!(
+        xml,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <{action}Response xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\">\
 <{action}Result>{inner}</{action}Result>\
 <ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata>\
 </{action}Response>"
-    );
+    )
+    .expect("write to String is infallible");
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
@@ -52,13 +57,51 @@ fn xml_resp(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
     }
 }
 
+/// Build a full IAM XML response in a single allocation using a closure.
+///
+/// Writes the envelope prefix, calls `write_inner` to populate the result element,
+/// then appends the envelope suffix — no intermediate `format!` copy.
+fn xml_response_write(
+    action: &str,
+    request_id: &str,
+    inner_capacity_hint: usize,
+    write_inner: impl FnOnce(&mut String),
+) -> DispatchResponse {
+    let mut buf =
+        String::with_capacity(150 + action.len() * 3 + request_id.len() + inner_capacity_hint);
+    write!(
+        buf,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<{action}Response xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\">\
+<{action}Result>"
+    )
+    .expect("write to String is infallible");
+    write_inner(&mut buf);
+    write!(
+        buf,
+        "</{action}Result>\
+<ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata>\
+</{action}Response>"
+    )
+    .expect("write to String is infallible");
+    DispatchResponse {
+        status_code: 200,
+        body: ResponseBody::Buffered(Bytes::from(buf.into_bytes())),
+        content_type: "text/xml".to_string(),
+        headers: Vec::new(),
+    }
+}
+
 fn xml_no_result(action: &str, request_id: &str) -> DispatchResponse {
-    let xml = format!(
+    let mut xml = String::with_capacity(120 + action.len() * 2 + request_id.len());
+    write!(
+        xml,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <{action}Response xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\">\
 <ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata>\
 </{action}Response>"
-    );
+    )
+    .expect("write to String is infallible");
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
@@ -68,12 +111,15 @@ fn xml_no_result(action: &str, request_id: &str) -> DispatchResponse {
 }
 
 fn iam_error(code: &str, message: &str, status: u16) -> DispatchResponse {
-    let xml = format!(
+    let mut xml = String::with_capacity(120 + code.len() + message.len());
+    write!(
+        xml,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ErrorResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\">\
 <Error><Type>Sender</Type><Code>{code}</Code><Message>{message}</Message></Error>\
 </ErrorResponse>"
-    );
+    )
+    .expect("write to String is infallible");
     DispatchResponse {
         status_code: status,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
@@ -82,8 +128,30 @@ fn iam_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     }
 }
 
+// Thread-local fast RNG — seeded once per thread from the OS RNG, avoiding a
+// getrandom syscall on every request.
+thread_local! {
+    static FAST_RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_rng(&mut rand::rng()));
+}
+
+/// Generate a UUID v4-formatted request ID using the thread-local fast RNG.
+///
+/// `SmallRng` is non-cryptographic but ~10× faster than `Uuid::new_v4()` which
+/// hits the kernel CSPRNG on every call.
 fn req_id() -> String {
-    Uuid::new_v4().to_string()
+    FAST_RNG.with(|rng| {
+        let mut rng = rng.borrow_mut();
+        let mut b = [0u8; 16];
+        rng.fill(&mut b);
+        // Set UUID v4 version and variant bits for RFC 4122 compliance.
+        b[6] = (b[6] & 0x0f) | 0x40;
+        b[8] = (b[8] & 0x3f) | 0x80;
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+            b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -96,21 +164,30 @@ fn user_xml(u: &IamUser) -> String {
     buf
 }
 
+/// Write a `<User>` element into `buf` using direct DateTime accessors to avoid
+/// re-parsing the chrono format string on every call.
 fn write_user_xml(buf: &mut String, u: &IamUser) {
+    let dt = u.created;
     write!(
         buf,
         "<User>\
-<Path>{}</Path>\
-<UserName>{}</UserName>\
-<UserId>{}</UserId>\
-<Arn>{}</Arn>\
-<CreateDate>{}</CreateDate>\
+<Path>{path}</Path>\
+<UserName>{name}</UserName>\
+<UserId>{id}</UserId>\
+<Arn>{arn}</Arn>\
+<CreateDate>{yr:04}-{mo:02}-{dy:02}T{h:02}:{m:02}:{s:02}.{us:06}Z</CreateDate>\
 </User>",
-        u.path,
-        u.user_name,
-        u.user_id,
-        u.arn,
-        u.created.format("%Y-%m-%dT%H:%M:%S%.6fZ"),
+        path = u.path,
+        name = u.user_name,
+        id = u.user_id,
+        arn = u.arn,
+        yr = dt.year(),
+        mo = dt.month(),
+        dy = dt.day(),
+        h = dt.hour(),
+        m = dt.minute(),
+        s = dt.second(),
+        us = dt.nanosecond() / 1_000,
     )
     .expect("write to String is infallible");
 }
@@ -213,24 +290,28 @@ fn xml_escape(s: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Encode the first `n` UUID bytes as uppercase hex (2*n chars), one allocation.
+/// Encode `n` random bytes as uppercase hex (2n chars) using the thread-local fast RNG.
 fn uuid_hex_upper(n: usize) -> String {
-    let bytes = Uuid::new_v4().into_bytes();
-    let mut s = String::with_capacity(2 * n);
-    for b in &bytes[..n] {
-        write!(s, "{b:02X}").expect("write to String is infallible");
-    }
-    s
+    FAST_RNG.with(|rng| {
+        let mut rng = rng.borrow_mut();
+        let mut s = String::with_capacity(n * 2);
+        for _ in 0..n {
+            write!(s, "{:02X}", rng.random::<u8>()).expect("write to String is infallible");
+        }
+        s
+    })
 }
 
-/// Encode the first `n` UUID bytes as lowercase hex (2*n chars), one allocation.
+/// Encode `n` random bytes as lowercase hex (2n chars) using the thread-local fast RNG.
 fn uuid_hex_lower(n: usize) -> String {
-    let bytes = Uuid::new_v4().into_bytes();
-    let mut s = String::with_capacity(2 * n);
-    for b in &bytes[..n] {
-        write!(s, "{b:02x}").expect("write to String is infallible");
-    }
-    s
+    FAST_RNG.with(|rng| {
+        let mut rng = rng.borrow_mut();
+        let mut s = String::with_capacity(n * 2);
+        for _ in 0..n {
+            write!(s, "{:02x}", rng.random::<u8>()).expect("write to String is infallible");
+        }
+        s
+    })
 }
 
 /// Look up a request parameter from query_params first, then from the JSON request body.
@@ -332,19 +413,32 @@ impl ServiceProvider for IamProvider {
             }
 
             "ListUsers" => {
-                let Some(store) = self.store.get(account_id, region) else {
-                    let inner = "<Users /><IsTruncated>false</IsTruncated>";
-                    return Ok(xml_resp("ListUsers", &rid, inner));
+                // Clone users out of the DashMap ref, then drop the read lock
+                // before serialising — prevents lock contention from inflating P95.
+                let mut users: Vec<IamUser> = match self.store.get(account_id, region) {
+                    None => {
+                        return Ok(xml_resp(
+                            "ListUsers",
+                            &rid,
+                            "<Users /><IsTruncated>false</IsTruncated>",
+                        ));
+                    }
+                    Some(store) => store.users.values().cloned().collect(),
+                    // `store` Ref dropped here — lock released.
                 };
-                let mut buf = String::with_capacity(512);
-                let mut items: Vec<&IamUser> = store.users.values().collect();
-                items.sort_by_key(|u| u.user_name.as_str());
-                buf.push_str("<Users>");
-                for u in &items {
-                    write_user_xml(&mut buf, u);
-                }
-                buf.push_str("</Users><IsTruncated>false</IsTruncated>");
-                Ok(xml_resp("ListUsers", &rid, &buf))
+                users.sort_unstable_by(|a, b| a.user_name.cmp(&b.user_name));
+                Ok(xml_response_write(
+                    "ListUsers",
+                    &rid,
+                    8 + users.len() * 260,
+                    |buf| {
+                        buf.push_str("<Users>");
+                        for u in &users {
+                            write_user_xml(buf, u);
+                        }
+                        buf.push_str("</Users><IsTruncated>false</IsTruncated>");
+                    },
+                ))
             }
 
             // ---------------------------------------------------------------
@@ -425,17 +519,28 @@ impl ServiceProvider for IamProvider {
             }
 
             "ListRoles" => {
-                let Some(store) = self.store.get(account_id, region) else {
-                    let inner = "<Roles /><IsTruncated>false</IsTruncated>";
-                    return Ok(xml_resp("ListRoles", &rid, inner));
+                let roles: Vec<IamRole> = match self.store.get(account_id, region) {
+                    None => {
+                        return Ok(xml_resp(
+                            "ListRoles",
+                            &rid,
+                            "<Roles /><IsTruncated>false</IsTruncated>",
+                        ));
+                    }
+                    Some(store) => store.roles.values().cloned().collect(),
                 };
-                let mut buf = String::with_capacity(512);
-                buf.push_str("<Roles>");
-                for r in store.roles.values() {
-                    write_role_xml(&mut buf, r);
-                }
-                buf.push_str("</Roles><IsTruncated>false</IsTruncated>");
-                Ok(xml_resp("ListRoles", &rid, &buf))
+                Ok(xml_response_write(
+                    "ListRoles",
+                    &rid,
+                    8 + roles.len() * 400,
+                    |buf| {
+                        buf.push_str("<Roles>");
+                        for r in &roles {
+                            write_role_xml(buf, r);
+                        }
+                        buf.push_str("</Roles><IsTruncated>false</IsTruncated>");
+                    },
+                ))
             }
 
             // ---------------------------------------------------------------
@@ -496,17 +601,28 @@ impl ServiceProvider for IamProvider {
             }
 
             "ListPolicies" => {
-                let Some(store) = self.store.get(account_id, region) else {
-                    let inner = "<Policies /><IsTruncated>false</IsTruncated>";
-                    return Ok(xml_resp("ListPolicies", &rid, inner));
+                let policies: Vec<IamPolicy> = match self.store.get(account_id, region) {
+                    None => {
+                        return Ok(xml_resp(
+                            "ListPolicies",
+                            &rid,
+                            "<Policies /><IsTruncated>false</IsTruncated>",
+                        ));
+                    }
+                    Some(store) => store.policies.values().cloned().collect(),
                 };
-                let mut buf = String::with_capacity(512);
-                buf.push_str("<Policies>");
-                for p in store.policies.values() {
-                    write_policy_xml(&mut buf, p);
-                }
-                buf.push_str("</Policies><IsTruncated>false</IsTruncated>");
-                Ok(xml_resp("ListPolicies", &rid, &buf))
+                Ok(xml_response_write(
+                    "ListPolicies",
+                    &rid,
+                    10 + policies.len() * 260,
+                    |buf| {
+                        buf.push_str("<Policies>");
+                        for p in &policies {
+                            write_policy_xml(buf, p);
+                        }
+                        buf.push_str("</Policies><IsTruncated>false</IsTruncated>");
+                    },
+                ))
             }
 
             "AttachUserPolicy" => {
@@ -647,17 +763,28 @@ impl ServiceProvider for IamProvider {
             }
 
             "ListGroups" => {
-                let Some(store) = self.store.get(account_id, region) else {
-                    let inner = "<Groups /><IsTruncated>false</IsTruncated>";
-                    return Ok(xml_resp("ListGroups", &rid, inner));
+                let groups: Vec<IamGroup> = match self.store.get(account_id, region) {
+                    None => {
+                        return Ok(xml_resp(
+                            "ListGroups",
+                            &rid,
+                            "<Groups /><IsTruncated>false</IsTruncated>",
+                        ));
+                    }
+                    Some(store) => store.groups.values().cloned().collect(),
                 };
-                let mut buf = String::with_capacity(512);
-                buf.push_str("<Groups>");
-                for g in store.groups.values() {
-                    write_group_xml(&mut buf, g);
-                }
-                buf.push_str("</Groups><IsTruncated>false</IsTruncated>");
-                Ok(xml_resp("ListGroups", &rid, &buf))
+                Ok(xml_response_write(
+                    "ListGroups",
+                    &rid,
+                    9 + groups.len() * 260,
+                    |buf| {
+                        buf.push_str("<Groups>");
+                        for g in &groups {
+                            write_group_xml(buf, g);
+                        }
+                        buf.push_str("</Groups><IsTruncated>false</IsTruncated>");
+                    },
+                ))
             }
 
             // ---------------------------------------------------------------

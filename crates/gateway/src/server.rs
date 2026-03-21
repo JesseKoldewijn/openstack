@@ -428,11 +428,98 @@ async fn handle_request(
     req: axum::extract::Request,
 ) -> Response {
     let request_start = std::time::Instant::now();
-    let request_id = Uuid::new_v4().to_string();
 
-    // Extract path and query string
+    // Fast-path early exits: check cheap conditions BEFORE allocating a
+    // request ID, owned path string, or parsing query parameters.
+
+    // Handle CORS preflight — only needs method + headers, zero allocs.
+    if CorsHandler::is_preflight(&method, &headers) {
+        let mut resp_headers = HeaderMap::new();
+        state.cors.add_cors_headers(
+            &mut resp_headers,
+            headers.get("origin").and_then(|v| v.to_str().ok()),
+        );
+        let mut response = StatusCode::OK.into_response();
+        *response.headers_mut() = resp_headers;
+        return response;
+    }
+
+    // Studio SPA/asset routes and internal API routes are resolved before
+    // any allocation.  `uri.path()` returns a `&str` into the URI — no
+    // heap allocation until we actually need an owned `String`.
     let uri = req.uri().clone();
-    let path = uri.path().to_string();
+    let path_str = uri.path();
+
+    if is_studio_asset_route(path_str) {
+        return studio_asset_response(path_str);
+    }
+
+    if is_studio_spa_route(path_str) {
+        return studio_spa_response();
+    }
+
+    // Internal API routes (/_localstack/*) — allocate path + query only here.
+    if path_str.starts_with("/_localstack/") {
+        // Check studio guided execution payload size before reading body.
+        if is_studio_guided_execution_route(path_str)
+            && headers
+                .get(axum::http::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .is_some_and(|len| len > STUDIO_GUIDED_MAX_PAYLOAD_BYTES)
+        {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "guided execution payload exceeds configured limit",
+            )
+                .into_response();
+        }
+
+        let guided_limit = if is_studio_guided_execution_route(path_str) {
+            Some(STUDIO_GUIDED_MAX_PAYLOAD_BYTES)
+        } else {
+            None
+        };
+
+        // Stream and buffer the body for internal API dispatch.
+        let threshold = state.config.body_spool_threshold_bytes;
+        let mut spooled = SpooledBody::new(threshold);
+        let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
+        if let Err(e) = spooled.write_from_stream(stream).await {
+            if e.kind() == io::ErrorKind::InvalidData {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "guided execution payload exceeds configured limit",
+                )
+                    .into_response();
+            }
+            error!("Failed to read request body: {}", e);
+            return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+        }
+        let body_bytes = match spooled.into_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                error!("Failed to materialize request body: {}", e);
+                return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+            }
+        };
+
+        let path = path_str.to_string();
+        let query_string = uri.query().unwrap_or("");
+        let query_params: HashMap<String, String> = if query_string.is_empty() {
+            HashMap::new()
+        } else {
+            serde_urlencoded::from_str(query_string).unwrap_or_default()
+        };
+
+        return handle_internal_api(path, &method, &headers, &query_params, &body_bytes, &state)
+            .await;
+    }
+
+    // --- AWS service request path ---
+    // Only now do we allocate request ID, owned path, and parse query params.
+    let request_id = Uuid::new_v4().to_string();
+    let path = path_str.to_string();
     let query_string = uri.query().unwrap_or("").to_string();
 
     // Parse query parameters
@@ -442,6 +529,9 @@ async fn handle_request(
         serde_urlencoded::from_str(&query_string).unwrap_or_default()
     };
 
+    // Check studio guided execution payload size (for any studio route that
+    // slipped through the /_localstack/ prefix check above — shouldn't happen
+    // in practice, but kept as a safety net).
     if is_studio_guided_execution_route(&path)
         && headers
             .get(axum::http::header::CONTENT_LENGTH)
@@ -503,33 +593,6 @@ async fn handle_request(
             }
         }
     };
-
-    // Handle CORS preflight
-    if CorsHandler::is_preflight(&method, &headers) {
-        let mut resp_headers = HeaderMap::new();
-        state.cors.add_cors_headers(
-            &mut resp_headers,
-            headers.get("origin").and_then(|v| v.to_str().ok()),
-        );
-        let mut response = StatusCode::OK.into_response();
-        *response.headers_mut() = resp_headers;
-        return response;
-    }
-
-    // Studio SPA routes are resolved before generic AWS inference.
-    if is_studio_asset_route(&path) {
-        return studio_asset_response(&path);
-    }
-
-    if is_studio_spa_route(&path) {
-        return studio_spa_response();
-    }
-
-    // Internal API routes go to the internal API handler.
-    if path.starts_with("/_localstack/") {
-        return handle_internal_api(path, &method, &headers, &query_params, &body_bytes, &state)
-            .await;
-    }
 
     // Extract the origin header before consuming headers (needed for CORS later).
     let origin_header: Option<String> = headers
@@ -870,17 +933,17 @@ fn detect_service(
     if let Some(target) = headers.get("x-amz-target").and_then(|v| v.to_str().ok())
         && let Some(svc) = service_from_target(target)
     {
-        return svc;
+        return svc.to_string();
     }
 
     // 4. Query protocol Action (POST form body or query string)
     if let Some(svc) = service_from_query_action(query_params, body) {
-        return svc;
+        return svc.to_string();
     }
 
     // 5. URL path patterns
     if let Some(svc) = service_from_path(path) {
-        return svc;
+        return svc.to_string();
     }
 
     // 6. S3 path-style heuristic for unsigned endpoint-url calls
@@ -897,7 +960,13 @@ fn normalize_service_name(service: &str) -> String {
     if service.eq_ignore_ascii_case("es") {
         return "opensearch".to_string();
     }
-    service.to_ascii_lowercase()
+    // AWS SDKs always send lowercase service names in credentials, so the
+    // common path avoids `to_ascii_lowercase`'s character-by-character scan.
+    if service.bytes().all(|b| !b.is_ascii_uppercase()) {
+        service.to_string()
+    } else {
+        service.to_ascii_lowercase()
+    }
 }
 
 /// Zero-copy scan of URL-encoded body bytes for `Action=<value>`.
@@ -911,7 +980,7 @@ fn extract_action_value(body: &[u8]) -> Option<&str> {
 fn service_from_query_action(
     query_params: &HashMap<String, String>,
     body: &Bytes,
-) -> Option<String> {
+) -> Option<&'static str> {
     let action: &str = if let Some(a) = query_params.get("Action").map(String::as_str) {
         a
     } else {
@@ -933,15 +1002,15 @@ fn service_from_query_action(
         | "SendMessageBatch"
         | "DeleteMessageBatch"
         | "ChangeMessageVisibility"
-        | "ChangeMessageVisibilityBatch" => Some("sqs".to_string()),
+        | "ChangeMessageVisibilityBatch" => Some("sqs"),
         // STS
-        "GetCallerIdentity" | "AssumeRole" => Some("sts".to_string()),
+        "GetCallerIdentity" | "AssumeRole" => Some("sts"),
         // SNS
         "CreateTopic" | "DeleteTopic" | "Publish" | "Subscribe" | "Unsubscribe" | "ListTopics"
-        | "SetTopicAttributes" | "GetTopicAttributes" => Some("sns".to_string()),
+        | "SetTopicAttributes" | "GetTopicAttributes" => Some("sns"),
         // IAM
         "CreateRole" | "DeleteRole" | "ListRoles" | "GetRole" | "CreateUser" | "DeleteUser"
-        | "ListUsers" | "GetUser" => Some("iam".to_string()),
+        | "ListUsers" | "GetUser" => Some("iam"),
         _ => None,
     }
 }
@@ -978,57 +1047,76 @@ fn is_known_service(name: &str) -> bool {
     )
 }
 
-fn service_from_target(target: &str) -> Option<String> {
-    // Formats seen in the wild:
-    // - "DynamoDB_20120810.GetItem"
-    // - "AmazonSQS.CreateQueue"
-    // - "AWSSecurityTokenServiceV20110615.GetCallerIdentity"
-    let raw_prefix = target
-        .split('.')
-        .next()
-        .unwrap_or(target)
-        .split('_')
-        .next()
-        .unwrap_or(target)
-        .to_lowercase();
+/// Derive the AWS service name from an `X-Amz-Target` header value.
+///
+/// Formats seen in the wild:
+/// - `"DynamoDB_20120810.GetItem"`
+/// - `"AmazonSQS.CreateQueue"`
+/// - `"AWSSecurityTokenServiceV20110615.GetCallerIdentity"`
+///
+/// Uses `eq_ignore_ascii_case` matching throughout — no heap allocation.
+fn service_from_target(target: &str) -> Option<&'static str> {
+    // Take everything before the first '.' then before the first '_'.
+    let prefix = target.split('.').next().unwrap_or(target);
+    let prefix = prefix.split('_').next().unwrap_or(prefix);
 
-    let prefix = raw_prefix
-        .trim_end_matches("v20110615")
-        .trim_end_matches("v20120810")
-        .to_string();
+    // Strip trailing version suffixes like "V20110615" or "v20120810".
+    let prefix = if prefix.len() > 9
+        && (prefix[prefix.len() - 9..].eq_ignore_ascii_case("v20110615")
+            || prefix[prefix.len() - 9..].eq_ignore_ascii_case("v20120810"))
+    {
+        &prefix[..prefix.len() - 9]
+    } else {
+        prefix
+    };
 
-    Some(
-        match prefix.as_str() {
-            "dynamodb" => "dynamodb",
-            "kinesis" => "kinesis",
-            "firehose" => "firehose",
-            "lambda" => "lambda",
-            "logs" => "logs",
-            "kms" => "kms",
-            "secretsmanager" => "secretsmanager",
-            "ssm" => "ssm",
-            "cloudwatch" => "cloudwatch",
-            "awsevents" | "events" => "events",
-            "amazonec2containerregistry" | "ecr" => "ecr",
-            "sns" => "sns",
-            "amazonsqs" | "sqs" => "sqs",
-            "awssecuritytokenservice" | "sts" => "sts",
-            _ => return None,
-        }
-        .to_string(),
-    )
+    if prefix.eq_ignore_ascii_case("dynamodb") {
+        Some("dynamodb")
+    } else if prefix.eq_ignore_ascii_case("kinesis") {
+        Some("kinesis")
+    } else if prefix.eq_ignore_ascii_case("firehose") {
+        Some("firehose")
+    } else if prefix.eq_ignore_ascii_case("lambda") {
+        Some("lambda")
+    } else if prefix.eq_ignore_ascii_case("logs") {
+        Some("logs")
+    } else if prefix.eq_ignore_ascii_case("kms") {
+        Some("kms")
+    } else if prefix.eq_ignore_ascii_case("secretsmanager") {
+        Some("secretsmanager")
+    } else if prefix.eq_ignore_ascii_case("ssm") {
+        Some("ssm")
+    } else if prefix.eq_ignore_ascii_case("cloudwatch") {
+        Some("cloudwatch")
+    } else if prefix.eq_ignore_ascii_case("awsevents") || prefix.eq_ignore_ascii_case("events") {
+        Some("events")
+    } else if prefix.eq_ignore_ascii_case("amazonec2containerregistry")
+        || prefix.eq_ignore_ascii_case("ecr")
+    {
+        Some("ecr")
+    } else if prefix.eq_ignore_ascii_case("sns") {
+        Some("sns")
+    } else if prefix.eq_ignore_ascii_case("amazonsqs") || prefix.eq_ignore_ascii_case("sqs") {
+        Some("sqs")
+    } else if prefix.eq_ignore_ascii_case("awssecuritytokenservice")
+        || prefix.eq_ignore_ascii_case("sts")
+    {
+        Some("sts")
+    } else {
+        None
+    }
 }
 
-fn service_from_path(path: &str) -> Option<String> {
+fn service_from_path(path: &str) -> Option<&'static str> {
     // Common path-based routing
     let path = path.trim_start_matches('/');
     if path.starts_with("2015-03-31/functions")
         || path.starts_with("2015-03-31/event-source-mappings")
     {
-        return Some("lambda".to_string());
+        return Some("lambda");
     }
     if path.starts_with("2012-12-01/") || path.contains("elasticloadbalancing") {
-        return Some("elb".to_string());
+        return Some("elb");
     }
     // Default: can't determine from path alone
     None
