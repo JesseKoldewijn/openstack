@@ -7,7 +7,6 @@ pub struct SigV4Auth {
     pub access_key: String,
     pub region: String,
     pub service: String,
-    pub date: String,
 }
 
 /// Parse a SigV4 Authorization header value.
@@ -32,16 +31,17 @@ pub fn parse_sigv4_auth(auth: &str) -> Option<SigV4Auth> {
     })?;
 
     // credential scope: ACCESS_KEY/DATE/REGION/SERVICE/aws4_request
-    let parts: Vec<&str> = credential.split('/').collect();
-    if parts.len() < 5 {
-        return None;
-    }
+    let mut parts = credential.splitn(5, '/');
+    let access_key = parts.next()?;
+    let _date = parts.next()?;
+    let region = parts.next()?;
+    let service = parts.next()?;
+    parts.next()?;
 
     Some(SigV4Auth {
-        access_key: parts[0].to_string(),
-        date: parts[1].to_string(),
-        region: parts[2].to_string(),
-        service: parts[3].to_string(),
+        access_key: access_key.to_string(),
+        region: region.to_string(),
+        service: service.to_string(),
     })
 }
 
@@ -136,7 +136,6 @@ mod tests {
         assert_eq!(parsed.access_key, "AKID123");
         assert_eq!(parsed.region, "us-east-1");
         assert_eq!(parsed.service, "sqs");
-        assert_eq!(parsed.date, "20260306");
     }
 
     #[test]

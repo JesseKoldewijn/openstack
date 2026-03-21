@@ -442,14 +442,6 @@ async fn handle_request(
         serde_urlencoded::from_str(&query_string).unwrap_or_default()
     };
 
-    // Collect headers into a HashMap (lowercase keys)
-    let mut header_map: HashMap<String, String> = HashMap::with_capacity(headers.len());
-    for (k, v) in &headers {
-        if let Ok(vs) = v.to_str() {
-            header_map.insert(k.as_str().to_ascii_lowercase(), vs.to_string());
-        }
-    }
-
     if is_studio_guided_execution_route(&path)
         && headers
             .get(axum::http::header::CONTENT_LENGTH)
@@ -495,7 +487,7 @@ async fn handle_request(
     // replacing it with an empty sentinel.  No non-S3 provider ever reads
     // `spooled_body`, so this avoids keeping two copies of the body in
     // memory (the materialised `Bytes` and the original spool buffer).
-    let is_s3_body = is_s3_object_body_request(&method, &path, &header_map, &query_params);
+    let is_s3_body = is_s3_object_body_request(&method, &path, &headers, &query_params);
     let body_bytes = if is_s3_body {
         // Keep the body in the SpooledBody; pass an empty slice to parsers.
         Bytes::new()
@@ -517,7 +509,7 @@ async fn handle_request(
         let mut resp_headers = HeaderMap::new();
         state.cors.add_cors_headers(
             &mut resp_headers,
-            header_map.get("origin").map(|s| s.as_str()),
+            headers.get("origin").and_then(|v| v.to_str().ok()),
         );
         let mut response = StatusCode::OK.into_response();
         *response.headers_mut() = resp_headers;
@@ -535,27 +527,23 @@ async fn handle_request(
 
     // Internal API routes go to the internal API handler.
     if path.starts_with("/_localstack/") {
-        return handle_internal_api(
-            path,
-            &method,
-            &header_map,
-            &query_params,
-            &body_bytes,
-            &state,
-        )
-        .await;
+        return handle_internal_api(path, &method, &headers, &query_params, &body_bytes, &state)
+            .await;
     }
 
-    // Extract the origin header before consuming header_map (needed for CORS later).
-    let origin_header: Option<String> = header_map.get("origin").cloned();
+    // Extract the origin header before consuming headers (needed for CORS later).
+    let origin_header: Option<String> = headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
 
     // Build request context
     let context_start = std::time::Instant::now();
     let ctx = match build_request_context(
         &method,
-        &path,
+        path,
         query_params,
-        header_map,
+        headers,
         &body_bytes,
         &request_id,
         &state.config,
@@ -567,15 +555,12 @@ async fn handle_request(
         Err(resp) => return resp,
     };
     let context_latency_us = context_start.elapsed().as_micros();
-
-    let service = ctx.service.clone();
-    let operation = ctx.operation.clone();
     let protocol = ctx.protocol.clone();
 
     debug!(
         request_id = %request_id,
-        service = %service,
-        operation = %operation,
+        service = %ctx.service,
+        operation = %ctx.operation,
         region = %ctx.region,
         account_id = %ctx.account_id,
         context_latency_us = context_latency_us,
@@ -595,8 +580,8 @@ async fn handle_request(
         Ok(response) => {
             info!(
                 request_id = %request_id,
-                service = %service,
-                operation = %operation,
+                service = %svc_ctx.service,
+                operation = %svc_ctx.operation,
                 status = response.status_code,
                 latency_ms = latency_ms,
                 total_latency_ms = total_latency_ms,
@@ -632,8 +617,8 @@ async fn handle_request(
 
             warn!(
                 request_id = %request_id,
-                service = %service,
-                operation = %operation,
+                service = %svc_ctx.service,
+                operation = %svc_ctx.operation,
                 error = %e,
                 http_status = http_status,
                 latency_ms = latency_ms,
@@ -757,39 +742,40 @@ fn studio_asset_response(path: &str) -> Response {
 #[allow(clippy::result_large_err)]
 fn build_request_context(
     method: &Method,
-    path: &str,
+    path: String,
     query_params: HashMap<String, String>,
-    headers: HashMap<String, String>,
+    headers: HeaderMap,
     body: &Bytes,
     request_id: &str,
     config: &Config,
     spooled_body: Option<SpooledBody>,
 ) -> Result<RequestContext, Response> {
     // Parse SigV4 Authorization or inject default
-    let (access_key, region, service_from_auth) = if let Some(auth) = headers.get("authorization") {
-        if let Some(sigv4) = parse_sigv4_auth(auth) {
-            (sigv4.access_key, sigv4.region, Some(sigv4.service))
+    let (access_key, region, service_from_auth) =
+        if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+            if let Some(sigv4) = parse_sigv4_auth(auth) {
+                (sigv4.access_key, sigv4.region, Some(sigv4.service))
+            } else {
+                (
+                    DEFAULT_ACCESS_KEY.to_string(),
+                    DEFAULT_REGION.to_string(),
+                    None,
+                )
+            }
         } else {
             (
                 DEFAULT_ACCESS_KEY.to_string(),
                 DEFAULT_REGION.to_string(),
                 None,
             )
-        }
-    } else {
-        (
-            DEFAULT_ACCESS_KEY.to_string(),
-            DEFAULT_REGION.to_string(),
-            None,
-        )
-    };
+        };
 
     // Derive account ID from access key
     let account_id = access_key_to_account_id(&access_key);
 
     // Determine the target service
     let service = detect_service(
-        path,
+        &path,
         &query_params,
         &headers,
         body,
@@ -809,7 +795,7 @@ fn build_request_context(
 
     // Parse the request body according to protocol
     let (operation, params) =
-        match parse_operation_and_params(method, path, &query_params, &headers, body, &protocol) {
+        match parse_operation_and_params(method, &path, &query_params, &headers, body, &protocol) {
             Ok(result) => result,
             Err(e) => {
                 error!("Failed to parse request: {}", e);
@@ -832,7 +818,7 @@ fn build_request_context(
             Some(body.clone())
         },
         headers,
-        path: path.to_string(),
+        path,
         method: method.to_string(),
         query_params,
         request_id: request_id.to_string(),
@@ -844,7 +830,7 @@ fn build_request_context(
 fn detect_service(
     path: &str,
     query_params: &HashMap<String, String>,
-    headers: &HashMap<String, String>,
+    headers: &HeaderMap,
     body: &Bytes,
     service_from_auth: Option<&str>,
 ) -> String {
@@ -854,18 +840,20 @@ fn detect_service(
     }
 
     // 2. Host header: sqs.us-east-1.localhost.localstack.cloud
-    if let Some(host) = headers.get("host") {
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
         let host = host.split(':').next().unwrap_or(host);
         let parts: Vec<&str> = host.split('.').collect();
         if parts.len() >= 2 {
-            let potential_service = parts[0].to_lowercase();
+            let potential_service = parts[0];
             // Check if it looks like a service name (all lowercase letters/digits)
+            // HeaderMap is case-insensitive so value is already in original case;
+            // AWS service names in hostnames are always lowercase ASCII.
             if potential_service
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-                && is_known_service(&potential_service)
+                && is_known_service(potential_service)
             {
-                return potential_service;
+                return potential_service.to_string();
             }
         }
     }
@@ -879,7 +867,7 @@ fn detect_service(
         return "s3".to_string();
     }
 
-    if let Some(target) = headers.get("x-amz-target")
+    if let Some(target) = headers.get("x-amz-target").and_then(|v| v.to_str().ok())
         && let Some(svc) = service_from_target(target)
     {
         return svc;
@@ -906,24 +894,31 @@ fn detect_service(
 }
 
 fn normalize_service_name(service: &str) -> String {
-    match service.to_ascii_lowercase().as_str() {
-        "es" => "opensearch".to_string(),
-        other => other.to_string(),
+    if service.eq_ignore_ascii_case("es") {
+        return "opensearch".to_string();
     }
+    service.to_ascii_lowercase()
+}
+
+/// Zero-copy scan of URL-encoded body bytes for `Action=<value>`.
+/// Returns the value slice without allocating.
+fn extract_action_value(body: &[u8]) -> Option<&str> {
+    let s = std::str::from_utf8(body).ok()?;
+    s.split('&')
+        .find_map(|segment| segment.strip_prefix("Action="))
 }
 
 fn service_from_query_action(
     query_params: &HashMap<String, String>,
     body: &Bytes,
 ) -> Option<String> {
-    let action = query_params.get("Action").cloned().or_else(|| {
-        let params = serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).ok()?;
-        params
-            .into_iter()
-            .find_map(|(k, v)| if k == "Action" { Some(v) } else { None })
-    })?;
+    let action: &str = if let Some(a) = query_params.get("Action").map(String::as_str) {
+        a
+    } else {
+        extract_action_value(body)?
+    };
 
-    match action.as_str() {
+    match action {
         // SQS
         "CreateQueue"
         | "DeleteQueue"
@@ -1043,7 +1038,7 @@ fn parse_operation_and_params(
     method: &Method,
     path: &str,
     query_params: &HashMap<String, String>,
-    headers: &HashMap<String, String>,
+    headers: &HeaderMap,
     body: &Bytes,
     protocol: &AwsProtocol,
 ) -> Result<(String, serde_json::Value), String> {
@@ -1054,10 +1049,14 @@ fn parse_operation_and_params(
                 let missing_action = e.to_string().contains("Missing 'Action' parameter");
                 let query_mode = headers
                     .get("x-amzn-query-mode")
+                    .and_then(|v| v.to_str().ok())
                     .map(|v| v == "true")
                     .unwrap_or(false);
                 if missing_action && query_mode {
-                    let target = headers.get("x-amz-target").ok_or_else(|| e.to_string())?;
+                    let target = headers
+                        .get("x-amz-target")
+                        .and_then(|v| v.to_str().ok())
+                        .ok_or_else(|| e.to_string())?;
                     let operation = target
                         .split('.')
                         .nth(1)
@@ -1080,7 +1079,7 @@ fn parse_operation_and_params(
             Ok((op, params))
         }
         AwsProtocol::Json => {
-            let target = headers.get("x-amz-target").map(|s| s.as_str());
+            let target = headers.get("x-amz-target").and_then(|v| v.to_str().ok());
             let (op, params) = parse_json_request(body, target).map_err(|e| e.to_string())?;
             Ok((op, params))
         }
@@ -1173,7 +1172,7 @@ fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value)
 async fn handle_internal_api(
     path: String,
     method: &Method,
-    _headers: &HashMap<String, String>,
+    _headers: &HeaderMap,
     _query_params: &HashMap<String, String>,
     _body: &Bytes,
     _state: &AppState,
@@ -1205,13 +1204,9 @@ async fn handle_internal_api(
     let mut req_builder = axum::http::Request::builder()
         .method(method.clone())
         .uri(uri);
+    // HeaderMap iter yields (&HeaderName, &HeaderValue) — copy directly, no string round-trip.
     for (k, v) in _headers {
-        if let (Ok(name), Ok(value)) = (
-            axum::http::header::HeaderName::from_bytes(k.as_bytes()),
-            axum::http::header::HeaderValue::from_str(v),
-        ) {
-            req_builder = req_builder.header(name, value);
-        }
+        req_builder = req_builder.header(k, v);
     }
     let req = req_builder
         .body(Body::from(_body.clone()))
@@ -1244,7 +1239,7 @@ fn is_studio_guided_execution_route(path: &str) -> bool {
 fn is_s3_object_body_request(
     method: &Method,
     path: &str,
-    _headers: &HashMap<String, String>,
+    _headers: &HeaderMap,
     query_params: &HashMap<String, String>,
 ) -> bool {
     // Must be PUT or POST (GET, HEAD, DELETE have no object body).

@@ -136,7 +136,10 @@ fn parse_params(ctx: &RequestContext) -> HashMap<String, String> {
 
     // AWS CLI v2 JSON mode for SQS may send operation in x-amz-target and JSON body
     if !params.contains_key("Action") {
-        if let Some(target) = ctx.headers.get("x-amz-target")
+        if let Some(target) = ctx
+            .headers
+            .get("x-amz-target")
+            .and_then(|v| v.to_str().ok())
             && target.starts_with("AmazonSQS.")
             && let Some(op) = target.split('.').nth(1)
         {
@@ -187,8 +190,13 @@ fn normalize_queue_url_for_endpoint(url: &str, endpoint: &str) -> String {
 fn apply_transport_compat(ctx: &RequestContext, params: &mut HashMap<String, String>) {
     // AWS CLI v2 SQS returns hostname URLs (sqs.us-east-1.localhost.localstack.cloud)
     // in GetQueueUrl, but follow-up calls still target endpoint-url host.
-    if let Some(endpoint) = ctx.headers.get("host") {
-        let scheme = if ctx.headers.get("x-forwarded-proto").map(|v| v.as_str()) == Some("https") {
+    if let Some(endpoint) = ctx.headers.get("host").and_then(|v| v.to_str().ok()) {
+        let scheme = if ctx
+            .headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            == Some("https")
+        {
             "https"
         } else {
             "http"
@@ -282,7 +290,8 @@ fn base_queue_url(_ctx: &RequestContext) -> String {
         let region = _ctx
             .headers
             .get("x-amz-region")
-            .cloned()
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
             .unwrap_or_else(|| _ctx.region.clone());
         return format!("http://sqs.{region}.localhost.localstack.cloud:4566");
     }

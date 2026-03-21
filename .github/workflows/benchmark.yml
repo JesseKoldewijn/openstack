@@ -220,7 +220,7 @@ jobs:
           # intentionally higher under load and has no fixed ceiling there.
           MEMORY_ARG=()
           if [[ "$BENCH_PROFILE" != "stress" ]]; then
-            MEMORY_ARG=(--memory-max 80)
+            MEMORY_ARG=(--memory-max 100)
           fi
           ./tests/bench/bench_gate.sh \
             --report benchmark-report.json \

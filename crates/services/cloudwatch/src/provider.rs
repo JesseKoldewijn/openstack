@@ -62,6 +62,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
 fn is_query_protocol_request(ctx: &RequestContext) -> bool {
     ctx.headers
         .get("content-type")
+        .and_then(|v| v.to_str().ok())
         .map(|value| value.starts_with("application/x-www-form-urlencoded"))
         .unwrap_or(false)
         || ctx.query_params.contains_key("Action")

@@ -20,7 +20,7 @@ fn make_ctx(method: &str, path: &str, body: &[u8]) -> RequestContext {
         account_id: "000000000000".to_string(),
         request_body: serde_json::Value::Null,
         raw_body: Some(Bytes::from(body.to_vec())),
-        headers: HashMap::new(),
+        headers: Default::default(),
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
@@ -32,7 +32,7 @@ fn make_ctx_with_headers(
     method: &str,
     path: &str,
     body: &[u8],
-    headers: HashMap<String, String>,
+    headers: http::HeaderMap,
 ) -> RequestContext {
     RequestContext {
         service: "s3".to_string(),
@@ -62,7 +62,7 @@ fn make_ctx_with_query(
         account_id: "000000000000".to_string(),
         request_body: serde_json::Value::Null,
         raw_body: Some(Bytes::from(body.to_vec())),
-        headers: HashMap::new(),
+        headers: Default::default(),
         path: path.to_string(),
         method: method.to_string(),
         query_params,
@@ -142,8 +142,11 @@ async fn test_delete_non_empty_bucket_fails() {
     let ctx = make_ctx("PUT", "/ne-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
-    let mut headers = HashMap::new();
-    headers.insert("content-type".to_string(), "text/plain".to_string());
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::header::HeaderValue::from_static("text/plain"),
+    );
     let ctx = make_ctx_with_headers("PUT", "/ne-bucket/obj.txt", b"data", headers);
     provider.dispatch(&ctx).await.unwrap();
 
@@ -206,8 +209,11 @@ async fn test_put_and_get_object() {
     provider.dispatch(&ctx).await.unwrap();
 
     // Put object
-    let mut headers = HashMap::new();
-    headers.insert("content-type".to_string(), "text/plain".to_string());
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::header::HeaderValue::from_static("text/plain"),
+    );
     let ctx = make_ctx_with_headers("PUT", "/obj-bucket/hello.txt", b"hello world", headers);
     let resp = provider.dispatch(&ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
@@ -241,8 +247,11 @@ async fn test_head_object() {
     let ctx = make_ctx("PUT", "/ho-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
-    let mut headers = HashMap::new();
-    headers.insert("content-type".to_string(), "application/json".to_string());
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::header::HeaderValue::from_static("application/json"),
+    );
     let ctx = make_ctx_with_headers("PUT", "/ho-bucket/data.json", b"{}", headers);
     provider.dispatch(&ctx).await.unwrap();
 
@@ -308,8 +317,11 @@ async fn test_copy_object() {
     let ctx = make_ctx("PUT", "/dst-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
-    let mut headers = HashMap::new();
-    headers.insert("content-type".to_string(), "text/plain".to_string());
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::header::HeaderValue::from_static("text/plain"),
+    );
     let ctx = make_ctx_with_headers(
         "PUT",
         "/src-bucket/original.txt",
@@ -318,10 +330,10 @@ async fn test_copy_object() {
     );
     provider.dispatch(&ctx).await.unwrap();
 
-    let mut headers = HashMap::new();
+    let mut headers = http::HeaderMap::new();
     headers.insert(
-        "x-amz-copy-source".to_string(),
-        "/src-bucket/original.txt".to_string(),
+        http::header::HeaderName::from_static("x-amz-copy-source"),
+        http::header::HeaderValue::from_static("/src-bucket/original.txt"),
     );
     let ctx = make_ctx_with_headers("PUT", "/dst-bucket/copy.txt", b"", headers);
     let resp = provider.dispatch(&ctx).await.unwrap();
@@ -725,7 +737,7 @@ fn make_ctx_spooled(method: &str, path: &str, data: Vec<u8>, threshold: usize) -
         account_id: "000000000000".to_string(),
         request_body: serde_json::Value::Null,
         raw_body: None, // gateway does NOT materialise for S3 object bodies
-        headers: HashMap::new(),
+        headers: Default::default(),
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),

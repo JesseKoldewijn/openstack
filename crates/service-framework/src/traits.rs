@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::HeaderMap;
 use thiserror::Error;
 
 use crate::SpooledBody;
@@ -27,7 +28,7 @@ pub struct RequestContext {
     /// For all other protocols this is `Some(bytes)` populated by the gateway.
     pub raw_body: Option<Bytes>,
     /// Request headers (key lowercased)
-    pub headers: std::collections::HashMap<String, String>,
+    pub headers: HeaderMap,
     /// URL path
     pub path: String,
     /// HTTP method

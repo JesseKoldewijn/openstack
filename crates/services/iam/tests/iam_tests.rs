@@ -19,7 +19,7 @@ fn make_ctx(operation: &str, params: &[(&str, &str)]) -> RequestContext {
         account_id: "000000000000".to_string(),
         request_body: json!({}),
         raw_body: None,
-        headers: HashMap::new(),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: qp,

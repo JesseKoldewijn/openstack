@@ -11,20 +11,27 @@ pub fn parse_query_request(body: &[u8]) -> Result<(String, Value), ProtocolError
             message: e.to_string(),
         })?;
 
+    // Borrow to find Action without allocating a clone.
     let action = params
         .iter()
-        .find(|(k, _)| k == "Action")
-        .map(|(_, v)| v.clone())
+        .find_map(|(k, v)| {
+            if k == "Action" {
+                Some(v.as_str())
+            } else {
+                None
+            }
+        })
         .ok_or_else(|| ProtocolError::ParseError {
             protocol: "query".to_string(),
             message: "Missing 'Action' parameter".to_string(),
-        })?;
+        })?
+        .to_string();
 
-    // Build a JSON object from the parameters (excluding Action and Version)
+    // Build a JSON object from the parameters (excluding Action and Version),
+    // consuming the Vec so the owned Strings move into the map without extra copies.
     let mut map = Map::new();
-    for (key, value) in &params {
+    for (key, value) in params {
         if key != "Action" && key != "Version" {
-            // Handle nested structures like Attribute.1.Name / Attribute.1.Value
             insert_nested(&mut map, key, value);
         }
     }
@@ -32,16 +39,14 @@ pub fn parse_query_request(body: &[u8]) -> Result<(String, Value), ProtocolError
     Ok((action, Value::Object(map)))
 }
 
-/// Insert a potentially-nested AWS query parameter into a JSON map.
+/// Insert a potentially-nested AWS query parameter into a JSON map,
+/// consuming the owned key and value (avoids extra copies).
 /// Handles formats like: Attribute.1.Name=foo, Tag.member.1.Key=bar, etc.
-fn insert_nested(map: &mut Map<String, Value>, key: &str, value: &str) {
-    // Simple case: no dots, just insert directly
-    if !key.contains('.') {
-        map.insert(key.to_string(), Value::String(value.to_string()));
-        return;
-    }
-    // For now, insert the raw key (full expansion is complex and service-specific)
-    map.insert(key.to_string(), Value::String(value.to_string()));
+fn insert_nested(map: &mut Map<String, Value>, key: String, value: String) {
+    // For now, insert the raw key — full dot-notation expansion is complex
+    // and service-specific.  Both the dotted and non-dotted paths do the
+    // same thing here, so they are merged into a single insert.
+    map.insert(key, Value::String(value));
 }
 
 /// Serialize a response using the XML query protocol format.

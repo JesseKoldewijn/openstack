@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use axum::http::HeaderMap;
 use bytes::Bytes;
 use openstack_service_framework::SpooledBody;
 
@@ -26,8 +27,8 @@ pub struct RequestContext {
     /// `None` for S3 PutObject / UploadPart (body lives in `spooled_body`).
     /// `Some(bytes)` for all other requests.
     pub raw_body: Option<Bytes>,
-    /// Request headers (keys lowercased)
-    pub headers: HashMap<String, String>,
+    /// Request headers
+    pub headers: HeaderMap,
     /// URL path
     pub path: String,
     /// HTTP method
@@ -41,8 +42,9 @@ pub struct RequestContext {
 }
 
 impl RequestContext {
+    /// Look up a request header by name (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(&name.to_lowercase()).map(|s| s.as_str())
+        self.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
     /// Convert to the service-framework `RequestContext`, consuming self

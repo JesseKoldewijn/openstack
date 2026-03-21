@@ -335,15 +335,17 @@ async fn handle_put_object_async(
     let content_type = ctx
         .headers
         .get("content-type")
-        .cloned()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
 
     let metadata: HashMap<String, String> = ctx
         .headers
         .iter()
         .filter_map(|(k, v)| {
-            k.strip_prefix("x-amz-meta-")
-                .map(|mk| (mk.to_string(), v.clone()))
+            k.as_str()
+                .strip_prefix("x-amz-meta-")
+                .and_then(|mk| v.to_str().ok().map(|mv| (mk.to_string(), mv.to_string())))
         })
         .collect();
 
@@ -816,8 +818,12 @@ async fn handle_copy_object_async(
     };
     let dest_key = key_from_path(&ctx.path);
 
-    let copy_source = match ctx.headers.get("x-amz-copy-source") {
-        Some(s) => s.clone(),
+    let copy_source = match ctx
+        .headers
+        .get("x-amz-copy-source")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(s) => s.to_string(),
         None => return s3_error("InvalidRequest", "Missing x-amz-copy-source header", 400),
     };
 
@@ -1230,15 +1236,17 @@ fn handle_create_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -> 
     let content_type = ctx
         .headers
         .get("content-type")
-        .cloned()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
 
     let metadata: HashMap<String, String> = ctx
         .headers
         .iter()
         .filter_map(|(k, v)| {
-            k.strip_prefix("x-amz-meta-")
-                .map(|mk| (mk.to_string(), v.clone()))
+            k.as_str()
+                .strip_prefix("x-amz-meta-")
+                .and_then(|mk| v.to_str().ok().map(|mv| (mk.to_string(), mv.to_string())))
         })
         .collect();
 
@@ -1649,8 +1657,9 @@ fn handle_put_bucket_acl(store: &mut S3Store, ctx: &RequestContext) -> DispatchR
     let acl = ctx
         .headers
         .get("x-amz-acl")
-        .cloned()
-        .unwrap_or_else(|| "private".to_string());
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("private")
+        .to_string();
     if let Some(b) = store.get_bucket_mut(&bucket) {
         b.acl = acl;
     }

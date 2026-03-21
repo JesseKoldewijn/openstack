@@ -18,7 +18,7 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
         raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        headers: HashMap::new(),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
@@ -34,7 +34,7 @@ fn make_ctx_with_path(operation: &str, body: Value, path: &str) -> RequestContex
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
         raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        headers: HashMap::new(),
+        headers: Default::default(),
         path: path.to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
@@ -562,7 +562,7 @@ async fn test_docker_invoke_python() {
         account_id: "000000000000".to_string(),
         request_body: json!({}),
         raw_body: Some(Bytes::from(b"{\"key\": \"value\"}".to_vec())),
-        headers: HashMap::new(),
+        headers: Default::default(),
         path: "/2015-03-31/functions/docker-python-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
@@ -605,8 +605,11 @@ async fn test_docker_invoke_async() {
         request_body: json!({}),
         raw_body: Some(Bytes::from(b"{}".to_vec())),
         headers: {
-            let mut h = HashMap::new();
-            h.insert("x-amz-invocation-type".to_string(), "Event".to_string());
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(
+                axum::http::header::HeaderName::from_static("x-amz-invocation-type"),
+                axum::http::header::HeaderValue::from_static("Event"),
+            );
             h
         },
         path: "/2015-03-31/functions/async-fn/invocations".to_string(),
@@ -661,7 +664,7 @@ def handler(event, context):
         account_id: "000000000000".to_string(),
         request_body: json!({}),
         raw_body: Some(Bytes::from(b"{}".to_vec())),
-        headers: HashMap::new(),
+        headers: Default::default(),
         path: "/2015-03-31/functions/timeout-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),

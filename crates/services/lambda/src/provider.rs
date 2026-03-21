@@ -566,8 +566,7 @@ impl ServiceProvider for LambdaProvider {
                 let invocation_type = ctx
                     .headers
                     .get("x-amz-invocation-type")
-                    .or_else(|| ctx.headers.get("X-Amz-Invocation-Type"))
-                    .map(|s| s.as_str())
+                    .and_then(|v| v.to_str().ok())
                     .unwrap_or("RequestResponse");
 
                 let payload = String::from_utf8_lossy(ctx.raw_body_bytes()).to_string();
