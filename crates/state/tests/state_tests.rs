@@ -4,8 +4,8 @@
 mod state_tests {
     use std::path::Path;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use openstack_config::{Config, Directories, SnapshotLoadStrategy, SnapshotSaveStrategy};
