@@ -14,7 +14,8 @@ A Rust reimplementation of [LocalStack](https://localstack.cloud) Community Edit
 
 ## Service Coverage
 
-The table below lists every service available in LocalStack's Community Edition and the current status of its implementation in openstack.
+<details>
+<summary>Full service coverage table (click to expand)</summary>
 
 | Service | Status | Protocol |
 |---|---|---|
@@ -117,6 +118,10 @@ The table below lists every service available in LocalStack's Community Edition 
 | Verified Permissions | not implemented | — |
 | Web Application Firewall (WAF) | not implemented | — |
 | X-Ray | not implemented | — |
+
+The table lists every service in LocalStack's Community Edition and the current implementation status in openstack.
+
+</details>
 
 ---
 
