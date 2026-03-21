@@ -4,8 +4,8 @@
 mod state_tests {
     use std::path::Path;
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     use openstack_config::{Config, Directories, SnapshotLoadStrategy, SnapshotSaveStrategy};
@@ -103,8 +103,12 @@ mod state_tests {
         async fn save(&self, data_dir: &Path) -> Result<(), anyhow::Error> {
             for entry in self.bundle.iter() {
                 let key = entry.key();
-                let path =
-                    openstack_state::state_path(data_dir, "counter", &key.account_id, &key.region);
+                let path = openstack_state::state_path(
+                    data_dir,
+                    "counter",
+                    &key.account_id(),
+                    &key.region(),
+                );
                 openstack_state::save_store(entry.value(), &path).await?;
             }
             Ok(())
