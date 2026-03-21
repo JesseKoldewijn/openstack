@@ -1077,6 +1077,41 @@ fn service_from_query_action(
         // IAM
         "CreateRole" | "DeleteRole" | "ListRoles" | "GetRole" | "CreateUser" | "DeleteUser"
         | "ListUsers" | "GetUser" => Some("iam"),
+        // CloudFormation
+        "CreateStack" | "DeleteStack" | "DescribeStacks" | "ListStacks" | "GetTemplate"
+        | "ValidateTemplate" | "UpdateStack" => Some("cloudformation"),
+        // CloudWatch
+        "PutMetricData"
+        | "ListMetrics"
+        | "GetMetricStatistics"
+        | "GetMetricData"
+        | "PutMetricAlarm"
+        | "DescribeAlarms"
+        | "DeleteAlarms"
+        | "SetAlarmState"
+        | "CreateLogGroup"
+        | "DeleteLogGroup"
+        | "DescribeLogGroups"
+        | "CreateLogStream"
+        | "PutLogEvents"
+        | "GetLogEvents"
+        | "FilterLogEvents" => Some("cloudwatch"),
+        // EC2
+        "DescribeVpcs"
+        | "CreateVpc"
+        | "DeleteVpc"
+        | "DescribeSubnets"
+        | "CreateSubnet"
+        | "DescribeSecurityGroups"
+        | "CreateSecurityGroup"
+        | "AuthorizeSecurityGroupIngress"
+        | "RunInstances"
+        | "DescribeInstances"
+        | "TerminateInstances" => Some("ec2"),
+        // Redshift
+        "CreateCluster" | "DeleteCluster" | "DescribeClusters" => Some("redshift"),
+        // SES
+        "VerifyEmailIdentity" | "ListIdentities" | "SendEmail" | "SendRawEmail" => Some("ses"),
         _ => None,
     }
 }
@@ -1138,15 +1173,21 @@ fn service_from_target(target: &str) -> Option<&'static str> {
 
     if prefix.eq_ignore_ascii_case("dynamodb") {
         Some("dynamodb")
+    } else if prefix.eq_ignore_ascii_case("certificatemanager") {
+        Some("acm")
     } else if prefix.eq_ignore_ascii_case("kinesis") {
         Some("kinesis")
     } else if prefix.eq_ignore_ascii_case("firehose") {
         Some("firehose")
     } else if prefix.eq_ignore_ascii_case("lambda") {
         Some("lambda")
+    } else if prefix.eq_ignore_ascii_case("awsstepfunctions") {
+        Some("states")
     } else if prefix.eq_ignore_ascii_case("logs") {
         Some("logs")
-    } else if prefix.eq_ignore_ascii_case("kms") {
+    } else if prefix.eq_ignore_ascii_case("amazonssm") {
+        Some("ssm")
+    } else if prefix.eq_ignore_ascii_case("kms") || prefix.eq_ignore_ascii_case("trentservice") {
         Some("kms")
     } else if prefix.eq_ignore_ascii_case("secretsmanager") {
         Some("secretsmanager")
@@ -1176,6 +1217,15 @@ fn service_from_target(target: &str) -> Option<&'static str> {
 fn service_from_path(path: &str) -> Option<&'static str> {
     // Common path-based routing
     let path = path.trim_start_matches('/');
+    if path.starts_with("restapis") {
+        return Some("apigateway");
+    }
+    if path.starts_with("2021-01-01/opensearch/domain") || path == "2021-01-01/domain" {
+        return Some("opensearch");
+    }
+    if path.starts_with("2013-04-01/hostedzone") {
+        return Some("route53");
+    }
     if path.starts_with("2015-03-31/functions")
         || path.starts_with("2015-03-31/event-source-mappings")
     {
@@ -1256,6 +1306,9 @@ fn parse_operation_and_params(
 /// Extract operation name from REST path + method.
 /// The actual operation mapping is done per-service in the provider.
 fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value) -> String {
+    if path == "/2015-03-31/functions/" && method == "GET" {
+        return "ListFunctions".to_string();
+    }
     if path == "/2021-01-01/opensearch/domain" {
         return match method {
             "POST" => "CreateDomain".to_string(),
@@ -1313,9 +1366,6 @@ fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value)
         if method == "PUT" {
             return "UpdateFunctionConfiguration".to_string();
         }
-    }
-    if path == "/2015-03-31/functions/" && method == "GET" {
-        return "ListFunctions".to_string();
     }
     // For REST protocols, the operation is inferred by the service provider
     // We store method + path in the params for the provider to use

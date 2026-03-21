@@ -2,7 +2,7 @@
 
 The repository now has two distinct readiness layers:
 
-- the README-baseline native parity contract, which is green in `core`, `all-services-smoke`, and `all-services-smoke-fast`
+- the README-baseline native parity contract, which is green in `core` and `all-services-smoke`
 - the broader parity and benchmark suites, which still show failures and invalid lanes after the baseline parity work completed
 
 Recent suite investigation showed those remaining failures are not all the same class of problem. The current red surface includes:

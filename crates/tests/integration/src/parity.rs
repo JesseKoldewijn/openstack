@@ -75,23 +75,6 @@ impl Default for ParityConfig {
                 services: all_service_names(),
             },
         );
-        profiles.insert(
-            "all-services-smoke-fast".to_string(),
-            ProfileConfig {
-                name: "all-services-smoke-fast".to_string(),
-                services: vec![
-                    "s3".into(),
-                    "sqs".into(),
-                    "sns".into(),
-                    "dynamodb".into(),
-                    "kms".into(),
-                    "ssm".into(),
-                    "kinesis".into(),
-                    "sts".into(),
-                ],
-            },
-        );
-
         Self {
             openstack_image: std::env::var("PARITY_OPENSTACK_IMAGE").ok(),
             localstack_image: std::env::var("PARITY_LOCALSTACK_IMAGE")
@@ -369,11 +352,6 @@ fn profile_matches(selected: &str, scenario_profile: &str) -> bool {
         return scenario_profile == "extended" || scenario_profile == "core";
     }
 
-    if selected == "all-services-smoke-fast" {
-        return scenario_profile == "all-services-smoke"
-            || scenario_profile == "all-services-smoke-fast";
-    }
-
     selected == scenario_profile
 }
 
@@ -573,8 +551,7 @@ async fn run_scenario(
         .filter(|m| m.accepted_difference_id.is_none())
         .count();
 
-    let baseline_follow_up_required =
-        scenario.profile == "all-services-smoke" || scenario.profile == "all-services-smoke-fast";
+    let baseline_follow_up_required = scenario.profile == "all-services-smoke";
 
     let follow_up_required = openstack_traces
         .iter()

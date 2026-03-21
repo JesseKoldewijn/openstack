@@ -6,8 +6,7 @@ The parity harness compares behavior between openstack and LocalStack for the sa
 
 - `core`: required CI profile intended for stable, high-signal compatibility coverage
 - `extended`: non-required profile for broader coverage and iterative expansion
-- `all-services-smoke`: full 24-service parity lane used for PRs targeting `main`
-- `all-services-smoke-fast`: budget lane used for non-`main` PR targets (including `develop`)
+- `all-services-smoke`: full 24-service parity lane used for all PR targets
 
 ## Run Locally
 
@@ -31,12 +30,6 @@ Run full all-services smoke profile:
 
 ```bash
 cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
-```
-
-Run fast all-services smoke profile:
-
-```bash
-cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke-fast
 ```
 
 Optional overrides:

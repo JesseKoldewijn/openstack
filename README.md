@@ -52,7 +52,7 @@ A Rust reimplementation of [LocalStack](https://localstack.cloud) Community Edit
 | DynamoDB | ✅ supported | json |
 | DynamoDB Streams | ✅ supported | json |
 | EC2 | ✅ supported | ec2 query |
-| ECR | ✅ supported | json |
+| ECR | ⚠️ partial (DescribeImages pending) | json |
 | Elastic Beanstalk | not implemented | — |
 | Elastic Container Service (ECS) | not implemented | — |
 | Elastic File System (EFS) | not implemented | — |
@@ -62,7 +62,7 @@ A Rust reimplementation of [LocalStack](https://localstack.cloud) Community Edit
 | ElastiCache | not implemented | — |
 | Elasticsearch Service | not implemented | — |
 | Elemental MediaConvert | not implemented | — |
-| EventBridge | ✅ supported | json |
+| EventBridge | ⚠️ partial (PutEvents pending) | json |
 | EventBridge Pipes | not implemented | — |
 | EventBridge Scheduler | not implemented | — |
 | Fault Injection Service (FIS) | not implemented | — |

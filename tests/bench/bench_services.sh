@@ -2,7 +2,8 @@
 # bench_services.sh
 #
 # Comprehensive shell-based benchmark script for openstack.
-# Benchmarks all 24 supported AWS services against both openstack and LocalStack,
+# Benchmarks all implemented AWS service crates against openstack, LocalStack,
+# and moto,
 # producing a structured JSON report with raw per-operation metrics.
 #
 # Prerequisites:
@@ -521,7 +522,7 @@ seed_all_targets() {
 # 1.4 Profile resolution
 # ─────────────────────────────────────────────────────────────────────────────
 
-CORE_SERVICES="dynamodb,firehose,iam,kinesis,s3,secretsmanager,sns,sts"
+CORE_SERVICES="acm,apigateway,cloudformation,cloudwatch,dynamodb,ec2,ecr,eventbridge,firehose,iam,kinesis,kms,lambda,opensearch,redshift,route53,s3,secretsmanager,ses,sns,sqs,ssm,stepfunctions,sts"
 
 resolve_profile() {
   case "$PROFILE" in
@@ -1260,6 +1261,240 @@ if is_active "secretsmanager"; then
   else
     skip_service "secretsmanager" "Failed to create seed secret"
   fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2.4 Post-load memory snapshot
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.9 ACM (JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "acm"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "ACM (JSON)"
+
+  ACM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
+
+  bench_targets "acm" "list_certificates" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${ACM_HEADERS[@]}" \
+    -H "X-Amz-Target: CertificateManager.ListCertificates" \
+    -d '{}'
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.10 API Gateway (REST-JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "apigateway"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "API Gateway (REST-JSON)"
+
+  bench_targets "apigateway" "get_rest_apis" GET \
+    "$OS_BASE/restapis" \
+    "$LS_BASE/restapis" \
+    "$MOTO_BASE/restapis"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.11 CloudFormation (Query-XML)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "cloudformation"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "CloudFormation (Query-XML)"
+
+  bench_targets "cloudformation" "list_stacks" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=ListStacks&Version=2010-05-15"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.12 CloudWatch (Query-XML)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "cloudwatch"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "CloudWatch (Query-XML)"
+
+  bench_targets "cloudwatch" "list_metrics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=ListMetrics&Version=2010-08-01"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.13 EC2 (Query-XML)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "ec2"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "EC2 (Query-XML)"
+
+  bench_targets "ec2" "describe_instances" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=DescribeInstances&Version=2016-11-15"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.14 ECR (JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "ecr"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "ECR (JSON)"
+
+  ECR_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
+
+  bench_targets "ecr" "describe_repositories" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${ECR_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.DescribeRepositories" \
+    -d '{}'
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.15 EventBridge (JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "eventbridge"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "EventBridge (JSON)"
+
+  EVENTS_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
+
+  bench_targets "eventbridge" "list_event_buses" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${EVENTS_HEADERS[@]}" \
+    -H "X-Amz-Target: AWSEvents.ListEventBuses" \
+    -d '{}'
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.16 KMS (JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "kms"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "KMS (JSON)"
+
+  KMS_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
+
+  bench_targets "kms" "list_keys" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${KMS_HEADERS[@]}" \
+    -H "X-Amz-Target: TrentService.ListKeys" \
+    -d '{}'
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.17 Lambda (REST-JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "lambda"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "Lambda (REST-JSON)"
+
+  bench_targets "lambda" "list_functions" GET \
+    "$OS_BASE/2015-03-31/functions/" \
+    "$LS_BASE/2015-03-31/functions/" \
+    "$MOTO_BASE/2015-03-31/functions/"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.18 OpenSearch (REST-JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "opensearch"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "OpenSearch (REST-JSON)"
+
+  bench_targets "opensearch" "list_domain_names" GET \
+    "$OS_BASE/2021-01-01/opensearch/domain" \
+    "$LS_BASE/2021-01-01/opensearch/domain" \
+    "$MOTO_BASE/2021-01-01/opensearch/domain"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.19 Redshift (Query-XML)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "redshift"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "Redshift (Query-XML)"
+
+  bench_targets "redshift" "describe_clusters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=DescribeClusters&Version=2012-12-01"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.20 Route53 (REST-XML)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "route53"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "Route53 (REST-XML)"
+
+  bench_targets "route53" "list_hosted_zones" GET \
+    "$OS_BASE/2013-04-01/hostedzone" \
+    "$LS_BASE/2013-04-01/hostedzone" \
+    "$MOTO_BASE/2013-04-01/hostedzone"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.21 SES (Query-XML)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "ses"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "SES (Query-XML)"
+
+  bench_targets "ses" "list_identities" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=ListIdentities&Version=2010-12-01"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.22 SQS (Query-XML)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "sqs"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "SQS (Query-XML)"
+
+  bench_targets "sqs" "list_queues" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=ListQueues&Version=2012-11-05"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.23 SSM (JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "ssm"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "SSM (JSON)"
+
+  SSM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
+
+  bench_targets "ssm" "describe_parameters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.DescribeParameters" \
+    -d '{}'
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.24 StepFunctions (JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if is_active "stepfunctions"; then
+  SEED_OS=1; SEED_LS=1; SEED_MOTO=1
+  log_section "StepFunctions (JSON)"
+
+  SFN_HEADERS=(-H "Content-Type: application/x-amz-json-1.0")
+
+  bench_targets "stepfunctions" "list_state_machines" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SFN_HEADERS[@]}" \
+    -H "X-Amz-Target: AWSStepFunctions.ListStateMachines" \
+    -d '{}'
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -356,9 +356,9 @@ jobs:
           retention-days: 7
 
   parity-all-services-full:
-    name: Parity (all-services-smoke full)
+    name: Parity (all-services-smoke)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: github.event_name == 'pull_request'
     needs: [prepare-openstack-runtime-image]
     env:
       PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
@@ -408,11 +408,11 @@ jobs:
           set -euo pipefail
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run parity all-services smoke full profile
+      - name: Run parity all-services smoke profile
         run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
       - name: Validate parity lifecycle latest report exists
         run: test -f target/parity-reports/all-services-smoke-latest.json
-      - name: Add parity full table to workflow summary
+      - name: Add parity all-services table to workflow summary
         if: always()
         run: |
           python3 - <<'PY'
@@ -427,7 +427,7 @@ jobs:
               report = json.load(handle)
           summary = report.get("summary", {})
           lines = [
-              "## Parity All Services (Full)",
+              "## Parity All Services",
               "",
               "| Metric | Value |",
               "|---|---:|",
@@ -443,97 +443,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: parity-all-services-full-report
-          path: target/parity-reports/*.json
-          retention-days: 7
-
-  parity-all-services-fast:
-    name: Parity (all-services-smoke fast)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref != 'main'
-    needs: [prepare-openstack-runtime-image]
-    env:
-      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
-      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-parity-all-services-fast
-          key: parity-all-services-fast-${{ hashFiles('**/Cargo.lock') }}
-      - name: Load deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
-          path: /tmp
-      - name: Import deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        run: |
-          set -euo pipefail
-          docker load -i /tmp/openstack-runtime-image.tar
-      - name: Validate runtime image provenance
-        run: |
-          set -euo pipefail
-          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
-            echo "PARITY_OPENSTACK_IMAGE is not set"
-            exit 1
-          fi
-          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
-          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
-          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
-          echo "Actual image id:   ${actual_id}"
-          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
-            echo "Runtime image provenance mismatch"
-            exit 1
-          fi
-          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
-          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
-            echo "Runtime image smoke check failed (--version)"
-            echo "version_out=${version_out:-<empty>}"
-            exit 1
-          fi
-      - name: Preflight parity environment
-        run: |
-          set -euo pipefail
-          docker --version
-          docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run parity all-services smoke fast profile
-        run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke-fast
-      - name: Validate parity lifecycle latest report exists
-        run: test -f target/parity-reports/all-services-smoke-fast-latest.json
-      - name: Add parity fast table to workflow summary
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import glob
-          import json
-          import os
-
-          files = sorted(glob.glob("target/parity-reports/all-services-smoke-fast-*.json"), key=os.path.getmtime)
-          if not files:
-              raise SystemExit(0)
-          with open(files[-1], "r", encoding="utf-8") as handle:
-              report = json.load(handle)
-          summary = report.get("summary", {})
-          lines = [
-              "## Parity All Services (Fast)",
-              "",
-              "| Metric | Value |",
-              "|---|---:|",
-              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
-              f"| Passed | {summary.get('passed', 0)} |",
-              f"| Failed | {summary.get('failed', 0)} |",
-          ]
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
-              out.write("\n".join(lines) + "\n")
-          PY
-      - name: Upload parity fast report artifacts
-        if: always() && env.ACT != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: parity-all-services-fast-report
           path: target/parity-reports/*.json
           retention-days: 7
 
@@ -702,7 +611,7 @@ jobs:
         studio-ui-gates,
         studio-performance-budget,
         parity-core,
-        parity-all-services-fast,
+        parity-all-services-full,
         benchmark
       ]
     steps:
@@ -722,7 +631,6 @@ jobs:
         validate-harness-coverage,
         parity-core,
         parity-all-services-full,
-        parity-all-services-fast,
         benchmark
       ]
     steps:
