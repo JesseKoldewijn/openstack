@@ -2,16 +2,19 @@
 ///
 /// Format: AWS4-HMAC-SHA256 Credential=ACCESS_KEY/DATE/REGION/SERVICE/aws4_request,
 ///         SignedHeaders=..., Signature=...
+///
+/// Fields borrow from the input auth header string to avoid allocating 3
+/// Strings on every request. The caller converts to owned only where needed.
 #[derive(Debug, Default)]
-pub struct SigV4Auth {
-    pub access_key: String,
-    pub region: String,
-    pub service: String,
+pub struct SigV4Auth<'a> {
+    pub access_key: &'a str,
+    pub region: &'a str,
+    pub service: &'a str,
 }
 
 /// Parse a SigV4 Authorization header value.
 /// Returns None if the header is not a valid SigV4 header.
-pub fn parse_sigv4_auth(auth: &str) -> Option<SigV4Auth> {
+pub fn parse_sigv4_auth(auth: &str) -> Option<SigV4Auth<'_>> {
     if !auth.starts_with("AWS4-HMAC-SHA256") {
         return None;
     }
@@ -39,9 +42,9 @@ pub fn parse_sigv4_auth(auth: &str) -> Option<SigV4Auth> {
     parts.next()?;
 
     Some(SigV4Auth {
-        access_key: access_key.to_string(),
-        region: region.to_string(),
-        service: service.to_string(),
+        access_key,
+        region,
+        service,
     })
 }
 

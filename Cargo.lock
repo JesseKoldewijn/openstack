@@ -2310,6 +2310,7 @@ dependencies = [
  "openstack-internal-api",
  "openstack-service-framework",
  "openstack-state",
+ "rand 0.10.0",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -2320,7 +2321,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "uuid",
 ]
 
 [[package]]

@@ -16,6 +16,7 @@ fn make_ctx(operation: &str, params: HashMap<String, String>) -> RequestContext 
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: params,
+        request_id: String::new(),
         spooled_body: None,
     }
 }

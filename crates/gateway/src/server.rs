@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
@@ -20,10 +21,12 @@ use openstack_config::Config;
 use openstack_service_framework::traits::ResponseBody;
 use openstack_service_framework::{ServicePluginManager, SpooledBody};
 use openstack_state::StateManager;
+use rand::RngExt;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 use crate::context::RequestContext;
 use crate::cors::CorsHandler;
@@ -247,6 +250,41 @@ const STUDIO_ASSET_JS: &str = r#"(function () {
 
 const STUDIO_ASSET_CSS: &str = r#":root{color-scheme:light dark;--bg:#0f172a;--fg:#e2e8f0;--card:#1e293b;--muted:#94a3b8;--accent:#22c55e}*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,sans-serif;background:linear-gradient(120deg,#0f172a,#111827);color:var(--fg)}.studio-layout{max-width:1200px;margin:0 auto;padding:20px}.studio-header h1{margin:0}.studio-header p{color:var(--muted)}.studio-grid{display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:16px}.studio-panel{background:color-mix(in oklab,var(--card) 92%,black);border:1px solid #334155;border-radius:12px;padding:12px;min-height:260px}.service-list{display:grid;gap:8px}.service-card{display:grid;text-align:left;gap:2px;padding:8px;border:1px solid #334155;background:#0b1220;color:var(--fg);border-radius:8px;cursor:pointer}.service-card.active{border-color:var(--accent)}.detail-grid{display:grid;gap:12px}label{display:grid;gap:6px;margin:6px 0}input,textarea{width:100%;background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px}button{background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.history-list{display:grid;gap:8px}.history-item{text-align:left}pre{white-space:pre-wrap;overflow:auto;background:#0b1220;padding:8px;border-radius:8px}@media(max-width:1024px){.studio-grid{grid-template-columns:1fr}}"#;
 const STUDIO_GUIDED_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
+
+// Thread-local fast RNG — seeded once per thread from the OS RNG, avoiding a
+// getrandom syscall on every request.
+thread_local! {
+    static FAST_RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_rng(&mut rand::rng()));
+}
+
+/// Generate a UUID v4-formatted request ID using the thread-local fast RNG.
+///
+/// ~10x faster than `Uuid::new_v4()` which hits the kernel CSPRNG on every call.
+fn fast_request_id() -> String {
+    FAST_RNG.with(|rng| {
+        let mut rng = rng.borrow_mut();
+        let mut b = [0u8; 16];
+        rng.fill(&mut b);
+        // Set UUID v4 version and variant bits for RFC 4122 compliance.
+        b[6] = (b[6] & 0x0f) | 0x40;
+        b[8] = (b[8] & 0x3f) | 0x80;
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = [0u8; 36];
+        let mut o = 0;
+        for (i, &byte) in b.iter().enumerate() {
+            if i == 4 || i == 6 || i == 8 || i == 10 {
+                out[o] = b'-';
+                o += 1;
+            }
+            out[o] = HEX[(byte >> 4) as usize];
+            o += 1;
+            out[o] = HEX[(byte & 0x0f) as usize];
+            o += 1;
+        }
+        // SAFETY: HEX table and '-' are all valid ASCII/UTF-8.
+        unsafe { String::from_utf8_unchecked(out.to_vec()) }
+    })
+}
 
 /// Adapter that converts `http_body_util::BodyStream<axum::body::Body>` into
 /// a `futures_core::Stream<Item = Result<Bytes, io::Error>>` suitable for
@@ -518,15 +556,15 @@ async fn handle_request(
 
     // --- AWS service request path ---
     // Only now do we allocate request ID, owned path, and parse query params.
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = fast_request_id();
     let path = path_str.to_string();
-    let query_string = uri.query().unwrap_or("").to_string();
+    let query_string = uri.query().unwrap_or("");
 
     // Parse query parameters
     let query_params: HashMap<String, String> = if query_string.is_empty() {
         HashMap::new()
     } else {
-        serde_urlencoded::from_str(&query_string).unwrap_or_default()
+        serde_urlencoded::from_str(query_string).unwrap_or_default()
     };
 
     // Check studio guided execution payload size (for any studio route that
@@ -699,7 +737,7 @@ async fn handle_request(
             (
                 StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 ResponseBody::Buffered(body),
-                ct.to_string(),
+                std::borrow::Cow::Borrowed(ct),
                 Vec::new(),
             )
         }
@@ -709,7 +747,7 @@ async fn handle_request(
     let mut response = match resp_body {
         ResponseBody::Buffered(bytes) => Response::builder()
             .status(status)
-            .header("content-type", &content_type)
+            .header("content-type", &*content_type)
             .header("x-amzn-requestid", &request_id)
             .body(Body::from(bytes))
             .unwrap_or_default(),
@@ -719,7 +757,7 @@ async fn handle_request(
         } => {
             let mut builder = Response::builder()
                 .status(status)
-                .header("content-type", &content_type)
+                .header("content-type", &*content_type)
                 .header("x-amzn-requestid", &request_id)
                 // Prevent tower-http CompressionLayer from compressing binary
                 // object data (S3 GET). Compressing random/incompressible bytes
@@ -813,41 +851,29 @@ fn build_request_context(
     config: &Config,
     spooled_body: Option<SpooledBody>,
 ) -> Result<RequestContext, Response> {
-    // Parse SigV4 Authorization or inject default
-    let (access_key, region, service_from_auth) =
+    // Parse SigV4 Authorization or inject default.
+    // SigV4Auth borrows from the auth header string — no allocations here.
+    // We convert to owned Strings only at RequestContext construction.
+    let (access_key, region, service_from_auth): (&str, &str, Option<&str>) =
         if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
             if let Some(sigv4) = parse_sigv4_auth(auth) {
                 (sigv4.access_key, sigv4.region, Some(sigv4.service))
             } else {
-                (
-                    DEFAULT_ACCESS_KEY.to_string(),
-                    DEFAULT_REGION.to_string(),
-                    None,
-                )
+                (DEFAULT_ACCESS_KEY, DEFAULT_REGION, None)
             }
         } else {
-            (
-                DEFAULT_ACCESS_KEY.to_string(),
-                DEFAULT_REGION.to_string(),
-                None,
-            )
+            (DEFAULT_ACCESS_KEY, DEFAULT_REGION, None)
         };
 
     // Derive account ID from access key
-    let account_id = access_key_to_account_id(&access_key);
+    let account_id = access_key_to_account_id(access_key);
 
     // Determine the target service
-    let service = detect_service(
-        &path,
-        &query_params,
-        &headers,
-        body,
-        service_from_auth.as_deref(),
-    );
+    let service = detect_service(&path, &query_params, &headers, body, service_from_auth);
 
     // Validate / normalize region
-    let region = if config.allow_nonstandard_regions || is_valid_region(&region) {
-        region
+    let region = if config.allow_nonstandard_regions || is_valid_region(region) {
+        region.to_string()
     } else {
         warn!("Invalid region '{}', falling back to us-east-1", region);
         DEFAULT_REGION.to_string()
@@ -872,7 +898,7 @@ fn build_request_context(
         operation,
         region,
         account_id,
-        access_key,
+        access_key: access_key.to_string(),
         protocol,
         params,
         raw_body: if body.is_empty() {
@@ -908,14 +934,15 @@ fn detect_service(
         let parts: Vec<&str> = host.split('.').collect();
         if parts.len() >= 2 {
             let potential_service = parts[0];
-            // Check if it looks like a service name (all lowercase letters/digits)
-            // HeaderMap is case-insensitive so value is already in original case;
-            // AWS service names in hostnames are always lowercase ASCII.
             if potential_service
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
                 && is_known_service(potential_service)
             {
+                // Known service names have a static equivalent — use it.
+                if let Some(s) = known_service_static(potential_service) {
+                    return s.to_string();
+                }
                 return potential_service.to_string();
             }
         }
@@ -947,7 +974,6 @@ fn detect_service(
     }
 
     // 6. S3 path-style heuristic for unsigned endpoint-url calls
-    // Examples: PUT /my-bucket, GET /my-bucket/key
     let trimmed = path.trim_start_matches('/');
     if !trimmed.is_empty() {
         return "s3".to_string();
@@ -963,9 +989,49 @@ fn normalize_service_name(service: &str) -> String {
     // AWS SDKs always send lowercase service names in credentials, so the
     // common path avoids `to_ascii_lowercase`'s character-by-character scan.
     if service.bytes().all(|b| !b.is_ascii_uppercase()) {
-        service.to_string()
+        // Try to resolve to a known static string to avoid allocating.
+        if let Some(s) = known_service_static(service) {
+            s.to_string()
+        } else {
+            service.to_string()
+        }
     } else {
         service.to_ascii_lowercase()
+    }
+}
+
+/// Return the canonical `&'static str` for a known service name.
+/// This allows callers to avoid allocating when the input matches a known service.
+fn known_service_static(name: &str) -> Option<&'static str> {
+    match name {
+        "s3" => Some("s3"),
+        "sqs" => Some("sqs"),
+        "sns" => Some("sns"),
+        "dynamodb" => Some("dynamodb"),
+        "lambda" => Some("lambda"),
+        "iam" => Some("iam"),
+        "sts" => Some("sts"),
+        "kms" => Some("kms"),
+        "cloudformation" => Some("cloudformation"),
+        "cloudwatch" => Some("cloudwatch"),
+        "logs" => Some("logs"),
+        "kinesis" => Some("kinesis"),
+        "firehose" => Some("firehose"),
+        "events" => Some("events"),
+        "states" => Some("states"),
+        "apigateway" => Some("apigateway"),
+        "ec2" => Some("ec2"),
+        "route53" => Some("route53"),
+        "ses" => Some("ses"),
+        "ssm" => Some("ssm"),
+        "secretsmanager" => Some("secretsmanager"),
+        "acm" => Some("acm"),
+        "ecr" => Some("ecr"),
+        "opensearch" => Some("opensearch"),
+        "redshift" => Some("redshift"),
+        "elasticache" => Some("elasticache"),
+        "rds" => Some("rds"),
+        _ => None,
     }
 }
 

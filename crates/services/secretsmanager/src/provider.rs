@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -39,7 +40,7 @@ fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -48,7 +49,7 @@ fn json_ok_bytes(bytes: Bytes) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(bytes),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -63,7 +64,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -112,10 +113,28 @@ impl SecretSummary {
     }
 }
 
+/// Borrowed summary of a secret — avoids cloning `String` fields during
+/// `ListSecrets` by holding `&str` references into the `DashMap` read guard.
 #[derive(Serialize)]
-struct ListSecretsResponse {
+struct SecretSummaryRef<'a> {
+    #[serde(rename = "ARN")]
+    arn: &'a str,
+    #[serde(rename = "Name")]
+    name: &'a str,
+    #[serde(rename = "Description")]
+    description: &'a str,
+    #[serde(rename = "CreatedDate")]
+    created_date: i64,
+    #[serde(rename = "LastChangedDate")]
+    last_changed_date: i64,
+    #[serde(rename = "DeletedDate", skip_serializing_if = "Option::is_none")]
+    deleted_date: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ListSecretsResponseRef<'a> {
     #[serde(rename = "SecretList")]
-    secret_list: Vec<SecretSummary>,
+    secret_list: Vec<SecretSummaryRef<'a>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -394,22 +413,32 @@ impl ServiceProvider for SecretsManagerProvider {
             }
 
             "ListSecrets" => {
-                // Collect into owned structs so the DashMap read lock is released
-                // before serde_json serializes the response.
-                let secret_list: Vec<SecretSummary> = match self.store.get(account_id, region) {
-                    None => Vec::new(),
-                    Some(store) => store
-                        .secrets
-                        .values()
-                        .filter(|s| !s.deleted)
-                        .map(SecretSummary::from_secret)
-                        .collect(),
-                    // `store` Ref dropped here — lock released.
-                };
-                let resp = ListSecretsResponse { secret_list };
-                Ok(json_ok_bytes(Bytes::from(
-                    serde_json::to_vec(&resp).unwrap(),
-                )))
+                // Serialize inside the DashMap read lock using borrowed refs
+                // to avoid cloning String fields. The read lock is shared so
+                // concurrent readers are not blocked.
+                match self.store.get(account_id, region) {
+                    None => Ok(json_ok_bytes(Bytes::from_static(b"{\"SecretList\":[]}"))),
+                    Some(store) => {
+                        let secret_list: Vec<SecretSummaryRef<'_>> = store
+                            .secrets
+                            .values()
+                            .filter(|s| !s.deleted)
+                            .map(|s| SecretSummaryRef {
+                                arn: &s.arn,
+                                name: &s.name,
+                                description: &s.description,
+                                created_date: s.created.timestamp(),
+                                last_changed_date: s.last_changed.timestamp(),
+                                deleted_date: s.deletion_date.map(|d| d.timestamp()),
+                            })
+                            .collect();
+                        let resp = ListSecretsResponseRef { secret_list };
+                        let mut buf = Vec::with_capacity(64 + store.secrets.len() * 200);
+                        serde_json::to_writer(&mut buf, &resp).unwrap();
+                        Ok(json_ok_bytes(Bytes::from(buf)))
+                        // DashMap read lock released here after serialization
+                    }
+                }
             }
 
             "DeleteSecret" => {

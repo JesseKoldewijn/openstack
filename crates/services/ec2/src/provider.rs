@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -43,7 +44,7 @@ fn xml_ok(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -59,7 +60,7 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }

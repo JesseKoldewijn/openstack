@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -54,7 +55,7 @@ fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -63,7 +64,7 @@ fn json_ok_raw(body: String) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -79,7 +80,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -305,7 +306,7 @@ impl ServiceProvider for LambdaProvider {
                     body: ResponseBody::Buffered(Bytes::from(
                         serde_json::to_vec(&function_to_json(&func)).unwrap(),
                     )),
-                    content_type: "application/json".to_string(),
+                    content_type: Cow::Borrowed("application/json"),
                     headers: Vec::new(),
                 })
             }
@@ -409,7 +410,7 @@ impl ServiceProvider for LambdaProvider {
                 Ok(DispatchResponse {
                     status_code: 204,
                     body: ResponseBody::Buffered(Bytes::new()),
-                    content_type: "application/json".to_string(),
+                    content_type: Cow::Borrowed("application/json"),
                     headers: Vec::new(),
                 })
             }
@@ -636,7 +637,7 @@ impl ServiceProvider for LambdaProvider {
                     return Ok(DispatchResponse {
                         status_code: 202,
                         body: ResponseBody::Buffered(Bytes::new()),
-                        content_type: "application/json".to_string(),
+                        content_type: Cow::Borrowed("application/json"),
                         headers: Vec::new(),
                     });
                 }
@@ -646,7 +647,7 @@ impl ServiceProvider for LambdaProvider {
                     return Ok(DispatchResponse {
                         status_code: 204,
                         body: ResponseBody::Buffered(Bytes::new()),
-                        content_type: "application/json".to_string(),
+                        content_type: Cow::Borrowed("application/json"),
                         headers: Vec::new(),
                     });
                 }
@@ -681,7 +682,7 @@ impl ServiceProvider for LambdaProvider {
                             }))
                             .unwrap(),
                         )),
-                        content_type: "application/json".to_string(),
+                        content_type: Cow::Borrowed("application/json"),
                         headers: vec![(
                             "X-Amz-Function-Error".to_string(),
                             "Unhandled".to_string(),
@@ -752,7 +753,7 @@ impl ServiceProvider for LambdaProvider {
                     body: ResponseBody::Buffered(Bytes::from(
                         serde_json::to_vec(&lv_json).unwrap(),
                     )),
-                    content_type: "application/json".to_string(),
+                    content_type: Cow::Borrowed("application/json"),
                     headers: Vec::new(),
                 })
             }
@@ -888,7 +889,7 @@ impl ServiceProvider for LambdaProvider {
                     body: ResponseBody::Buffered(Bytes::from(
                         serde_json::to_vec(&esm_to_json(&esm)).unwrap(),
                     )),
-                    content_type: "application/json".to_string(),
+                    content_type: Cow::Borrowed("application/json"),
                     headers: Vec::new(),
                 })
             }
@@ -1036,7 +1037,7 @@ impl ServiceProvider for LambdaProvider {
                         }))
                         .unwrap(),
                     )),
-                    content_type: "application/json".to_string(),
+                    content_type: Cow::Borrowed("application/json"),
                     headers: Vec::new(),
                 })
             }
@@ -1141,7 +1142,7 @@ impl ServiceProvider for LambdaProvider {
                 Ok(DispatchResponse {
                     status_code: 204,
                     body: ResponseBody::Buffered(Bytes::new()),
-                    content_type: "application/json".to_string(),
+                    content_type: Cow::Borrowed("application/json"),
                     headers: Vec::new(),
                 })
             }
@@ -1198,7 +1199,7 @@ impl ServiceProvider for LambdaProvider {
             "RemovePermission" => Ok(DispatchResponse {
                 status_code: 204,
                 body: ResponseBody::Buffered(Bytes::new()),
-                content_type: "application/json".to_string(),
+                content_type: Cow::Borrowed("application/json"),
                 headers: Vec::new(),
             }),
 

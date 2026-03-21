@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -38,7 +39,7 @@ fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -47,7 +48,7 @@ fn json_ok_text_plain(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "text/plain; charset=utf-8".to_string(),
+        content_type: Cow::Borrowed("text/plain; charset=utf-8"),
         headers: Vec::new(),
     }
 }
@@ -62,7 +63,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -74,7 +75,7 @@ fn xml_error(code: &str, message: &str, status: u16, extra: &str) -> DispatchRes
     DispatchResponse {
         status_code: status,
         body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
-        content_type: "application/xml".to_string(),
+        content_type: Cow::Borrowed("application/xml"),
         headers: Vec::new(),
     }
 }

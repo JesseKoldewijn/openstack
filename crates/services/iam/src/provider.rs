@@ -52,7 +52,7 @@ fn xml_resp(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -87,7 +87,7 @@ fn xml_response_write(
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(buf.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -105,7 +105,7 @@ fn xml_no_result(action: &str, request_id: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -123,7 +123,7 @@ fn iam_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -335,7 +335,13 @@ impl ServiceProvider for IamProvider {
 
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
         let op = ctx.operation.as_str();
-        let rid = req_id();
+        // Reuse the gateway's request ID when available; fall back to local
+        // generation for unit tests that construct RequestContext directly.
+        let rid: Cow<'_, str> = if ctx.request_id.is_empty() {
+            Cow::Owned(req_id())
+        } else {
+            Cow::Borrowed(&ctx.request_id)
+        };
         // IAM is global (no region) — use account_id only; map to us-east-1
         let account_id = &ctx.account_id;
         let region = "us-east-1";
@@ -413,9 +419,10 @@ impl ServiceProvider for IamProvider {
             }
 
             "ListUsers" => {
-                // Clone users out of the DashMap ref, then drop the read lock
-                // before serialising — prevents lock contention from inflating P95.
-                let mut users: Vec<IamUser> = match self.store.get(account_id, region) {
+                // Serialize directly inside the DashMap read lock — the lock
+                // is shared (multiple concurrent readers), so holding it during
+                // serialization is safe and avoids N * 5+ String clones.
+                match self.store.get(account_id, region) {
                     None => {
                         return Ok(xml_resp(
                             "ListUsers",
@@ -423,22 +430,27 @@ impl ServiceProvider for IamProvider {
                             "<Users /><IsTruncated>false</IsTruncated>",
                         ));
                     }
-                    Some(store) => store.users.values().cloned().collect(),
-                    // `store` Ref dropped here — lock released.
-                };
-                users.sort_unstable_by(|a, b| a.user_name.cmp(&b.user_name));
-                Ok(xml_response_write(
-                    "ListUsers",
-                    &rid,
-                    8 + users.len() * 260,
-                    |buf| {
-                        buf.push_str("<Users>");
-                        for u in &users {
-                            write_user_xml(buf, u);
-                        }
-                        buf.push_str("</Users><IsTruncated>false</IsTruncated>");
-                    },
-                ))
+                    Some(store) => {
+                        // Sort by name using only references (no clone).
+                        let mut names: Vec<&str> = store.users.keys().map(String::as_str).collect();
+                        names.sort_unstable();
+                        Ok(xml_response_write(
+                            "ListUsers",
+                            &rid,
+                            8 + names.len() * 260,
+                            |buf| {
+                                buf.push_str("<Users>");
+                                for name in &names {
+                                    if let Some(u) = store.users.get(*name) {
+                                        write_user_xml(buf, u);
+                                    }
+                                }
+                                buf.push_str("</Users><IsTruncated>false</IsTruncated>");
+                            },
+                        ))
+                        // DashMap read lock released here after serialization.
+                    }
+                }
             }
 
             // ---------------------------------------------------------------

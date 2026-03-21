@@ -61,6 +61,7 @@ impl RequestContext {
             path: self.path,
             method: self.method,
             query_params: self.query_params,
+            request_id: self.request_id,
             spooled_body: self.spooled_body.map(Mutex::new),
         }
     }

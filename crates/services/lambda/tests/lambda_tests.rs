@@ -22,6 +22,7 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -38,6 +39,7 @@ fn make_ctx_with_path(operation: &str, body: Value, path: &str) -> RequestContex
         path: path.to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -566,6 +568,7 @@ async fn test_docker_invoke_python() {
         path: "/2015-03-31/functions/docker-python-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let invoke_resp = p.dispatch(&invoke_ctx).await.unwrap();
@@ -615,6 +618,7 @@ async fn test_docker_invoke_async() {
         path: "/2015-03-31/functions/async-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let resp = p.dispatch(&invoke_ctx).await.unwrap();
@@ -668,6 +672,7 @@ def handler(event, context):
         path: "/2015-03-31/functions/timeout-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let resp = p.dispatch(&invoke_ctx).await.unwrap();

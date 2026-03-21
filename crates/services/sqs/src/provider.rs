@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -44,7 +45,7 @@ fn xml_wrap(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -59,7 +60,7 @@ fn xml_no_result(action: &str, request_id: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -74,7 +75,7 @@ fn sqs_error(code: &str, message: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 400,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -83,7 +84,7 @@ fn sqs_json_response(value: serde_json::Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(value.to_string().into_bytes())),
-        content_type: "application/x-amz-json-1.0".to_string(),
+        content_type: Cow::Borrowed("application/x-amz-json-1.0"),
         headers: Vec::new(),
     }
 }
@@ -96,7 +97,7 @@ fn sqs_json_error(code: &str, message: &str, status_code: u16) -> DispatchRespon
     DispatchResponse {
         status_code,
         body: ResponseBody::Buffered(Bytes::from(body.to_string().into_bytes())),
-        content_type: "application/x-amz-json-1.0".to_string(),
+        content_type: Cow::Borrowed("application/x-amz-json-1.0"),
         headers: Vec::new(),
     }
 }

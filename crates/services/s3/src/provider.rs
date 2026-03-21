@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -108,7 +109,7 @@ fn xml_response(status: u16, xml: String) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "application/xml".to_string(),
+        content_type: Cow::Borrowed("application/xml"),
         headers: Vec::new(),
     }
 }
@@ -138,7 +139,7 @@ fn empty_200() -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::new()),
-        content_type: String::new(),
+        content_type: Cow::Borrowed(""),
         headers: Vec::new(),
     }
 }
@@ -147,7 +148,7 @@ fn empty_204() -> DispatchResponse {
     DispatchResponse {
         status_code: 204,
         body: ResponseBody::Buffered(Bytes::new()),
-        content_type: String::new(),
+        content_type: Cow::Borrowed(""),
         headers: Vec::new(),
     }
 }
@@ -202,7 +203,7 @@ fn handle_create_bucket(store: &mut S3Store, ctx: &RequestContext) -> DispatchRe
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::new()),
-        content_type: String::new(),
+        content_type: Cow::Borrowed(""),
         headers: vec![("Location".to_string(), format!("/{bucket}"))],
     }
 }
@@ -495,7 +496,7 @@ async fn handle_put_object_async(
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::new()),
-        content_type: String::new(),
+        content_type: Cow::Borrowed(""),
         headers: response_headers,
     }
 }
@@ -614,7 +615,7 @@ async fn handle_get_object_async(
             DispatchResponse {
                 status_code: 200,
                 body,
-                content_type,
+                content_type: Cow::Owned(content_type),
                 headers,
             }
         }
@@ -654,7 +655,7 @@ fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse
             DispatchResponse {
                 status_code: 200,
                 body: ResponseBody::Buffered(Bytes::new()),
-                content_type: v.content_type.clone(),
+                content_type: Cow::Owned(v.content_type.clone()),
                 headers,
             }
         }
@@ -719,7 +720,7 @@ async fn handle_delete_object_async(
     DispatchResponse {
         status_code: 204,
         body: ResponseBody::Buffered(Bytes::new()),
-        content_type: String::new(),
+        content_type: Cow::Borrowed(""),
         headers,
     }
 }
@@ -1383,7 +1384,7 @@ async fn handle_upload_part_async(
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::new()),
-        content_type: String::new(),
+        content_type: Cow::Borrowed(""),
         headers: vec![("ETag".to_string(), etag)],
     }
 }
@@ -1716,7 +1717,7 @@ fn handle_get_bucket_policy(store: &S3Store, ctx: &RequestContext) -> DispatchRe
             Some(policy) => DispatchResponse {
                 status_code: 200,
                 body: ResponseBody::Buffered(Bytes::from(policy.clone().into_bytes())),
-                content_type: "application/json".to_string(),
+                content_type: Cow::Borrowed("application/json"),
                 headers: Vec::new(),
             },
         },

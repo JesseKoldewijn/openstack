@@ -24,6 +24,7 @@ fn make_ctx(method: &str, path: &str, body: &[u8]) -> RequestContext {
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -45,6 +46,7 @@ fn make_ctx_with_headers(
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -66,6 +68,7 @@ fn make_ctx_with_query(
         path: path.to_string(),
         method: method.to_string(),
         query_params,
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -741,6 +744,7 @@ fn make_ctx_spooled(method: &str, path: &str, data: Vec<u8>, threshold: usize) -
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: Some(Mutex::new(spooled)),
     }
 }

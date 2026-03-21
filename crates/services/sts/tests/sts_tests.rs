@@ -21,6 +21,7 @@ fn make_ctx(operation: &str, params: &[(&str, &str)]) -> RequestContext {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: qp,
+        request_id: String::new(),
         spooled_body: None,
     }
 }

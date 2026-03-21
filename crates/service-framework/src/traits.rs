@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::Mutex;
 
@@ -35,6 +36,8 @@ pub struct RequestContext {
     pub method: String,
     /// Query string parameters
     pub query_params: std::collections::HashMap<String, String>,
+    /// Unique request ID for tracing (generated once by the gateway).
+    pub request_id: String,
     /// Spooled request body (for large payloads, may be on disk).
     ///
     /// Wrapped in a `Mutex` so that it can be locked and consumed
@@ -61,6 +64,7 @@ impl RequestContext {
             path: String::new(),
             method: String::new(),
             query_params: Default::default(),
+            request_id: String::new(),
             spooled_body: None,
         }
     }
@@ -202,7 +206,7 @@ pub struct DispatchResponse {
     /// Response body
     pub body: ResponseBody,
     /// Response content type
-    pub content_type: String,
+    pub content_type: Cow<'static, str>,
     /// Additional response headers
     pub headers: Vec<(String, String)>,
 }
@@ -214,7 +218,7 @@ impl DispatchResponse {
         Ok(Self {
             status_code: 200,
             body: ResponseBody::Buffered(Bytes::from(bytes)),
-            content_type: "application/json".to_string(),
+            content_type: Cow::Borrowed("application/json"),
             headers: Vec::new(),
         })
     }
@@ -223,7 +227,7 @@ impl DispatchResponse {
         Self {
             status_code: 200,
             body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-            content_type: "text/xml".to_string(),
+            content_type: Cow::Borrowed("text/xml"),
             headers: Vec::new(),
         }
     }
@@ -232,7 +236,7 @@ impl DispatchResponse {
     pub fn streaming(
         stream: Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
         content_length: Option<u64>,
-        content_type: impl Into<String>,
+        content_type: Cow<'static, str>,
     ) -> Self {
         Self {
             status_code: 200,
@@ -240,7 +244,7 @@ impl DispatchResponse {
                 stream,
                 content_length,
             },
-            content_type: content_type.into(),
+            content_type,
             headers: Vec::new(),
         }
     }

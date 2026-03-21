@@ -33,6 +33,7 @@ fn make_ctx(
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params,
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -55,6 +56,7 @@ fn make_ctx_json(
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -93,6 +95,7 @@ async fn test_sqs_multi_account_isolation() {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let create_a = provider.dispatch(&ctx_a).await.unwrap();
@@ -111,6 +114,7 @@ async fn test_sqs_multi_account_isolation() {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let create_b = provider.dispatch(&ctx_b).await.unwrap();
@@ -129,6 +133,7 @@ async fn test_sqs_multi_account_isolation() {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let list_a = provider.dispatch(&list_ctx_a).await.unwrap();
@@ -155,6 +160,7 @@ async fn test_sqs_multi_account_isolation() {
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let list_b = provider.dispatch(&list_ctx_b).await.unwrap();
@@ -278,6 +284,7 @@ async fn test_s3_multi_account_isolation() {
         path: "/account-a-bucket".to_string(),
         method: "PUT".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let create_a = provider.dispatch(&ctx_a).await.unwrap();
@@ -295,6 +302,7 @@ async fn test_s3_multi_account_isolation() {
         path: "/account-b-bucket".to_string(),
         method: "PUT".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let create_b = provider.dispatch(&ctx_b).await.unwrap();
@@ -312,6 +320,7 @@ async fn test_s3_multi_account_isolation() {
         path: "/".to_string(),
         method: "GET".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let list_a = provider.dispatch(&list_ctx_a).await.unwrap();

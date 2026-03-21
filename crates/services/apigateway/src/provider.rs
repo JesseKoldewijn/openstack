@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -40,7 +41,7 @@ fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -49,7 +50,7 @@ fn json_created(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 201,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -64,7 +65,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -232,7 +233,7 @@ impl ServiceProvider for ApiGatewayProvider {
                 Ok(DispatchResponse {
                     status_code: 202,
                     body: ResponseBody::Buffered(Bytes::new()),
-                    content_type: "application/json".to_string(),
+                    content_type: Cow::Borrowed("application/json"),
                     headers: Vec::new(),
                 })
             }
