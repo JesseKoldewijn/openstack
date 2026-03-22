@@ -1482,9 +1482,96 @@ if is_active "sqs"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "SQS (Query-XML)"
 
-  bench_targets "sqs" "list_queues" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Action=ListQueues&Version=2012-11-05"
+  SQS_QUEUE_NAME="bench-queue-$$"
+  SQS_QUEUE_URL="http://localhost:4566/000000000000/${SQS_QUEUE_NAME}"
+  SQS_QUEUE_URL_ENC=$(jq -nr --arg v "$SQS_QUEUE_URL" '$v|@uri')
+
+  if seed_all_targets "sqs" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "Action=CreateQueue&Version=2012-11-05&QueueName=${SQS_QUEUE_NAME}"; then
+
+    if seed_all_targets "sqs" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+         -H "Content-Type: application/x-www-form-urlencoded" \
+         -d "Action=SendMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MessageBody=seed-message"; then
+
+      bench_targets "sqs" "list_queues" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=ListQueues&Version=2012-11-05"
+
+      bench_targets "sqs" "send_message" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=SendMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MessageBody=benchmark-message"
+
+      bench_targets "sqs" "receive_message" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=ReceiveMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MaxNumberOfMessages=1&VisibilityTimeout=0"
+
+      SQS_RH_OS=""
+      if [[ "${SEED_OS:-0}" -eq 1 ]]; then
+        _sqs_recv_os=$(curl -s -X POST "$OS_BASE" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "Action=ReceiveMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MaxNumberOfMessages=1") || true
+        SQS_RH_OS="${_sqs_recv_os#*<ReceiptHandle>}"
+        if [[ "$SQS_RH_OS" != "$_sqs_recv_os" ]]; then
+          SQS_RH_OS="${SQS_RH_OS%%</ReceiptHandle>*}"
+        else
+          SQS_RH_OS=""
+        fi
+      fi
+
+      SQS_RH_LS=""
+      if target_active ls && [[ "${SEED_LS:-0}" -eq 1 ]]; then
+        _sqs_recv_ls=$(curl -s -X POST "$LS_BASE" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "Action=ReceiveMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MaxNumberOfMessages=1") || true
+        SQS_RH_LS="${_sqs_recv_ls#*<ReceiptHandle>}"
+        if [[ "$SQS_RH_LS" != "$_sqs_recv_ls" ]]; then
+          SQS_RH_LS="${SQS_RH_LS%%</ReceiptHandle>*}"
+        else
+          SQS_RH_LS=""
+        fi
+      fi
+
+      SQS_RH_MOTO=""
+      if target_active moto && [[ "${SEED_MOTO:-0}" -eq 1 ]]; then
+        _sqs_recv_moto=$(curl -s -X POST "$MOTO_BASE" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "Action=ReceiveMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MaxNumberOfMessages=1") || true
+        SQS_RH_MOTO="${_sqs_recv_moto#*<ReceiptHandle>}"
+        if [[ "$SQS_RH_MOTO" != "$_sqs_recv_moto" ]]; then
+          SQS_RH_MOTO="${SQS_RH_MOTO%%</ReceiptHandle>*}"
+        else
+          SQS_RH_MOTO=""
+        fi
+      fi
+
+      if [[ -n "$SQS_RH_OS" ]]; then
+        SQS_RH_OS_ENC=$(jq -nr --arg v "$SQS_RH_OS" '$v|@uri')
+        log "  sqs/delete_message (openstack)..."
+        bench "sqs" "delete_message" "os" POST "$OS_BASE" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "Action=DeleteMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&ReceiptHandle=${SQS_RH_OS_ENC}"
+      fi
+      if target_active ls && [[ -n "$SQS_RH_LS" ]]; then
+        SQS_RH_LS_ENC=$(jq -nr --arg v "$SQS_RH_LS" '$v|@uri')
+        log "  sqs/delete_message (localstack)..."
+        bench "sqs" "delete_message" "ls" POST "$LS_BASE" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "Action=DeleteMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&ReceiptHandle=${SQS_RH_LS_ENC}"
+      fi
+      if target_active moto && [[ -n "$SQS_RH_MOTO" ]]; then
+        SQS_RH_MOTO_ENC=$(jq -nr --arg v "$SQS_RH_MOTO" '$v|@uri')
+        log "  sqs/delete_message (moto)..."
+        bench "sqs" "delete_message" "moto" POST "$MOTO_BASE" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "Action=DeleteMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&ReceiptHandle=${SQS_RH_MOTO_ENC}"
+      fi
+    else
+      skip_service "sqs" "Unable to seed SendMessage on openstack"
+    fi
+  else
+    skip_service "sqs" "Unable to seed CreateQueue on openstack"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

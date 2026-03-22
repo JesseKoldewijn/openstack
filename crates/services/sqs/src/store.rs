@@ -42,6 +42,13 @@ pub struct SqsMessage {
     pub sequence_number: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SendMessageResult {
+    pub message_id: String,
+    pub md5_of_body: String,
+    pub sequence_number: u64,
+}
+
 impl SqsMessage {
     pub fn new(
         body: impl Into<String>,
@@ -195,7 +202,7 @@ impl SqsQueue {
         message_attributes: HashMap<String, MessageAttributeValue>,
         message_group_id: Option<String>,
         dedup_id: Option<String>,
-    ) -> Option<SqsMessage> {
+    ) -> Option<SendMessageResult> {
         let delay = delay_override.unwrap_or(self.delay_seconds);
 
         // FIFO deduplication
@@ -221,8 +228,13 @@ impl SqsQueue {
             self.dedup_ids.insert(did, msg.message_id.clone());
         }
 
-        self.messages.push_back(msg.clone());
-        Some(msg)
+        let result = SendMessageResult {
+            message_id: msg.message_id.clone(),
+            md5_of_body: msg.md5_of_body.clone(),
+            sequence_number: msg.sequence_number,
+        };
+        self.messages.push_back(msg);
+        Some(result)
     }
 
     /// Receive up to `max_number` visible messages, applying visibility timeout.
@@ -230,17 +242,17 @@ impl SqsQueue {
         &mut self,
         max_number: usize,
         visibility_timeout: Option<u32>,
-    ) -> Vec<SqsMessage> {
+    ) -> Vec<usize> {
         let vt = visibility_timeout.unwrap_or(self.visibility_timeout);
-        let mut received = Vec::new();
+        let mut received = Vec::with_capacity(max_number);
 
-        for msg in self.messages.iter_mut() {
+        for (idx, msg) in self.messages.iter_mut().enumerate() {
             if received.len() >= max_number {
                 break;
             }
             if msg.is_visible() {
                 msg.begin_receive(vt);
-                received.push(msg.clone());
+                received.push(idx);
             }
         }
         received
@@ -248,9 +260,16 @@ impl SqsQueue {
 
     /// Delete a message by receipt handle. Returns true if found.
     pub fn delete_message(&mut self, receipt_handle: &str) -> bool {
-        let before = self.messages.len();
-        self.messages.retain(|m| m.receipt_handle != receipt_handle);
-        self.messages.len() < before
+        if let Some(idx) = self
+            .messages
+            .iter()
+            .position(|m| m.receipt_handle == receipt_handle)
+        {
+            self.messages.remove(idx);
+            true
+        } else {
+            false
+        }
     }
 
     /// Change visibility timeout for a message by receipt handle.
@@ -417,8 +436,7 @@ pub fn apply_queue_attributes(q: &mut SqsQueue, attrs: &HashMap<String, String>)
 }
 
 pub fn md5_hex(data: &[u8]) -> String {
-    use sha2::Digest;
-    // Use SHA-256 truncated to 16 bytes as a stand-in for MD5 (no md-5 crate in workspace)
-    let digest = sha2::Sha256::digest(data);
-    hex::encode(&digest[..16])
+    use md5::Digest;
+    let digest = md5::Md5::digest(data);
+    hex::encode(digest)
 }
