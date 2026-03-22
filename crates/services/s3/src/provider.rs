@@ -12,6 +12,7 @@ use openstack_service_framework::HashingReader;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
@@ -179,7 +180,7 @@ fn s3_bucket_error(code: &str, message: &str, bucket: &str, status: u16) -> Disp
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <Error><Code>{code}</Code><Message>{message}</Message><RequestId>00000000-0000-0000-0000-000000000000</RequestId><BucketName>{}</BucketName></Error>",
-            escape_xml(bucket)
+            xml_escape(bucket)
         ),
     )
 }
@@ -219,13 +220,6 @@ fn key_from_path(path: &str) -> String {
     let path = path.trim_start_matches('/');
     let slash = path.find('/').unwrap_or(path.len());
     path[slash..].trim_start_matches('/').to_string()
-}
-
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +309,7 @@ fn handle_list_buckets(store: &S3Store, _ctx: &RequestContext) -> DispatchRespon
     for b in buckets {
         xml.push_str(&format!(
             "<Bucket><Name>{}</Name><CreationDate>{}</CreationDate></Bucket>",
-            escape_xml(&b.name),
+            xml_escape(&b.name),
             b.creation_date.format("%Y-%m-%dT%H:%M:%S.000Z")
         ));
     }
@@ -859,8 +853,8 @@ async fn handle_delete_objects_async(
                 }
                 deleted_xml.push_str(&format!(
                     "<Deleted><Key>{}</Key><VersionId>{}</VersionId></Deleted>",
-                    escape_xml(key),
-                    escape_xml(vid)
+                    xml_escape(key),
+                    xml_escape(vid)
                 ));
             } else {
                 if let Some(removed) = store.delete_object(&bucket, key)
@@ -871,7 +865,7 @@ async fn handle_delete_objects_async(
                 }
                 deleted_xml.push_str(&format!(
                     "<Deleted><Key>{}</Key></Deleted>",
-                    escape_xml(key)
+                    xml_escape(key)
                 ));
             }
         }
@@ -982,13 +976,13 @@ async fn handle_copy_object_async(
                 }
             }
         }
-        ObjectDataRef::FileRef(_path) => {
+        ObjectDataRef::FileRef(path) => {
             if src_size <= INLINE_OBJECT_THRESHOLD {
                 // Small file-backed object — read into memory and keep inline.
-                match tokio::fs::read(_path).await {
+                match tokio::fs::read(path).await {
                     Ok(bytes) => ObjectDataRef::Inline(Bytes::from(bytes)),
                     Err(e) => {
-                        warn!(error = %e, path = %_path.display(), "Failed to read source object file for copy");
+                        warn!(error = %e, path = %path.display(), "Failed to read source object file for copy");
                         return s3_error("InternalError", "Failed to copy object", 500);
                     }
                 }
@@ -1077,7 +1071,7 @@ async fn handle_copy_object_async(
 <CopyObjectResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <LastModified>{}</LastModified><ETag>{}</ETag></CopyObjectResult>",
         last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-        escape_xml(&etag)
+        xml_escape(&etag)
     ))
 }
 
@@ -1166,8 +1160,8 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
 <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Name>{}</Name><Prefix>{}</Prefix><MaxKeys>{}</MaxKeys>\
 <KeyCount>{}</KeyCount><IsTruncated>{}</IsTruncated>",
-        escape_xml(&bucket),
-        escape_xml(&prefix),
+        xml_escape(&bucket),
+        xml_escape(&prefix),
         max_keys,
         key_count,
         truncated
@@ -1176,7 +1170,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     if let Some(ref t) = next_token {
         xml.push_str(&format!(
             "<NextContinuationToken>{}</NextContinuationToken>",
-            escape_xml(t)
+            xml_escape(t)
         ));
     }
 
@@ -1190,9 +1184,9 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
 <Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Contents>",
-                key = escape_xml(key),
+                key = xml_escape(key),
                 lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                etag = escape_xml(&v.etag),
+                etag = xml_escape(&v.etag),
                 size = v.size,
             ));
         }
@@ -1201,7 +1195,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     for cp in &common_prefixes {
         xml.push_str(&format!(
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
-            escape_xml(cp)
+            xml_escape(cp)
         ));
     }
 
@@ -1281,8 +1275,8 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
 <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Name>{name}</Name><Prefix>{prefix}</Prefix>\
 <MaxKeys>{max_keys}</MaxKeys><IsTruncated>{truncated}</IsTruncated>",
-        name = escape_xml(&bucket),
-        prefix = escape_xml(&prefix),
+        name = xml_escape(&bucket),
+        prefix = xml_escape(&prefix),
         max_keys = max_keys,
         truncated = truncated,
     );
@@ -1290,7 +1284,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     if truncated && !next_marker.is_empty() {
         xml.push_str(&format!(
             "<NextMarker>{}</NextMarker>",
-            escape_xml(&next_marker)
+            xml_escape(&next_marker)
         ));
     }
 
@@ -1304,9 +1298,9 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
 <Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Contents>",
-                key = escape_xml(key),
+                key = xml_escape(key),
                 lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                etag = escape_xml(&v.etag),
+                etag = xml_escape(&v.etag),
                 size = v.size,
             ));
         }
@@ -1315,7 +1309,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     for cp in &common_prefixes {
         xml.push_str(&format!(
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
-            escape_xml(cp)
+            xml_escape(cp)
         ));
     }
 
@@ -1362,9 +1356,9 @@ fn handle_create_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -> 
 <InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Bucket>{bucket}</Bucket><Key>{key}</Key><UploadId>{upload_id}</UploadId>\
 </InitiateMultipartUploadResult>",
-        bucket = escape_xml(&bucket),
-        key = escape_xml(&key),
-        upload_id = escape_xml(&upload_id)
+        bucket = xml_escape(&bucket),
+        key = xml_escape(&key),
+        upload_id = xml_escape(&upload_id)
     ))
 }
 
@@ -1575,6 +1569,28 @@ async fn handle_complete_multipart_upload_async(
     };
 
     let estimated_size: u64 = part_data.iter().map(|(_, _, size)| *size).sum();
+    let part_count = part_data.len();
+
+    let multipart_etag = {
+        let mut concat = Vec::with_capacity(part_count * 16);
+        for (pn, _, _) in &part_data {
+            if let Some((_expected_pn, supplied_etag)) = parts.iter().find(|(n, _)| n == pn)
+                && let Ok(bytes) = hex::decode(supplied_etag.trim_matches('"'))
+                && bytes.len() == 16
+            {
+                concat.extend_from_slice(&bytes);
+            }
+        }
+        if concat.len() == part_count * 16 {
+            format!(
+                "\"{}-{}\"",
+                hex::encode(md5::Md5::digest(&concat)),
+                part_count
+            )
+        } else {
+            String::new()
+        }
+    };
 
     // For small assembled objects, keep the existing inline path.
     let assembled_data = if estimated_size <= INLINE_OBJECT_THRESHOLD {
@@ -1594,7 +1610,11 @@ async fn handle_complete_multipart_upload_async(
             }
         }
 
-        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&combined)));
+        let etag = if multipart_etag.is_empty() {
+            format!("\"{}\"", hex::encode(md5::Md5::digest(&combined)))
+        } else {
+            multipart_etag.clone()
+        };
         let size = combined.len() as u64;
 
         // Clean up any file-backed parts before going inline.
@@ -1658,11 +1678,12 @@ async fn handle_complete_multipart_upload_async(
             }
         }
 
-        (
-            format!("\"{}\"", hex::encode(digest)),
-            size,
-            ObjectDataRef::FileRef(file_path),
-        )
+        let etag = if multipart_etag.is_empty() {
+            format!("\"{}\"", hex::encode(digest))
+        } else {
+            multipart_etag
+        };
+        (etag, size, ObjectDataRef::FileRef(file_path))
     };
 
     let (etag, size, assembled_data) = assembled_data;
@@ -1720,10 +1741,10 @@ async fn handle_complete_multipart_upload_async(
 <Key>{key}</Key>\
 <ETag>{etag}</ETag>\
 </CompleteMultipartUploadResult>",
-        location = escape_xml(&location),
-        bucket = escape_xml(&bucket),
-        key = escape_xml(&key),
-        etag = escape_xml(&etag)
+        location = xml_escape(&location),
+        bucket = xml_escape(&bucket),
+        key = xml_escape(&key),
+        etag = xml_escape(&etag)
     ))
 }
 
@@ -1757,7 +1778,7 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
 <ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Bucket>{}</Bucket><KeyMarker></KeyMarker><UploadIdMarker></UploadIdMarker>\
 <IsTruncated>false</IsTruncated>",
-        escape_xml(&bucket)
+        xml_escape(&bucket)
     );
 
     for u in uploads {
@@ -1767,8 +1788,8 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
 <UploadId>{id}</UploadId>\
 <Initiated>{initiated}</Initiated>\
 </Upload>",
-            key = escape_xml(&u.key),
-            id = escape_xml(&u.upload_id),
+            key = xml_escape(&u.key),
+            id = xml_escape(&u.upload_id),
             initiated = u.initiated.format("%Y-%m-%dT%H:%M:%S.000Z"),
         ));
     }
@@ -1972,8 +1993,8 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Name>{}</Name><Prefix>{}</Prefix><IsTruncated>false</IsTruncated>",
-        escape_xml(&bucket),
-        escape_xml(&prefix)
+        xml_escape(&bucket),
+        xml_escape(&prefix)
     );
 
     for obj in objects {
@@ -1990,8 +2011,8 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
 <IsLatest>{latest}</IsLatest>\
 <LastModified>{lm}</LastModified>\
 </DeleteMarker>",
-                    key = escape_xml(&obj.key),
-                    vid = escape_xml(&v.version_id),
+                    key = xml_escape(&obj.key),
+                    vid = xml_escape(&v.version_id),
                     latest = is_latest,
                     lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
                 ));
@@ -2004,11 +2025,11 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
 <ETag>{etag}</ETag><Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Version>",
-                    key = escape_xml(&obj.key),
-                    vid = escape_xml(&v.version_id),
+                    key = xml_escape(&obj.key),
+                    vid = xml_escape(&v.version_id),
                     latest = is_latest,
                     lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                    etag = escape_xml(&v.etag),
+                    etag = xml_escape(&v.etag),
                     size = v.size,
                 ));
             }

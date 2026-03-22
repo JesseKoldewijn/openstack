@@ -219,7 +219,7 @@ async fn test_delete_parameter() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert_eq!(resp.content_type, "application/json");
+    assert_eq!(resp.content_type, "application/x-amz-json-1.1");
     let payload = body(&resp);
     assert_eq!(payload["__type"], "ParameterNotFound");
     assert_eq!(payload["message"], "Parameter /del not found.");

@@ -172,7 +172,7 @@ pub struct ObjectVersion {
 impl ObjectVersion {
     /// Create a new object version from inline data.
     pub fn new(
-        data: Vec<u8>,
+        data: Bytes,
         content_type: impl Into<String>,
         metadata: HashMap<String, String>,
         versioning_enabled: bool,
@@ -195,7 +195,7 @@ impl ObjectVersion {
             size,
             metadata,
             acl: "private".to_string(),
-            data: ObjectDataRef::Inline(Bytes::from(data)),
+            data: ObjectDataRef::Inline(data),
             delete_marker: false,
         }
     }
@@ -377,7 +377,7 @@ impl S3Store {
 
         let version = match &data {
             ObjectDataRef::Inline(bytes) => {
-                ObjectVersion::new(bytes.to_vec(), content_type, metadata, versioning)
+                ObjectVersion::new(bytes.clone(), content_type, metadata, versioning)
             }
             ObjectDataRef::FileRef(path) => {
                 // For file-backed data we cannot compute etag here without
@@ -618,8 +618,8 @@ impl S3Store {
         let mut combined = Vec::new();
         let mut sorted_parts: Vec<u32> = parts.iter().map(|(n, _)| *n).collect();
         sorted_parts.sort_unstable();
-        for part_num in sorted_parts {
-            if let Some(part) = upload.parts.get(&part_num)
+        for part_num in &sorted_parts {
+            if let Some(part) = upload.parts.get(part_num)
                 && let ObjectDataRef::Inline(bytes) = &part.data
             {
                 combined.extend_from_slice(bytes);
@@ -635,11 +635,35 @@ impl S3Store {
             .unwrap_or(false);
 
         let version = ObjectVersion::new(
-            combined,
+            Bytes::from(combined),
             upload.content_type.clone(),
             upload.metadata.clone(),
             versioning,
         );
+
+        let multipart_etag = {
+            let mut concat = Vec::with_capacity(sorted_parts.len() * 16);
+            let mut count = 0usize;
+            for part_num in &sorted_parts {
+                if let Some(part) = upload.parts.get(part_num)
+                    && let Ok(bytes) = hex::decode(part.etag.trim_matches('"'))
+                    && bytes.len() == 16
+                {
+                    concat.extend_from_slice(&bytes);
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                Some(format!("\"{}-{}\"", hex::encode(md5_bytes(&concat)), count))
+            } else {
+                None
+            }
+        };
+
+        let mut version = version;
+        if let Some(etag) = multipart_etag {
+            version.etag = etag;
+        }
 
         let objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {

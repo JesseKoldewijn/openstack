@@ -217,7 +217,24 @@ async fn test_describe_key_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert_eq!(resp.content_type, "application/json");
+    assert_eq!(resp.content_type, "application/x-amz-json-1.1");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "NotFoundException");
+    assert_eq!(
+        payload["message"],
+        "Key 'arn:aws:kms:us-east-1:000000000000:key/nonexistent' does not exist"
+    );
+}
+
+#[tokio::test]
+async fn test_describe_key_with_full_arn_not_found_message_not_double_wrapped() {
+    let p = KmsProvider::new();
+    let key_arn = "arn:aws:kms:us-east-1:000000000000:key/nonexistent";
+    let resp = p
+        .dispatch(&make_ctx("DescribeKey", json!({ "KeyId": key_arn })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
     let payload = body(&resp);
     assert_eq!(payload["__type"], "NotFoundException");
     assert_eq!(

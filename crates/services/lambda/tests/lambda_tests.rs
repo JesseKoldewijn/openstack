@@ -44,6 +44,27 @@ fn make_ctx_with_path(operation: &str, body: Value, path: &str) -> RequestContex
     }
 }
 
+fn make_ctx_with_path_and_raw_body(
+    operation: &str,
+    raw_body: Vec<u8>,
+    path: &str,
+) -> RequestContext {
+    RequestContext {
+        service: "lambda".to_string(),
+        operation: operation.to_string(),
+        region: "us-east-1".to_string(),
+        account_id: "000000000000".to_string(),
+        request_body: Value::Null,
+        raw_body: Some(Bytes::from(raw_body)),
+        headers: Default::default(),
+        path: path.to_string(),
+        method: "POST".to_string(),
+        query_params: HashMap::new(),
+        request_id: String::new(),
+        spooled_body: None,
+    }
+}
+
 fn body(resp: &DispatchResponse) -> Value {
     serde_json::from_slice(resp.body.as_bytes()).expect("response body is valid JSON")
 }
@@ -150,6 +171,26 @@ async fn test_get_function_not_found() {
         payload["Message"],
         "Function not found: arn:aws:lambda:us-east-1:000000000000:function:no-such-func"
     );
+}
+
+#[tokio::test]
+async fn test_invoke_rejects_non_utf8_payload() {
+    let p = LambdaProvider::new();
+    let _ = create_function(&p, "invoke-func").await;
+
+    let resp = p
+        .dispatch(&make_ctx_with_path_and_raw_body(
+            "Invoke",
+            vec![0xff, 0xfe, 0xfd],
+            "/2015-03-31/functions/invoke-func/invocations",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status_code, 400);
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "InvalidRequestContentException");
+    assert_eq!(payload["Message"], "Invoke payload must be valid UTF-8");
 }
 
 #[tokio::test]

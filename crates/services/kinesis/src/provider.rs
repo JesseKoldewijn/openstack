@@ -54,7 +54,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: Cow::Borrowed("application/json"),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -344,7 +344,7 @@ impl ServiceProvider for KinesisProvider {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         &format!(
-                            "Stream arn arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
+                            "Stream arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
                         ),
                         400,
                     )),
@@ -409,7 +409,7 @@ impl ServiceProvider for KinesisProvider {
                         return Ok(json_error(
                             "ResourceNotFoundException",
                             &format!(
-                                "Stream arn arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
+                                "Stream arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
                             ),
                             400,
                         ));

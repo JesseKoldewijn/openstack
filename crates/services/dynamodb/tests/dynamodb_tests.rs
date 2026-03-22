@@ -155,7 +155,32 @@ async fn test_delete_table() {
             .unwrap()
             .contains("ResourceNotFoundException")
     );
-    assert_eq!(resp2.content_type, "application/json");
+    assert_eq!(resp2.content_type, "application/x-amz-json-1.0");
+}
+
+#[tokio::test]
+async fn test_transact_get_items_no_store_keeps_response_alignment() {
+    let provider = DynamoDbProvider::new();
+    let resp = provider
+        .dispatch(&make_ctx(
+            "TransactGetItems",
+            json!({
+                "TransactItems": [
+                    { "Get": { "TableName": "T1", "Key": { "pk": { "S": "k1" } } } },
+                    { "Get": { "TableName": "T2", "Key": { "pk": { "S": "k2" } } } }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body(&resp);
+    let responses = b["Responses"]
+        .as_array()
+        .expect("Responses should be array");
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0], json!({}));
+    assert_eq!(responses[1], json!({}));
 }
 
 #[tokio::test]
@@ -1194,7 +1219,7 @@ async fn test_operations_on_missing_table_return_404() {
             "op={op}, body={b}"
         );
         assert_eq!(
-            resp.content_type, "application/json",
+            resp.content_type, "application/x-amz-json-1.0",
             "expected JSON error content type for {op}"
         );
     }

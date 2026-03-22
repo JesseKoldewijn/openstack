@@ -207,11 +207,8 @@ async fn test_describe_missing_stream_matches_localstack_shape() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
-    assert_eq!(resp.content_type, "application/json");
+    assert_eq!(resp.content_type, "application/x-amz-json-1.1");
     let b = body(&resp);
     assert_eq!(b["__type"], "ResourceNotFoundException");
-    assert_eq!(
-        b["message"],
-        "Firehose missing-stream under account 000000000000 not found."
-    );
+    assert_eq!(b["message"], "Delivery stream missing-stream not found");
 }

@@ -89,14 +89,19 @@ fn short_id() -> String {
 fn canonical_operation(ctx: &RequestContext) -> &str {
     match (ctx.method.as_str(), ctx.path.as_str()) {
         ("GET", path)
-            if path.starts_with("/restapis/") && !path[1 + "restapis/".len()..].contains('/') =>
+            if path.starts_with("/restapis/")
+                && path.len() > "/restapis/".len()
+                && !path[1 + "restapis/".len()..].contains('/') =>
         {
             "GetRestApi"
         }
         ("GET", "/restapis") => "GetRestApis",
+        ("GET", "/restapis/") => "GetRestApis",
         ("POST", "/restapis") => "CreateRestApi",
         ("DELETE", path)
-            if path.starts_with("/restapis/") && !path[1 + "restapis/".len()..].contains('/') =>
+            if path.starts_with("/restapis/")
+                && path.len() > "/restapis/".len()
+                && !path[1 + "restapis/".len()..].contains('/') =>
         {
             "DeleteRestApi"
         }
@@ -262,6 +267,27 @@ impl ServiceProvider for ApiGatewayProvider {
 
                 let resource_id = short_id();
                 let store_ref = self.store.get(account_id, region);
+                if !store_ref
+                    .as_ref()
+                    .is_some_and(|s| s.apis.contains_key(&api_id))
+                {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        "Invalid API identifier specified",
+                        404,
+                    ));
+                }
+                if let Some(pid) = parent_id.as_deref()
+                    && !store_ref
+                        .as_ref()
+                        .is_some_and(|s| s.resources.contains_key(pid))
+                {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        "Invalid Resource identifier specified",
+                        404,
+                    ));
+                }
                 let parent_path = parent_id
                     .as_deref()
                     .and_then(|pid| store_ref.as_ref().and_then(|s| s.resources.get(pid)))
@@ -285,13 +311,6 @@ impl ServiceProvider for ApiGatewayProvider {
                 };
 
                 let mut store = self.store.get_or_create(account_id, region);
-                if !store.apis.contains_key(&api_id) {
-                    return Ok(json_error(
-                        "NotFoundException",
-                        "Invalid API identifier specified",
-                        404,
-                    ));
-                }
                 store.resources.insert(resource_id.clone(), resource);
 
                 Ok(json_created(json!({

@@ -511,8 +511,8 @@ impl ServiceProvider for StepFunctionsProvider {
                 } else {
                     Ok(json_error(
                         "StateMachineDoesNotExist",
-                        &format!("State machine {arn} not found"),
-                        404,
+                        &format!("State Machine Does Not Exist: '{arn}'"),
+                        400,
                     ))
                 }
             }
@@ -539,8 +539,8 @@ impl ServiceProvider for StepFunctionsProvider {
                     let Some(store) = self.store.get(account_id, region) else {
                         return Ok(json_error(
                             "StateMachineDoesNotExist",
-                            &format!("State machine {sm_arn} not found"),
-                            404,
+                            &format!("State Machine Does Not Exist: '{sm_arn}'"),
+                            400,
                         ));
                     };
                     match store.state_machines.get(&sm_arn) {
@@ -548,8 +548,8 @@ impl ServiceProvider for StepFunctionsProvider {
                         None => {
                             return Ok(json_error(
                                 "StateMachineDoesNotExist",
-                                &format!("State machine {sm_arn} not found"),
-                                404,
+                                &format!("State Machine Does Not Exist: '{sm_arn}'"),
+                                400,
                             ));
                         }
                     }

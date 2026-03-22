@@ -6,6 +6,7 @@ use bytes::Bytes;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
@@ -60,8 +61,10 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     let body = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ErrorResponse xmlns=\"{ROUTE53_NS}\">\
-<Error><Code>{code}</Code><Message>{message}</Message></Error>\
-</ErrorResponse>"
+<Error><Code>{}</Code><Message>{}</Message></Error>\
+</ErrorResponse>",
+        xml_escape(code),
+        xml_escape(message)
     );
     DispatchResponse {
         status_code: status,
@@ -176,12 +179,14 @@ impl ServiceProvider for Route53Provider {
 <CreateHostedZoneResponse xmlns=\"{ROUTE53_NS}\">\
 <HostedZone>\
 <Id>/hostedzone/{zone_id}</Id>\
-<Name>{name}</Name>\
-<Config><Comment>{comment}</Comment><PrivateZone>false</PrivateZone></Config>\
+<Name>{}</Name>\
+<Config><Comment>{}</Comment><PrivateZone>false</PrivateZone></Config>\
 <ResourceRecordSetCount>2</ResourceRecordSetCount>\
 </HostedZone>\
 <ChangeInfo><Id>/{rid}</Id><Status>INSYNC</Status></ChangeInfo>\
-</CreateHostedZoneResponse>"
+</CreateHostedZoneResponse>",
+                    xml_escape(&name),
+                    xml_escape(&comment)
                 );
                 Ok(xml_created(
                     body,
@@ -234,7 +239,11 @@ impl ServiceProvider for Route53Provider {
 <Config><Comment>{}</Comment><PrivateZone>{}</PrivateZone></Config>\
 <ResourceRecordSetCount>{}</ResourceRecordSetCount>\
 </HostedZone>",
-                            z.id, z.name, z.comment, z.private_zone, z.record_count
+                            z.id,
+                            xml_escape(&z.name),
+                            xml_escape(&z.comment),
+                            z.private_zone,
+                            z.record_count
                         )
                     })
                     .collect();
@@ -331,15 +340,22 @@ impl ServiceProvider for Route53Provider {
                         let values_xml: String = rrset
                             .values
                             .iter()
-                            .map(|v| format!("<ResourceRecord><Value>{v}</Value></ResourceRecord>"))
+                            .map(|v| {
+                                format!(
+                                    "<ResourceRecord><Value>{}</Value></ResourceRecord>",
+                                    xml_escape(v)
+                                )
+                            })
                             .collect();
                         format!(
                             "<ResourceRecordSet>\
-<Name>{name}</Name>\
-<Type>{rtype}</Type>\
+<Name>{}</Name>\
+<Type>{}</Type>\
 <TTL>{}</TTL>\
 <ResourceRecords>{values_xml}</ResourceRecords>\
 </ResourceRecordSet>",
+                            xml_escape(name),
+                            xml_escape(rtype),
                             rrset.ttl
                         )
                     })

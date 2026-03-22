@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -7,21 +6,13 @@ use chrono::Utc;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
-use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
-use crate::store::StsStore;
-
-pub struct StsProvider {
-    #[allow(dead_code)]
-    store: Arc<AccountRegionBundle<StsStore>>,
-}
+pub struct StsProvider;
 
 impl StsProvider {
     pub fn new() -> Self {
-        Self {
-            store: Arc::new(AccountRegionBundle::new()),
-        }
+        Self
     }
 }
 

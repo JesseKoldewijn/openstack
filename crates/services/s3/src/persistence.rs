@@ -223,7 +223,12 @@ mod tests {
         let base = PathBuf::from("/data/s3/objects");
         let mut store = S3Store::default();
 
-        let version = ObjectVersion::new(b"hello".to_vec(), "text/plain", HashMap::new(), false);
+        let version = ObjectVersion::new(
+            Bytes::from_static(b"hello"),
+            "text/plain",
+            HashMap::new(),
+            false,
+        );
         let s3_obj = S3Object::new("inline-key", version);
         store
             .objects

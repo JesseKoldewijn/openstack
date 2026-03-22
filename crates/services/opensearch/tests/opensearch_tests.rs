@@ -26,10 +26,6 @@ fn body_json(resp: &openstack_service_framework::traits::DispatchResponse) -> Va
     serde_json::from_slice(resp.body.as_bytes()).expect("valid JSON")
 }
 
-fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -135,11 +131,10 @@ async fn test_describe_domain_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 404);
-    assert_eq!(resp.content_type, "application/xml");
-    let body = body_str(&resp);
-    assert!(body.contains("<Code>NoSuchBucket</Code>"));
-    assert!(body.contains("<Message>The specified bucket does not exist</Message>"));
-    assert!(body.contains("<BucketName>2021-01-01</BucketName>"));
+    assert_eq!(resp.content_type, "application/json");
+    let body = body_json(&resp);
+    assert_eq!(body["code"], "ResourceNotFoundException");
+    assert_eq!(body["message"], "Domain not found: nonexistent");
 }
 
 #[tokio::test]

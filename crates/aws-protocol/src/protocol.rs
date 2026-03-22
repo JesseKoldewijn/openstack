@@ -19,7 +19,7 @@ pub enum AwsProtocol {
 impl AwsProtocol {
     pub fn from_service(service: &str) -> Self {
         match service {
-            "s3" => AwsProtocol::RestXml,
+            "s3" | "route53" => AwsProtocol::RestXml,
             "sqs" | "sns" | "iam" | "sts" | "cloudformation" | "redshift" | "cloudwatch"
             | "ses" => AwsProtocol::Query,
             "ec2" => AwsProtocol::Ec2,

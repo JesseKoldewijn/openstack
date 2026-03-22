@@ -68,18 +68,6 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     }
 }
 
-fn xml_error(code: &str, message: &str, status: u16, extra: &str) -> DispatchResponse {
-    let body = format!(
-        "<?xml version='1.0' encoding='utf-8'?>\n<Error><Code>{code}</Code><Message>{message}</Message>{extra}</Error>"
-    );
-    DispatchResponse {
-        status_code: status,
-        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
-        content_type: Cow::Borrowed("application/xml"),
-        headers: Vec::new(),
-    }
-}
-
 fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
     ctx.request_body
         .get(key)
@@ -193,18 +181,10 @@ impl ServiceProvider for OpenSearchProvider {
                             "Deleted": true,
                         }
                     }))),
-                    None => Ok(xml_error(
-                        "NoSuchBucket",
-                        "The specified bucket does not exist",
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
                         404,
-                        &format!(
-                            "<RequestId>00000000-0000-0000-0000-000000000000</RequestId><BucketName>{}</BucketName>",
-                            ctx.path
-                                .trim_start_matches('/')
-                                .split('/')
-                                .next()
-                                .unwrap_or("")
-                        ),
                     )),
                 }
             }
@@ -215,18 +195,10 @@ impl ServiceProvider for OpenSearchProvider {
             "DescribeDomain" => {
                 let domain_name = ctx.path.split('/').next_back().unwrap_or("").to_string();
                 let Some(store) = self.store.get(account_id, region) else {
-                    return Ok(xml_error(
-                        "NoSuchBucket",
-                        "The specified bucket does not exist",
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
                         404,
-                        &format!(
-                            "<RequestId>00000000-0000-0000-0000-000000000000</RequestId><BucketName>{}</BucketName>",
-                            ctx.path
-                                .trim_start_matches('/')
-                                .split('/')
-                                .next()
-                                .unwrap_or("")
-                        ),
                     ));
                 };
                 match store.domains.get(&domain_name) {
@@ -245,18 +217,10 @@ impl ServiceProvider for OpenSearchProvider {
                             }
                         }
                     }))),
-                    None => Ok(xml_error(
-                        "NoSuchBucket",
-                        "The specified bucket does not exist",
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
                         404,
-                        &format!(
-                            "<RequestId>00000000-0000-0000-0000-000000000000</RequestId><BucketName>{}</BucketName>",
-                            ctx.path
-                                .trim_start_matches('/')
-                                .split('/')
-                                .next()
-                                .unwrap_or("")
-                        ),
                     )),
                 }
             }

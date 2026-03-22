@@ -8,6 +8,7 @@ use chrono::Utc;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -81,15 +82,6 @@ fn query_ok(action: &str, inner: &str) -> DispatchResponse {
         content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
-}
-
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 fn query_metric_data(ctx: &RequestContext) -> Vec<Value> {
@@ -256,10 +248,34 @@ impl ServiceProvider for CloudWatchProvider {
                                 .get("MetricName")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
+                            let dimensions_xml = metric
+                                .get("Dimensions")
+                                .and_then(|v| v.as_array())
+                                .map(|dims| {
+                                    dims.iter()
+                                        .map(|dim| {
+                                            let name = dim
+                                                .get("Name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let value = dim
+                                                .get("Value")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            format!(
+                                                "<member><Name>{}</Name><Value>{}</Value></member>",
+                                                xml_escape(name),
+                                                xml_escape(value)
+                                            )
+                                        })
+                                        .collect::<String>()
+                                })
+                                .unwrap_or_default();
                             format!(
-                                "<member><Namespace>{}</Namespace><MetricName>{}</MetricName></member>",
+                                "<member><Namespace>{}</Namespace><MetricName>{}</MetricName><Dimensions>{}</Dimensions></member>",
                                 xml_escape(namespace),
-                                xml_escape(metric_name)
+                                xml_escape(metric_name),
+                                dimensions_xml
                             )
                         })
                         .collect::<String>();

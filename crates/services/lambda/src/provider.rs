@@ -320,13 +320,12 @@ impl ServiceProvider for LambdaProvider {
                     .ok_or_else(|| {
                         DispatchError::NotImplemented("FunctionName required".to_string())
                     })?;
+                let function_arn = make_arn(region, account_id, &function_name);
 
                 let Some(store) = self.store.get(account_id, region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!(
-                            "Function not found: arn:aws:lambda:{region}:{account_id}:function:{function_name}"
-                        ),
+                        &format!("Function not found: {function_arn}"),
                         404,
                     ));
                 };
@@ -337,9 +336,7 @@ impl ServiceProvider for LambdaProvider {
                     }))),
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!(
-                            "Function not found: arn:aws:lambda:{region}:{account_id}:function:{function_name}"
-                        ),
+                        &format!("Function not found: {function_arn}"),
                         404,
                     )),
                 }
@@ -570,7 +567,16 @@ impl ServiceProvider for LambdaProvider {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("RequestResponse");
 
-                let payload = String::from_utf8_lossy(ctx.raw_body_bytes()).to_string();
+                let payload = match std::str::from_utf8(ctx.raw_body_bytes()) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        return Ok(json_error(
+                            "InvalidRequestContentException",
+                            "Invoke payload must be valid UTF-8",
+                            400,
+                        ));
+                    }
+                };
 
                 // Clone function data while holding the store lock briefly
                 let func_data = {

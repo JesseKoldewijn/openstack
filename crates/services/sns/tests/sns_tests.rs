@@ -128,6 +128,20 @@ async fn test_delete_topic() {
 }
 
 #[tokio::test]
+async fn test_delete_topic_is_idempotent_when_missing() {
+    let provider = SnsProvider::new();
+    let topic_arn = "arn:aws:sns:us-east-1:000000000000:missing-topic";
+    let body = form_body(&[
+        ("Action", "DeleteTopic"),
+        ("TopicArn", topic_arn),
+        ("Version", "2010-03-31"),
+    ]);
+    let resp = provider.dispatch(&make_ctx(&body)).await.unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    assert!(body_str(&resp).contains("DeleteTopicResponse"));
+}
+
+#[tokio::test]
 async fn test_list_topics() {
     let provider = SnsProvider::new();
     create_topic(&provider, "topic-alpha").await;

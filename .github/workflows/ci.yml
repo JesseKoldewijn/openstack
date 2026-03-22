@@ -522,6 +522,7 @@ jobs:
           path: |
             benchmark-report.json
             benchmark-gate.json
+            benchmark_gate_summary.md
           retention-days: 7
 
   parity-all-services-push:

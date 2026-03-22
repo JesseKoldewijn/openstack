@@ -124,6 +124,46 @@ async fn test_describe_state_machine_missing_matches_localstack_shape() {
 }
 
 #[tokio::test]
+async fn test_update_state_machine_missing_uses_consistent_error_shape() {
+    let p = StepFunctionsProvider::new();
+    let arn = "arn:aws:states:us-east-1:000000000000:stateMachine:missing";
+    let resp = p
+        .dispatch(&make_ctx(
+            "UpdateStateMachine",
+            json!({ "stateMachineArn": arn, "definition": "{}" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "StateMachineDoesNotExist");
+    assert_eq!(
+        payload["message"],
+        format!("State Machine Does Not Exist: '{arn}'")
+    );
+}
+
+#[tokio::test]
+async fn test_start_execution_missing_state_machine_uses_consistent_error_shape() {
+    let p = StepFunctionsProvider::new();
+    let arn = "arn:aws:states:us-east-1:000000000000:stateMachine:missing";
+    let resp = p
+        .dispatch(&make_ctx(
+            "StartExecution",
+            json!({ "stateMachineArn": arn, "input": "{}" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "StateMachineDoesNotExist");
+    assert_eq!(
+        payload["message"],
+        format!("State Machine Does Not Exist: '{arn}'")
+    );
+}
+
+#[tokio::test]
 async fn test_list_state_machines() {
     let p = StepFunctionsProvider::new();
     p.dispatch(&make_ctx(

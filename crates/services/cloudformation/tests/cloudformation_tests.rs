@@ -124,6 +124,20 @@ async fn test_create_stack_empty_template_returns_validation_error() {
 }
 
 #[tokio::test]
+async fn test_create_stack_malformed_template_returns_validation_error() {
+    let p = CloudFormationProvider::new();
+    let mut params = HashMap::new();
+    params.insert("StackName".to_string(), "bad-template-stack".to_string());
+    params.insert("TemplateBody".to_string(), "{not-json".to_string());
+
+    let resp = p.dispatch(&make_ctx("CreateStack", params)).await.unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("ValidationError"));
+    assert!(body.contains("Template body is not valid JSON"));
+}
+
+#[tokio::test]
 async fn test_describe_stacks() {
     let p = CloudFormationProvider::new();
     let template = minimal_stack_template();
@@ -141,6 +155,32 @@ async fn test_describe_stacks() {
         .unwrap();
     assert_eq!(resp.status_code, 200);
     assert!(body_str(&resp).contains("stack-desc"));
+}
+
+#[tokio::test]
+async fn test_describe_stacks_missing_named_stack_returns_validation_error() {
+    let p = CloudFormationProvider::new();
+    let template = minimal_stack_template();
+    let mut create_params = HashMap::new();
+    create_params.insert("StackName".to_string(), "existing-stack".to_string());
+    create_params.insert(
+        "TemplateBody".to_string(),
+        serde_json::to_string(&template).unwrap(),
+    );
+    p.dispatch(&make_ctx("CreateStack", create_params))
+        .await
+        .unwrap();
+
+    let mut params = HashMap::new();
+    params.insert("StackName".to_string(), "missing-stack".to_string());
+    let resp = p
+        .dispatch(&make_ctx("DescribeStacks", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("ValidationError"));
+    assert!(body.contains("Stack with id missing-stack does not exist"));
 }
 
 #[tokio::test]

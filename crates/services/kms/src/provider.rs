@@ -55,7 +55,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: Cow::Borrowed("application/json"),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -65,6 +65,14 @@ fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
         .get(key)
         .and_then(|v| v.as_str())
         .map(String::from)
+}
+
+fn key_arn_for_error(key_id: &str, region: &str, account_id: &str) -> String {
+    if key_id.starts_with("arn:aws:kms:") {
+        key_id.to_string()
+    } else {
+        format!("arn:aws:kms:{region}:{account_id}:key/{key_id}")
+    }
 }
 
 fn rand_hex(bytes: usize) -> String {
@@ -144,21 +152,18 @@ impl ServiceProvider for KmsProvider {
                     Some(k) => k,
                     None => return Ok(json_error("ValidationException", "KeyId is required", 400)),
                 };
+                let key_arn = key_arn_for_error(&key_id, region, account_id);
                 let Some(store) = self.store.get(account_id, region) else {
                     return Ok(json_error(
                         "NotFoundException",
-                        &format!(
-                            "Key 'arn:aws:kms:{region}:{account_id}:key/{key_id}' does not exist"
-                        ),
+                        &format!("Key '{key_arn}' does not exist"),
                         400,
                     ));
                 };
                 match store.resolve_key(&key_id) {
                     None => Ok(json_error(
                         "NotFoundException",
-                        &format!(
-                            "Key 'arn:aws:kms:{region}:{account_id}:key/{key_id}' does not exist"
-                        ),
+                        &format!("Key '{key_arn}' does not exist"),
                         400,
                     )),
                     Some(k) => Ok(json_ok(json!({ "KeyMetadata": key_metadata(k) }))),

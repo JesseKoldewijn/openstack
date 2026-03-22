@@ -58,7 +58,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: Cow::Borrowed("application/json"),
+        content_type: Cow::Borrowed("application/x-amz-json-1.0"),
         headers: Vec::new(),
     }
 }
@@ -1332,7 +1332,9 @@ impl ServiceProvider for DynamoDbProvider {
                 };
 
                 let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
-                    return Ok(json_ok(json!({ "Responses": [] })));
+                    return Ok(json_ok(json!({
+                        "Responses": vec![json!({}); transact_items.len()]
+                    })));
                 };
                 let mut responses = Vec::new();
 

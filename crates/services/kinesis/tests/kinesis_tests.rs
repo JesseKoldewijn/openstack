@@ -127,12 +127,12 @@ async fn test_put_record_missing_stream_matches_localstack_shape() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
-    assert_eq!(resp.content_type, "application/json");
+    assert_eq!(resp.content_type, "application/x-amz-json-1.1");
     let b = body(&resp);
     assert_eq!(b["__type"], "ResourceNotFoundException");
     assert_eq!(
         b["message"],
-        "Stream arn arn:aws:kinesis:us-east-1:000000000000:stream/missing-stream not found"
+        "Stream arn:aws:kinesis:us-east-1:000000000000:stream/missing-stream not found"
     );
 }
 

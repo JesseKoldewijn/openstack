@@ -1080,22 +1080,8 @@ fn service_from_query_action(
         // CloudFormation
         "CreateStack" | "DeleteStack" | "DescribeStacks" | "ListStacks" | "GetTemplate"
         | "ValidateTemplate" | "UpdateStack" => Some("cloudformation"),
-        // CloudWatch
-        "PutMetricData"
-        | "ListMetrics"
-        | "GetMetricStatistics"
-        | "GetMetricData"
-        | "PutMetricAlarm"
-        | "DescribeAlarms"
-        | "DeleteAlarms"
-        | "SetAlarmState"
-        | "CreateLogGroup"
-        | "DeleteLogGroup"
-        | "DescribeLogGroups"
-        | "CreateLogStream"
-        | "PutLogEvents"
-        | "GetLogEvents"
-        | "FilterLogEvents" => Some("cloudwatch"),
+        // CloudWatch (query actions)
+        "PutMetricData" | "ListMetrics" | "GetMetricStatistics" => Some("cloudwatch"),
         // EC2
         "DescribeVpcs"
         | "CreateVpc"

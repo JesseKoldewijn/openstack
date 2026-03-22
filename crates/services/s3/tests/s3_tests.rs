@@ -538,6 +538,10 @@ async fn test_multipart_upload() {
     assert_eq!(resp.status_code, 200);
     let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
     assert!(body.contains("CompleteMultipartUploadResult"));
+    assert!(
+        body.contains("<ETag>&quot;c1863f721cc0c27dc4f7316053f28451-2&quot;</ETag>"),
+        "multipart ETag should include part-count suffix"
+    );
 
     // Get the assembled object
     let ctx = make_ctx("GET", "/mp-bucket/large.bin", b"");
@@ -612,6 +616,8 @@ async fn test_non_versioned_large_multipart_overwrite_keeps_data() {
         );
         let resp = provider.dispatch(&ctx).await.unwrap();
         assert_eq!(resp.status_code, 200);
+        let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
+        assert!(body.contains("-2&quot;</ETag>"));
     }
 
     let first_p1: Vec<u8> = (0u8..=255).cycle().take(180 * 1024).collect();

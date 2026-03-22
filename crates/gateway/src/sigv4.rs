@@ -39,7 +39,9 @@ pub fn parse_sigv4_auth(auth: &str) -> Option<SigV4Auth<'_>> {
     let _date = parts.next()?;
     let region = parts.next()?;
     let service = parts.next()?;
-    parts.next()?;
+    if parts.next()? != "aws4_request" {
+        return None;
+    }
 
     Some(SigV4Auth {
         access_key,

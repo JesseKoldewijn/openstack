@@ -6,6 +6,7 @@ pub mod manager;
 pub mod skeleton;
 pub mod spooled;
 pub mod traits;
+pub mod xml;
 
 pub use container::{ServiceContainer, ServiceRuntimeMetrics};
 pub use hashing::HashingReader;

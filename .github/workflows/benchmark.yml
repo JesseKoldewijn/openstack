@@ -46,6 +46,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association }}
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_PROFILE: ${{ github.event.inputs.profile }}
         run: |
@@ -62,6 +63,14 @@ jobs:
             IS_PR=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}" --jq '.pull_request // empty' 2>/dev/null || true)
             if [[ -z "$IS_PR" ]]; then
               echo "Comment is not on a pull request — skipping" >&2
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if [[ "${COMMENT_AUTHOR_ASSOCIATION:-}" != "OWNER" \
+               && "${COMMENT_AUTHOR_ASSOCIATION:-}" != "MEMBER" \
+               && "${COMMENT_AUTHOR_ASSOCIATION:-}" != "COLLABORATOR" ]]; then
+              echo "Comment author is not a trusted collaborator — skipping" >&2
               echo "should_run=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi

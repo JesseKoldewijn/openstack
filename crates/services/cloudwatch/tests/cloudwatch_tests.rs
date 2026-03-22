@@ -88,6 +88,45 @@ async fn test_list_metrics() {
 }
 
 #[tokio::test]
+async fn test_list_metrics_query_protocol_includes_dimensions() {
+    let p = CloudWatchProvider::new();
+    p.dispatch(&make_ctx(
+        "PutMetricData",
+        json!({
+            "Namespace": "TestNS",
+            "MetricData": [
+                {
+                    "MetricName": "MyMetric",
+                    "Value": 1.0,
+                    "Unit": "Count",
+                    "Dimensions": [
+                        { "Name": "Service", "Value": "api" },
+                        { "Name": "Env", "Value": "dev" }
+                    ]
+                }
+            ]
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let mut ctx = make_query_ctx(
+        "ListMetrics",
+        "ListMetrics",
+        "Action=ListMetrics&Version=2010-08-01&Namespace=TestNS",
+    );
+    ctx.request_body = json!({ "Namespace": "TestNS" });
+
+    let resp = p.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(&*resp.content_type, "text/xml");
+    let xml = body_str(&resp);
+    assert!(xml.contains("<Dimensions>"));
+    assert!(xml.contains("<Name>Service</Name>"));
+    assert!(xml.contains("<Value>api</Value>"));
+}
+
+#[tokio::test]
 async fn test_get_metric_statistics() {
     let p = CloudWatchProvider::new();
     for v in [10.0, 20.0, 30.0] {

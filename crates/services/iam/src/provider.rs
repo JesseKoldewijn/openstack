@@ -10,6 +10,7 @@ use chrono::{Datelike, Timelike, Utc};
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -116,8 +117,10 @@ fn iam_error(code: &str, message: &str, status: u16) -> DispatchResponse {
         xml,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ErrorResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\">\
-<Error><Type>Sender</Type><Code>{code}</Code><Message>{message}</Message></Error>\
-</ErrorResponse>"
+<Error><Type>Sender</Type><Code>{}</Code><Message>{}</Message></Error>\
+</ErrorResponse>",
+        xml_escape(code),
+        xml_escape(message)
     )
     .expect("write to String is infallible");
     DispatchResponse {
@@ -177,10 +180,10 @@ fn write_user_xml(buf: &mut String, u: &IamUser) {
 <Arn>{arn}</Arn>\
 <CreateDate>{yr:04}-{mo:02}-{dy:02}T{h:02}:{m:02}:{s:02}.{us:06}Z</CreateDate>\
 </User>",
-        path = u.path,
-        name = u.user_name,
-        id = u.user_id,
-        arn = u.arn,
+        path = xml_escape(&u.path),
+        name = xml_escape(&u.user_name),
+        id = xml_escape(&u.user_id),
+        arn = xml_escape(&u.arn),
         yr = dt.year(),
         mo = dt.month(),
         dy = dt.day(),
@@ -210,10 +213,10 @@ fn write_role_xml(buf: &mut String, r: &IamRole) {
 <AssumeRolePolicyDocument>{}</AssumeRolePolicyDocument>\
 <Description>{}</Description>\
 </Role>",
-        r.role_id,
-        r.role_name,
-        r.arn,
-        r.path,
+        xml_escape(&r.role_id),
+        xml_escape(&r.role_name),
+        xml_escape(&r.arn),
+        xml_escape(&r.path),
         r.created.format("%Y-%m-%dT%H:%M:%SZ"),
         xml_escape(&r.assume_role_policy_document),
         xml_escape(&r.description),
@@ -237,10 +240,10 @@ fn write_policy_xml(buf: &mut String, p: &IamPolicy) {
 <Path>{}</Path>\
 <CreateDate>{}</CreateDate>\
 </Policy>",
-        p.policy_id,
-        p.policy_name,
-        p.arn,
-        p.path,
+        xml_escape(&p.policy_id),
+        xml_escape(&p.policy_name),
+        xml_escape(&p.arn),
+        xml_escape(&p.path),
         p.created.format("%Y-%m-%dT%H:%M:%SZ"),
     )
     .expect("write to String is infallible");
@@ -262,32 +265,13 @@ fn write_group_xml(buf: &mut String, g: &IamGroup) {
 <Path>{}</Path>\
 <CreateDate>{}</CreateDate>\
 </Group>",
-        g.group_id,
-        g.group_name,
-        g.arn,
-        g.path,
+        xml_escape(&g.group_id),
+        xml_escape(&g.group_name),
+        xml_escape(&g.arn),
+        xml_escape(&g.path),
         g.created.format("%Y-%m-%dT%H:%M:%SZ"),
     )
     .expect("write to String is infallible");
-}
-
-/// Fast-path XML escaping: returns the original string as `Cow::Borrowed` when
-/// no escaping is needed (the common case), avoiding any heap allocation.
-fn xml_escape(s: &str) -> Cow<'_, str> {
-    if !s.bytes().any(|b| matches!(b, b'&' | b'<' | b'>' | b'"')) {
-        return Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len() + 16);
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(c),
-        }
-    }
-    Cow::Owned(out)
 }
 
 /// Encode `n` random bytes as uppercase hex (2n chars) using the thread-local fast RNG.
@@ -365,8 +349,8 @@ impl ServiceProvider for IamProvider {
                     ));
                 }
                 let user = IamUser {
-                    // 20 lowercase hex chars from 10 UUID bytes — one allocation.
-                    user_id: uuid_hex_lower(10),
+                    // "AIDA" + 16 uppercase hex chars from 8 random bytes.
+                    user_id: format!("AIDA{}", uuid_hex_upper(8)),
                     arn: format!("arn:aws:iam::{account_id}:user{path}{name}"),
                     user_name: name.to_owned(),
                     path: path.to_owned(),
@@ -528,30 +512,28 @@ impl ServiceProvider for IamProvider {
                 Ok(xml_no_result("DeleteRole", &rid))
             }
 
-            "ListRoles" => {
-                let roles: Vec<IamRole> = match self.store.get(account_id, region) {
-                    None => {
-                        return Ok(xml_resp(
-                            "ListRoles",
-                            &rid,
-                            "<Roles /><IsTruncated>false</IsTruncated>",
-                        ));
-                    }
-                    Some(store) => store.roles.values().cloned().collect(),
-                };
-                Ok(xml_response_write(
+            "ListRoles" => match self.store.get(account_id, region) {
+                None => Ok(xml_resp(
                     "ListRoles",
                     &rid,
-                    8 + roles.len() * 400,
-                    |buf| {
-                        buf.push_str("<Roles>");
-                        for r in &roles {
-                            write_role_xml(buf, r);
-                        }
-                        buf.push_str("</Roles><IsTruncated>false</IsTruncated>");
-                    },
-                ))
-            }
+                    "<Roles /><IsTruncated>false</IsTruncated>",
+                )),
+                Some(store) => {
+                    let role_count = store.roles.len();
+                    Ok(xml_response_write(
+                        "ListRoles",
+                        &rid,
+                        8 + role_count * 400,
+                        |buf| {
+                            buf.push_str("<Roles>");
+                            for r in store.roles.values() {
+                                write_role_xml(buf, r);
+                            }
+                            buf.push_str("</Roles><IsTruncated>false</IsTruncated>");
+                        },
+                    ))
+                }
+            },
 
             // ---------------------------------------------------------------
             // Policy operations
@@ -610,30 +592,28 @@ impl ServiceProvider for IamProvider {
                 }
             }
 
-            "ListPolicies" => {
-                let policies: Vec<IamPolicy> = match self.store.get(account_id, region) {
-                    None => {
-                        return Ok(xml_resp(
-                            "ListPolicies",
-                            &rid,
-                            "<Policies /><IsTruncated>false</IsTruncated>",
-                        ));
-                    }
-                    Some(store) => store.policies.values().cloned().collect(),
-                };
-                Ok(xml_response_write(
+            "ListPolicies" => match self.store.get(account_id, region) {
+                None => Ok(xml_resp(
                     "ListPolicies",
                     &rid,
-                    10 + policies.len() * 260,
-                    |buf| {
-                        buf.push_str("<Policies>");
-                        for p in &policies {
-                            write_policy_xml(buf, p);
-                        }
-                        buf.push_str("</Policies><IsTruncated>false</IsTruncated>");
-                    },
-                ))
-            }
+                    "<Policies /><IsTruncated>false</IsTruncated>",
+                )),
+                Some(store) => {
+                    let policy_count = store.policies.len();
+                    Ok(xml_response_write(
+                        "ListPolicies",
+                        &rid,
+                        10 + policy_count * 260,
+                        |buf| {
+                            buf.push_str("<Policies>");
+                            for p in store.policies.values() {
+                                write_policy_xml(buf, p);
+                            }
+                            buf.push_str("</Policies><IsTruncated>false</IsTruncated>");
+                        },
+                    ))
+                }
+            },
 
             "AttachUserPolicy" => {
                 let user_name = match param(ctx, "UserName") {
@@ -751,6 +731,13 @@ impl ServiceProvider for IamProvider {
                     None => return Ok(iam_error("ValidationError", "UserName is required", 400)),
                 };
                 let mut store = self.store.get_or_create(account_id, region);
+                if !store.users.contains_key(user_name) {
+                    return Ok(iam_error(
+                        "NoSuchEntity",
+                        &format!("User {user_name} not found"),
+                        404,
+                    ));
+                }
                 match store.groups.get_mut(group_name) {
                     None => Ok(iam_error(
                         "NoSuchEntity",
@@ -772,30 +759,28 @@ impl ServiceProvider for IamProvider {
                 }
             }
 
-            "ListGroups" => {
-                let groups: Vec<IamGroup> = match self.store.get(account_id, region) {
-                    None => {
-                        return Ok(xml_resp(
-                            "ListGroups",
-                            &rid,
-                            "<Groups /><IsTruncated>false</IsTruncated>",
-                        ));
-                    }
-                    Some(store) => store.groups.values().cloned().collect(),
-                };
-                Ok(xml_response_write(
+            "ListGroups" => match self.store.get(account_id, region) {
+                None => Ok(xml_resp(
                     "ListGroups",
                     &rid,
-                    9 + groups.len() * 260,
-                    |buf| {
-                        buf.push_str("<Groups>");
-                        for g in &groups {
-                            write_group_xml(buf, g);
-                        }
-                        buf.push_str("</Groups><IsTruncated>false</IsTruncated>");
-                    },
-                ))
-            }
+                    "<Groups /><IsTruncated>false</IsTruncated>",
+                )),
+                Some(store) => {
+                    let group_count = store.groups.len();
+                    Ok(xml_response_write(
+                        "ListGroups",
+                        &rid,
+                        9 + group_count * 260,
+                        |buf| {
+                            buf.push_str("<Groups>");
+                            for g in store.groups.values() {
+                                write_group_xml(buf, g);
+                            }
+                            buf.push_str("</Groups><IsTruncated>false</IsTruncated>");
+                        },
+                    ))
+                }
+            },
 
             // ---------------------------------------------------------------
             // AssumeRole (also available via STS, but IAM can handle it too)
@@ -817,9 +802,12 @@ impl ServiceProvider for IamProvider {
 <Expiration>{expiry}</Expiration>\
 </Credentials>\
 <AssumedRoleUser>\
-<AssumedRoleId>AROA{role_id_suffix}:{session_name}</AssumedRoleId>\
-<Arn>{role_arn}/{session_name}</Arn>\
-</AssumedRoleUser>"
+<AssumedRoleId>AROA{role_id_suffix}:{}</AssumedRoleId>\
+<Arn>{}/{}</Arn>\
+</AssumedRoleUser>",
+                    xml_escape(session_name),
+                    xml_escape(role_arn),
+                    xml_escape(session_name)
                 );
                 Ok(xml_resp("AssumeRole", &rid, &creds_xml))
             }

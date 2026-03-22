@@ -214,11 +214,8 @@ fn handle_delete_topic(store: &mut SnsStore, params: &HashMap<String, String>) -
         Some(a) => a.clone(),
         None => return sns_error("InvalidParameter", "TopicArn is required", 400),
     };
-    if store.delete_topic(&arn) {
-        xml_no_result("DeleteTopic", &new_request_id())
-    } else {
-        sns_error("NotFound", "Topic not found", 404)
-    }
+    let _ = store.delete_topic(&arn);
+    xml_no_result("DeleteTopic", &new_request_id())
 }
 
 fn handle_list_topics(store: &SnsStore, params: &HashMap<String, String>) -> DispatchResponse {

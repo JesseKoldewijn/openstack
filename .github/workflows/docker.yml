@@ -210,7 +210,7 @@ jobs:
     needs: [publish-amd64-fast, publish-manifest]
     permissions:
       contents: read
-      packages: delete
+      packages: write
     steps:
       - name: Delete temporary staging tags from GHCR
         continue-on-error: true
