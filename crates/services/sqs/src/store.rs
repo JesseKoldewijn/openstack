@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -97,23 +98,34 @@ impl SqsMessage {
     }
 
     pub fn is_visible(&self) -> bool {
-        match self.visible_after {
+        let now = Utc::now();
+        self.is_visible_at(&now)
+    }
+
+    pub fn is_visible_at(&self, now: &DateTime<Utc>) -> bool {
+        match &self.visible_after {
             None => true,
-            Some(t) => Utc::now() >= t,
+            Some(t) => now >= t,
         }
     }
 
     /// Make a new receipt handle for this receive attempt and set visibility timeout.
-    pub fn begin_receive(&mut self, visibility_timeout_secs: u32) {
-        self.receipt_handle = Uuid::new_v4().to_string();
+    pub fn begin_receive(&mut self, visibility_timeout_secs: u32, now: &DateTime<Utc>) {
+        self.receipt_handle.clear();
+        let _ = write!(&mut self.receipt_handle, "{}", Uuid::new_v4().hyphenated());
         self.receive_count += 1;
-        self.attributes.insert(
-            "ApproximateReceiveCount".to_string(),
-            self.receive_count.to_string(),
-        );
+        if let Some(v) = self.attributes.get_mut("ApproximateReceiveCount") {
+            v.clear();
+            let _ = write!(v, "{}", self.receive_count);
+        } else {
+            self.attributes.insert(
+                "ApproximateReceiveCount".to_string(),
+                self.receive_count.to_string(),
+            );
+        }
         if visibility_timeout_secs > 0 {
             self.visible_after =
-                Some(Utc::now() + chrono::Duration::seconds(visibility_timeout_secs as i64));
+                Some(now.to_owned() + chrono::Duration::seconds(visibility_timeout_secs as i64));
         } else {
             self.visible_after = None;
         }
@@ -245,13 +257,14 @@ impl SqsQueue {
     ) -> Vec<usize> {
         let vt = visibility_timeout.unwrap_or(self.visibility_timeout);
         let mut received = Vec::with_capacity(max_number);
+        let now = Utc::now();
 
         for (idx, msg) in self.messages.iter_mut().enumerate() {
             if received.len() >= max_number {
                 break;
             }
-            if msg.is_visible() {
-                msg.begin_receive(vt);
+            if msg.is_visible_at(&now) {
+                msg.begin_receive(vt, &now);
                 received.push(idx);
             }
         }
@@ -295,11 +308,19 @@ impl SqsQueue {
 
     /// Approximate number of visible messages.
     pub fn approximate_number_of_messages(&self) -> usize {
-        self.messages.iter().filter(|m| m.is_visible()).count()
+        let now = Utc::now();
+        self.messages
+            .iter()
+            .filter(|m| m.is_visible_at(&now))
+            .count()
     }
 
     pub fn approximate_number_of_messages_not_visible(&self) -> usize {
-        self.messages.iter().filter(|m| !m.is_visible()).count()
+        let now = Utc::now();
+        self.messages
+            .iter()
+            .filter(|m| !m.is_visible_at(&now))
+            .count()
     }
 
     /// Check DLQ redrive: move messages that exceed max receive count.

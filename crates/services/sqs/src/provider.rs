@@ -128,6 +128,27 @@ fn escape_xml(s: &str) -> Cow<'_, str> {
     Cow::Owned(escaped)
 }
 
+fn push_xml_escaped(dst: &mut String, s: &str) {
+    if !s
+        .as_bytes()
+        .iter()
+        .any(|b| matches!(b, b'&' | b'<' | b'>' | b'"'))
+    {
+        dst.push_str(s);
+        return;
+    }
+
+    for ch in s.chars() {
+        match ch {
+            '&' => dst.push_str("&amp;"),
+            '<' => dst.push_str("&lt;"),
+            '>' => dst.push_str("&gt;"),
+            '"' => dst.push_str("&quot;"),
+            _ => dst.push(ch),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parameter parsing (SQS uses query protocol — form-urlencoded body)
 // ---------------------------------------------------------------------------
@@ -307,8 +328,8 @@ fn extract_message_attributes(
     result
 }
 
-fn queue_name_from_url(url: &str) -> String {
-    url.rsplit('/').next().unwrap_or("").to_string()
+fn queue_name_from_url(url: &str) -> &str {
+    url.rsplit('/').next().unwrap_or("")
 }
 
 fn base_queue_url(_ctx: &RequestContext) -> String {
@@ -679,41 +700,35 @@ fn handle_receive_message(
 
         let mut attrs_xml = String::with_capacity(msg.attributes.len() * 64);
         for (k, v) in &msg.attributes {
-            attrs_xml.push_str(&format!(
-                "<Attribute><Name>{}</Name><Value>{}</Value></Attribute>",
-                escape_xml(k),
-                escape_xml(v)
-            ));
+            attrs_xml.push_str("<Attribute><Name>");
+            push_xml_escaped(&mut attrs_xml, k);
+            attrs_xml.push_str("</Name><Value>");
+            push_xml_escaped(&mut attrs_xml, v);
+            attrs_xml.push_str("</Value></Attribute>");
         }
         let mut msg_attrs_xml = String::with_capacity(msg.message_attributes.len() * 128);
         for (k, v) in &msg.message_attributes {
-            msg_attrs_xml.push_str(&format!(
-                "<MessageAttribute><Name>{}</Name><Value>\
-<DataType>{}</DataType>\
-<StringValue>{}</StringValue>\
-</Value></MessageAttribute>",
-                escape_xml(k),
-                escape_xml(&v.data_type),
-                escape_xml(v.string_value.as_deref().unwrap_or(""))
-            ));
+            msg_attrs_xml.push_str("<MessageAttribute><Name>");
+            push_xml_escaped(&mut msg_attrs_xml, k);
+            msg_attrs_xml.push_str("</Name><Value><DataType>");
+            push_xml_escaped(&mut msg_attrs_xml, &v.data_type);
+            msg_attrs_xml.push_str("</DataType><StringValue>");
+            push_xml_escaped(&mut msg_attrs_xml, v.string_value.as_deref().unwrap_or(""));
+            msg_attrs_xml.push_str("</StringValue></Value></MessageAttribute>");
         }
 
-        inner.push_str(&format!(
-            "<Message>\
-<MessageId>{msg_id}</MessageId>\
-<ReceiptHandle>{rh}</ReceiptHandle>\
-<MD5OfBody>{md5}</MD5OfBody>\
-<Body>{body}</Body>\
-{attrs}\
-{msg_attrs}\
-</Message>",
-            msg_id = escape_xml(&msg.message_id),
-            rh = escape_xml(&msg.receipt_handle),
-            md5 = escape_xml(&msg.md5_of_body),
-            body = escape_xml(&msg.body),
-            attrs = attrs_xml,
-            msg_attrs = msg_attrs_xml,
-        ));
+        inner.push_str("<Message><MessageId>");
+        inner.push_str(&msg.message_id);
+        inner.push_str("</MessageId><ReceiptHandle>");
+        inner.push_str(&msg.receipt_handle);
+        inner.push_str("</ReceiptHandle><MD5OfBody>");
+        inner.push_str(&msg.md5_of_body);
+        inner.push_str("</MD5OfBody><Body>");
+        push_xml_escaped(&mut inner, &msg.body);
+        inner.push_str("</Body>");
+        inner.push_str(&attrs_xml);
+        inner.push_str(&msg_attrs_xml);
+        inner.push_str("</Message>");
     }
 
     if should_redrive {

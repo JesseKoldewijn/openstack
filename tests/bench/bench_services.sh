@@ -1506,6 +1506,26 @@ if is_active "sqs"; then
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "Action=ReceiveMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MaxNumberOfMessages=1&VisibilityTimeout=0"
 
+      # Ensure a fresh visible message exists before extracting receipt handles
+      # for delete_message benchmarking. Some targets may mark earlier messages
+      # invisible during the receive benchmark window.
+      if [[ "${SEED_OS:-0}" -eq 1 ]]; then
+        seed_request "os" POST "$OS_BASE" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "Action=SendMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MessageBody=delete-seed-message" || true
+      fi
+      if target_active ls && [[ "${SEED_LS:-0}" -eq 1 ]]; then
+        seed_request "ls" POST "$LS_BASE" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "Action=SendMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MessageBody=delete-seed-message" || true
+      fi
+      if target_active moto && [[ "${SEED_MOTO:-0}" -eq 1 ]]; then
+        seed_request "moto" POST "$MOTO_BASE" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "Action=SendMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MessageBody=delete-seed-message" \
+          "${MOTO_EXTRA[@]}" || true
+      fi
+
       SQS_RH_OS=""
       if [[ "${SEED_OS:-0}" -eq 1 ]]; then
         _sqs_recv_os=$(curl -s -X POST "$OS_BASE" \
