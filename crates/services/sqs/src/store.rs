@@ -7,11 +7,23 @@ use serde::{Deserialize, Serialize};
 
 static MESSAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+fn message_uuid_like(id: u64) -> String {
+    let mut out = String::with_capacity(36);
+    let _ = write!(
+        &mut out,
+        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+        (id >> 32) as u32,
+        (id >> 16) as u16,
+        id as u16 & 0x0fff,
+        ((id >> 12) as u16) & 0x0fff,
+        id & 0x0000_ffff_ffff_ffff,
+    );
+    out
+}
+
 fn next_message_id() -> String {
     let id = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut out = String::with_capacity(20);
-    let _ = write!(&mut out, "m-{id:016x}");
-    out
+    message_uuid_like(id)
 }
 
 fn next_receipt_handle() -> String {
