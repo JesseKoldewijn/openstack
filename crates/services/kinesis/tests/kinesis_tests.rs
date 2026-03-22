@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
 use openstack_kinesis::KinesisProvider;
 use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
