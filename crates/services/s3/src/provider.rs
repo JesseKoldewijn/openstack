@@ -466,6 +466,11 @@ async fn handle_put_object_async(
         (etag, size, object_data)
     };
 
+    let new_file_path = match &object_data {
+        ObjectDataRef::FileRef(path) => Some(path.clone()),
+        _ => None,
+    };
+
     // Build version and store in S3Store (short-lived guard)
     let version = crate::store::ObjectVersion {
         version_id: version_id.clone(),
@@ -487,7 +492,13 @@ async fn handle_put_object_async(
         let prev = store.put_object_version(&bucket, &key, version);
         if version_id == "null" {
             prev.and_then(|old| match old.data {
-                ObjectDataRef::FileRef(path) => Some(path),
+                ObjectDataRef::FileRef(path) => {
+                    if new_file_path.as_deref() == Some(path.as_path()) {
+                        None
+                    } else {
+                        Some(path)
+                    }
+                }
                 _ => None,
             })
         } else {
@@ -952,6 +963,11 @@ async fn handle_copy_object_async(
         }
     };
 
+    let new_file_path = match &dest_data {
+        ObjectDataRef::FileRef(path) => Some(path.clone()),
+        _ => None,
+    };
+
     // Build version and store
     let version = crate::store::ObjectVersion {
         version_id: dest_version_id.clone(),
@@ -973,7 +989,13 @@ async fn handle_copy_object_async(
         let prev = store.put_object_version(&dest_bucket, &dest_key, version);
         let replaced = if dest_version_id == "null" {
             prev.and_then(|old| match old.data {
-                ObjectDataRef::FileRef(path) => Some(path),
+                ObjectDataRef::FileRef(path) => {
+                    if new_file_path.as_deref() == Some(path.as_path()) {
+                        None
+                    } else {
+                        Some(path)
+                    }
+                }
                 _ => None,
             })
         } else {
@@ -1553,6 +1575,11 @@ async fn handle_complete_multipart_upload_async(
         ObjectDataRef::FileRef(file_path)
     };
 
+    let new_file_path = match &assembled_data {
+        ObjectDataRef::FileRef(path) => Some(path.clone()),
+        _ => None,
+    };
+
     // Build version and store in S3Store
     let version = crate::store::ObjectVersion {
         version_id: version_id.clone(),
@@ -1574,7 +1601,13 @@ async fn handle_complete_multipart_upload_async(
         let prev = store.complete_multipart_upload_with_version(&upload_id, version);
         if version_id == "null" {
             prev.and_then(|old| match old.data {
-                ObjectDataRef::FileRef(path) => Some(path),
+                ObjectDataRef::FileRef(path) => {
+                    if new_file_path.as_deref() == Some(path.as_path()) {
+                        None
+                    } else {
+                        Some(path)
+                    }
+                }
                 _ => None,
             })
         } else {

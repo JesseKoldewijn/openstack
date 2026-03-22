@@ -350,6 +350,50 @@ async fn test_copy_object() {
     assert_eq!(&body_bytes[..], b"original content");
 }
 
+#[tokio::test]
+async fn test_non_versioned_large_copy_overwrite_keeps_data() {
+    let provider = new_provider().await;
+    let ctx = make_ctx("PUT", "/src-large-bucket", b"");
+    provider.dispatch(&ctx).await.unwrap();
+    let ctx = make_ctx("PUT", "/dst-large-bucket", b"");
+    provider.dispatch(&ctx).await.unwrap();
+
+    let src_a: Vec<u8> = (0u8..=250).cycle().take(300 * 1024).collect();
+    let src_b: Vec<u8> = (0..(300 * 1024)).map(|i| ((i * 7) % 251) as u8).collect();
+
+    let ctx = make_ctx_spooled("PUT", "/src-large-bucket/a.bin", src_a.clone(), 0);
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+
+    let ctx = make_ctx_spooled("PUT", "/src-large-bucket/b.bin", src_b.clone(), 0);
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::HeaderName::from_static("x-amz-copy-source"),
+        http::header::HeaderValue::from_static("/src-large-bucket/a.bin"),
+    );
+    let ctx = make_ctx_with_headers("PUT", "/dst-large-bucket/target.bin", b"", headers);
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::HeaderName::from_static("x-amz-copy-source"),
+        http::header::HeaderValue::from_static("/src-large-bucket/b.bin"),
+    );
+    let ctx = make_ctx_with_headers("PUT", "/dst-large-bucket/target.bin", b"", headers);
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+
+    let ctx = make_ctx("GET", "/dst-large-bucket/target.bin", b"");
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body_bytes = resp.body.into_bytes().await.unwrap();
+    assert_eq!(&body_bytes[..], &src_b[..]);
+}
+
 // ---------------------------------------------------------------------------
 // ListObjectsV2
 // ---------------------------------------------------------------------------
@@ -501,6 +545,105 @@ async fn test_multipart_upload() {
     assert_eq!(resp.status_code, 200);
     let body_bytes = resp.body.into_bytes().await.unwrap();
     assert_eq!(&body_bytes[..], b"part-one-data-part-two-data");
+}
+
+#[tokio::test]
+async fn test_non_versioned_large_multipart_overwrite_keeps_data() {
+    let provider = new_provider().await;
+    let ctx = make_ctx("PUT", "/mp-overwrite-bucket", b"");
+    provider.dispatch(&ctx).await.unwrap();
+
+    async fn run_large_multipart_upload(
+        provider: &S3Provider,
+        bucket: &str,
+        key: &str,
+        part1: &[u8],
+        part2: &[u8],
+    ) {
+        let mut qp = HashMap::new();
+        qp.insert("uploads".to_string(), String::new());
+        let ctx = make_ctx_with_query("POST", &format!("/{bucket}/{key}"), b"", qp);
+        let resp = provider.dispatch(&ctx).await.unwrap();
+        assert_eq!(resp.status_code, 200);
+        let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
+        let start = body.find("<UploadId>").unwrap() + 10;
+        let end = body.find("</UploadId>").unwrap();
+        let upload_id = body[start..end].to_string();
+
+        let mut qp1 = HashMap::new();
+        qp1.insert("uploadId".to_string(), upload_id.clone());
+        qp1.insert("partNumber".to_string(), "1".to_string());
+        let ctx = make_ctx_with_query("PUT", &format!("/{bucket}/{key}"), part1, qp1);
+        let resp1 = provider.dispatch(&ctx).await.unwrap();
+        assert_eq!(resp1.status_code, 200);
+        let etag1 = resp1
+            .headers
+            .iter()
+            .find(|(k, _)| k == "ETag")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+
+        let mut qp2 = HashMap::new();
+        qp2.insert("uploadId".to_string(), upload_id.clone());
+        qp2.insert("partNumber".to_string(), "2".to_string());
+        let ctx = make_ctx_with_query("PUT", &format!("/{bucket}/{key}"), part2, qp2);
+        let resp2 = provider.dispatch(&ctx).await.unwrap();
+        assert_eq!(resp2.status_code, 200);
+        let etag2 = resp2
+            .headers
+            .iter()
+            .find(|(k, _)| k == "ETag")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+
+        let complete_body = format!(
+            "<CompleteMultipartUpload>\
+<Part><PartNumber>1</PartNumber><ETag>{etag1}</ETag></Part>\
+<Part><PartNumber>2</PartNumber><ETag>{etag2}</ETag></Part>\
+</CompleteMultipartUpload>"
+        );
+        let mut qp3 = HashMap::new();
+        qp3.insert("uploadId".to_string(), upload_id);
+        let ctx = make_ctx_with_query(
+            "POST",
+            &format!("/{bucket}/{key}"),
+            complete_body.as_bytes(),
+            qp3,
+        );
+        let resp = provider.dispatch(&ctx).await.unwrap();
+        assert_eq!(resp.status_code, 200);
+    }
+
+    let first_p1: Vec<u8> = (0u8..=255).cycle().take(180 * 1024).collect();
+    let first_p2: Vec<u8> = (0u8..=200).cycle().take(140 * 1024).collect();
+    run_large_multipart_upload(
+        &provider,
+        "mp-overwrite-bucket",
+        "large.bin",
+        &first_p1,
+        &first_p2,
+    )
+    .await;
+
+    let second_p1: Vec<u8> = (0..(170 * 1024)).map(|i| ((i * 11) % 251) as u8).collect();
+    let second_p2: Vec<u8> = (0..(150 * 1024)).map(|i| ((i * 13) % 247) as u8).collect();
+    run_large_multipart_upload(
+        &provider,
+        "mp-overwrite-bucket",
+        "large.bin",
+        &second_p1,
+        &second_p2,
+    )
+    .await;
+
+    let ctx = make_ctx("GET", "/mp-overwrite-bucket/large.bin", b"");
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body_bytes = resp.body.into_bytes().await.unwrap();
+    let mut expected = Vec::with_capacity(second_p1.len() + second_p2.len());
+    expected.extend_from_slice(&second_p1);
+    expected.extend_from_slice(&second_p2);
+    assert_eq!(&body_bytes[..], &expected[..]);
 }
 
 #[tokio::test]
@@ -875,4 +1018,29 @@ async fn test_put_object_spooled_inline_and_disk() {
     let resp = provider.dispatch(&ctx).await.unwrap();
     let got = resp.body.into_bytes().await.unwrap();
     assert_eq!(&got[..], &large_data[..]);
+}
+
+#[tokio::test]
+async fn test_non_versioned_large_put_overwrite_keeps_data() {
+    let provider = new_provider().await;
+
+    let ctx = make_ctx("PUT", "/overwrite-bucket", b"");
+    provider.dispatch(&ctx).await.unwrap();
+
+    let first_data: Vec<u8> = (0u8..=250).cycle().take(300 * 1024).collect();
+    let second_data: Vec<u8> = (0..(300 * 1024)).map(|i| ((i * 5) % 251) as u8).collect();
+
+    let ctx = make_ctx_spooled("PUT", "/overwrite-bucket/blob.bin", first_data, 0);
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+
+    let ctx = make_ctx_spooled("PUT", "/overwrite-bucket/blob.bin", second_data.clone(), 0);
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+
+    let ctx = make_ctx("GET", "/overwrite-bucket/blob.bin", b"");
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    let got = resp.body.into_bytes().await.unwrap();
+    assert_eq!(&got[..], &second_data[..]);
 }
