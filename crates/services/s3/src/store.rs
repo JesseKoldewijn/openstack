@@ -663,6 +663,9 @@ impl S3Store {
     ///
     /// Used when parts are file-backed and the caller has already
     /// concatenated them on disk.
+    ///
+    /// Returns the previous current version when an existing key is
+    /// overwritten; otherwise returns `None`.
     pub fn complete_multipart_upload_with_version(
         &mut self,
         upload_id: &str,
@@ -672,20 +675,21 @@ impl S3Store {
 
         let objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
+            let prev = obj.versions.first().cloned();
             if version.version_id == "null" {
                 obj.versions.clear();
                 obj.versions.push(version.clone());
             } else {
                 obj.versions.insert(0, version.clone());
             }
+            prev
         } else {
             objects.insert(
                 upload.key.clone(),
                 S3Object::new(upload.key.clone(), version.clone()),
             );
+            None
         }
-
-        Some(version)
     }
 
     /// Get the `MultipartUpload` metadata for a given upload_id.
