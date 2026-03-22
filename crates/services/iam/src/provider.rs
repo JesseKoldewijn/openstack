@@ -421,7 +421,7 @@ impl ServiceProvider for IamProvider {
             "ListUsers" => {
                 // Serialize directly inside the DashMap read lock — the lock
                 // is shared (multiple concurrent readers), so holding it during
-                // serialization is safe and avoids N * 5+ String clones.
+                // serialization is safe and avoids extra allocations.
                 match self.store.get(account_id, region) {
                     None => {
                         return Ok(xml_resp(
@@ -431,19 +431,17 @@ impl ServiceProvider for IamProvider {
                         ));
                     }
                     Some(store) => {
-                        // Sort by name using only references (no clone).
-                        let mut names: Vec<&str> = store.users.keys().map(String::as_str).collect();
-                        names.sort_unstable();
+                        // Users are stored in a BTreeMap, so iteration is
+                        // already sorted by UserName with no per-request sort.
+                        let user_count = store.users.len();
                         Ok(xml_response_write(
                             "ListUsers",
                             &rid,
-                            8 + names.len() * 260,
+                            8 + user_count * 260,
                             |buf| {
                                 buf.push_str("<Users>");
-                                for name in &names {
-                                    if let Some(u) = store.users.get(*name) {
-                                        write_user_xml(buf, u);
-                                    }
+                                for u in store.users.values() {
+                                    write_user_xml(buf, u);
                                 }
                                 buf.push_str("</Users><IsTruncated>false</IsTruncated>");
                             },

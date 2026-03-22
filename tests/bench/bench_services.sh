@@ -303,24 +303,31 @@ bench_dynamic() {
   local tmpdir
   tmpdir=$(mktemp -d)
 
+  # Fast path for default profile: limit dynamic samples so services that
+  # require unique request payloads do not dominate overall benchmark time.
+  # Stress profile keeps full cardinality.
+  local dynamic_n="$REQ_COUNT"
+  if [[ "$PROFILE" == "default" && "$REQ_COUNT" -gt 40 ]]; then
+    dynamic_n=40
+  fi
+  local curl_max_time=15
+  [[ "$PROFILE" == "stress" ]] && curl_max_time=30
+
   local start_ts end_ts wall_secs throughput
   start_ts=$(date +%s%3N)   # ms since epoch
 
   local i
-  for (( i=1; i<=REQ_COUNT; i++ )); do
+  for (( i=1; i<=dynamic_n; i++ )); do
     local body="${body_template//\{i\}/$i}"
     # Write result file: "time_total_ms http_code"
     (
-      local raw
-      raw=$(curl -s -w "\n%{http_code}" -X "$method" "${extra_args[@]}" -d "$body" "$url" 2>/dev/null) || true
-      local code="${raw##*$'\n'}"
-      local time_ms
-      # Capture time_total via a second curl just for timing — no, instead
-      # use curl -o /dev/null -w '%{time_total}' which avoids body parsing.
-      time_ms=$(curl -s -o /dev/null -w '%{time_total}' -X "$method" \
-        "${extra_args[@]}" -d "$body" "$url" 2>/dev/null) || time_ms=0
+      local sample time_s code time_ms
+      sample=$(curl -s --connect-timeout 2 --max-time "$curl_max_time" \
+        -o /dev/null -w '%{time_total} %{http_code}' -X "$method" \
+        "${extra_args[@]}" -d "$body" "$url" 2>/dev/null) || sample="0 000"
+      read -r time_s code <<< "$sample"
       # Convert fractional seconds to ms
-      time_ms=$(awk "BEGIN{printf \"%.2f\", ${time_ms:-0}*1000}")
+      time_ms=$(awk "BEGIN{printf \"%.2f\", ${time_s:-0}*1000}")
       printf '%s %s\n' "$time_ms" "${code:-000}" > "$tmpdir/$i"
     ) &
 
@@ -336,7 +343,7 @@ bench_dynamic() {
 
   # Collect results
   local times=() errors=0
-  for (( i=1; i<=REQ_COUNT; i++ )); do
+  for (( i=1; i<=dynamic_n; i++ )); do
     if [[ -f "$tmpdir/$i" ]]; then
       local t c
       read -r t c < "$tmpdir/$i"
@@ -585,6 +592,7 @@ OS_CONTAINER=""
 LS_CONTAINER=""
 MOTO_CONTAINER=""
 OS_PID=""
+OS_DATA_DIR=""
 
 cleanup() {
   log "Cleaning up..."
@@ -593,8 +601,22 @@ cleanup() {
   if [[ -n "$MOTO_CONTAINER" ]]; then docker rm -f "$MOTO_CONTAINER" &>/dev/null || true; fi
   if [[ -n "$OS_PID" ]]; then kill "$OS_PID" &>/dev/null || true; fi
   if [[ -n "$OS_PID" ]]; then wait "$OS_PID" &>/dev/null || true; fi
+  if [[ -n "$OS_DATA_DIR" ]]; then rm -rf "$OS_DATA_DIR" &>/dev/null || true; fi
 }
 trap cleanup EXIT
+
+port_in_use() {
+  local port="$1"
+  if command -v ss &>/dev/null; then
+    ss -ltn "sport = :$port" 2>/dev/null | awk 'NR>1 {found=1} END {exit !found}'
+    return $?
+  fi
+  if command -v lsof &>/dev/null; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Wait for health endpoint
@@ -683,21 +705,21 @@ start_binary_mode() {
     exit 1
   fi
 
+  if port_in_use "$OS_PORT"; then
+    echo "ERROR: Port $OS_PORT is already in use. Stop the existing process and retry." >&2
+    exit 1
+  fi
+
   # Use a writable temp directory for the data dir so the binary can be run
   # without root privileges (the default /var/lib/localstack requires root).
-  local os_data_dir
-  os_data_dir=$(mktemp -d -t openstack-bench-XXXXXX)
-  log "Starting openstack binary ($BINARY_PATH) with data dir $os_data_dir..."
+  OS_DATA_DIR=$(mktemp -d -t openstack-bench-XXXXXX)
+  log "Starting openstack binary ($BINARY_PATH) with data dir $OS_DATA_DIR..."
   GATEWAY_LISTEN="127.0.0.1:$OS_PORT" \
-  LOCALSTACK_DATA_DIR="$os_data_dir" \
+  LOCALSTACK_DATA_DIR="$OS_DATA_DIR" \
   PERSISTENCE=0 \
   LS_LOG=error \
     "$BINARY_PATH" &
   OS_PID=$!
-
-  # Clean up the data dir on exit
-  # shellcheck disable=SC2064
-  trap "rm -rf '$os_data_dir'" EXIT
 
   if target_active ls; then
     log "Starting LocalStack container..."

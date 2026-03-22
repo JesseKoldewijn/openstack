@@ -790,7 +790,7 @@ async fn test_put_object_via_spooled_body() {
 }
 
 /// Task 4.6 — Parameterized test: small (inline, 100 B) and large (disk-spilled,
-/// 300 KiB, above 256 KiB threshold) bodies both produce correct ETags and content.
+/// 2 MiB, above 1 MiB threshold) bodies both produce correct ETags and content.
 #[tokio::test]
 async fn test_put_object_spooled_inline_and_disk() {
     let provider = new_provider().await;
@@ -799,7 +799,7 @@ async fn test_put_object_spooled_inline_and_disk() {
     let ctx = make_ctx("PUT", "/threshold-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
-    // Inline case: 100 bytes — well below the 256 KiB threshold
+    // Inline case: 100 bytes — well below the 1 MiB threshold
     let inline_data: Vec<u8> = (0u8..100).collect();
     let inline_etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&inline_data)));
 
@@ -825,8 +825,8 @@ async fn test_put_object_spooled_inline_and_disk() {
     let got = resp.body.into_bytes().await.unwrap();
     assert_eq!(&got[..], &inline_data[..]);
 
-    // Disk-spilled case: 300 KiB — above the 256 KiB provider threshold
-    let large_data: Vec<u8> = (0u8..255).cycle().take(300 * 1024).collect();
+    // Disk-spilled case: 2 MiB — above the 1 MiB provider threshold
+    let large_data: Vec<u8> = (0u8..255).cycle().take(2 * 1024 * 1024).collect();
     let large_etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&large_data)));
 
     // Use threshold=0 so SpooledBody spills immediately to disk

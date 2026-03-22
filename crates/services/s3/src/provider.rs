@@ -25,7 +25,7 @@ use crate::store::{ObjectDataRef, S3Store};
 ///
 /// Objects above the threshold are still written to disk and streamed
 /// from disk on reads, which is appropriate for large blobs.
-const INLINE_OBJECT_THRESHOLD: u64 = 256 * 1024; // 256 KiB
+const INLINE_OBJECT_THRESHOLD: u64 = 1024 * 1024; // 1 MiB
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
@@ -399,8 +399,7 @@ async fn handle_put_object_async(
             (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
         } else {
             // Large object: run sync I/O in spawn_blocking to avoid blocking
-            // tokio worker threads during the copy loop.  A 512 KiB buffer
-            // reduces disk syscalls from ~1280 to ~20 for a 10 MiB object.
+            // tokio worker threads during the copy loop.
             let file_store_clone = file_store.clone();
             let account_id_c = ctx.account_id.clone();
             let region_c = ctx.region.clone();
@@ -592,11 +591,9 @@ async fn handle_get_object_async(
                     } else {
                         match ObjectFileStore::read_object_at(&path).await {
                             Ok(file) => {
-                                // Stream directly through ReaderStream — it already
-                                // buffers reads into a 512 KiB BytesMut chunk.
-                                // The previous BufReader wrapper added a redundant
-                                // 512 KiB memcpy on every read; removed here.
-                                const READ_BUF: usize = 512 * 1024;
+                                // Stream directly through ReaderStream. Use a larger
+                                // chunk size to reduce syscall churn on large downloads.
+                                const READ_BUF: usize = 2 * 1024 * 1024;
                                 let stream = ReaderStream::with_capacity(file, READ_BUF);
                                 ResponseBody::Streaming {
                                     stream: Box::pin(stream),

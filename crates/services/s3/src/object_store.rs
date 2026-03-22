@@ -146,10 +146,9 @@ impl ObjectFileStore {
 
         let mut file = fs::File::create(&tmp_path).await?;
 
-        // Use a 512 KiB read buffer to amortise the spawn_blocking overhead of
-        // tokio::fs::File and reduce the number of poll_read → disk-I/O roundtrips
-        // from ~1280 to ~20 for a 10 MiB object.
-        const COPY_BUF: usize = 512 * 1024;
+        // Use a larger 1 MiB read buffer to reduce read/write syscall churn on
+        // medium and large uploads while keeping per-request memory bounded.
+        const COPY_BUF: usize = 1024 * 1024;
         let mut buf_reader = tokio::io::BufReader::with_capacity(COPY_BUF, reader);
         let bytes_written = tokio::io::copy_buf(&mut buf_reader, &mut file).await?;
         file.flush().await?;
@@ -194,8 +193,8 @@ impl ObjectFileStore {
 
         let mut file = std::fs::File::create(&tmp_path)?;
 
-        // 512 KiB copy buffer — same size as the async path for consistency.
-        let mut buf = vec![0u8; 512 * 1024];
+        // 1 MiB copy buffer — improves throughput and p95 on large PUT payloads.
+        let mut buf = vec![0u8; 1024 * 1024];
         let mut bytes_written = 0u64;
         loop {
             let n = reader.read(&mut buf)?;
