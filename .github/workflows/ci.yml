@@ -675,13 +675,25 @@ jobs:
 
           parity_reports = sorted(glob.glob("artifacts/parity/*.json"), key=os.path.getmtime)
           if parity_reports:
-              lines.extend(["### Parity", "", "| Profile | Scenarios | Passed | Failed | Accepted |", "|---|---:|---:|---:|---:|"])
+              latest_by_profile = {}
               for path in parity_reports:
                   with open(path, "r", encoding="utf-8") as handle:
                       parity = json.load(handle)
+                  profile = parity.get("profile", "n/a")
+                  latest_by_profile[profile] = parity
+
+              preferred_order = ["core", "all-services-smoke"]
+              ordered_profiles = [p for p in preferred_order if p in latest_by_profile]
+              ordered_profiles.extend(
+                  sorted(p for p in latest_by_profile if p not in preferred_order)
+              )
+
+              lines.extend(["### Parity", "", "| Profile | Scenarios | Passed | Failed | Accepted |", "|---|---:|---:|---:|---:|"])
+              for profile in ordered_profiles:
+                  parity = latest_by_profile[profile]
                   ps = parity.get("summary", {})
                   lines.append(
-                      f"| `{parity.get('profile', 'n/a')}` | {ps.get('total_scenarios', 0)} | {ps.get('passed', 0)} | {ps.get('failed', 0)} | {ps.get('accepted_differences', 0)} |"
+                      f"| `{profile}` | {ps.get('total_scenarios', 0)} | {ps.get('passed', 0)} | {ps.get('failed', 0)} | {ps.get('accepted_differences', 0)} |"
                   )
               lines.append("")
 
