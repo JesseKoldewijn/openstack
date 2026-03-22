@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use openstack_redshift::RedshiftProvider;
 use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
 

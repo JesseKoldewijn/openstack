@@ -1306,8 +1306,12 @@ fn parse_operation_and_params(
 /// Extract operation name from REST path + method.
 /// The actual operation mapping is done per-service in the provider.
 fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value) -> String {
-    if path == "/2015-03-31/functions/" && method == "GET" {
-        return "ListFunctions".to_string();
+    if path == "/2015-03-31/functions/" || path == "/2015-03-31/functions" {
+        return match method {
+            "GET" => "ListFunctions".to_string(),
+            "POST" => "CreateFunction".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
     }
     if path == "/2021-01-01/opensearch/domain" {
         return match method {
@@ -1508,4 +1512,37 @@ fn is_s3_object_body_request(
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::extract_rest_operation;
+
+    #[test]
+    fn maps_lambda_create_function_with_or_without_trailing_slash() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation("POST", "/2015-03-31/functions/", &params),
+            "CreateFunction"
+        );
+        assert_eq!(
+            extract_rest_operation("POST", "/2015-03-31/functions", &params),
+            "CreateFunction"
+        );
+    }
+
+    #[test]
+    fn maps_lambda_list_functions_with_or_without_trailing_slash() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation("GET", "/2015-03-31/functions/", &params),
+            "ListFunctions"
+        );
+        assert_eq!(
+            extract_rest_operation("GET", "/2015-03-31/functions", &params),
+            "ListFunctions"
+        );
+    }
 }

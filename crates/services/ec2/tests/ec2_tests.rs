@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use openstack_ec2::Ec2Provider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 

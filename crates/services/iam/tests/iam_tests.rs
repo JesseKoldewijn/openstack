@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use openstack_iam::IamProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 use serde_json::json;

@@ -1313,10 +1313,19 @@ if is_active "apigateway"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "API Gateway (REST-JSON)"
 
+  # Moto's multi-service root can mis-route API Gateway REST requests to S3
+  # unless SigV4-like headers are present.
+  MOTO_EXTRA=(
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/apigateway/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy"
+    -H "X-Amz-Date: 20260101T000000Z"
+  )
+
   bench_targets "apigateway" "get_rest_apis" GET \
     "$OS_BASE/restapis" \
     "$LS_BASE/restapis" \
     "$MOTO_BASE/restapis"
+
+  MOTO_EXTRA=()
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1414,10 +1423,104 @@ if is_active "lambda"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "Lambda (REST-JSON)"
 
-  bench_targets "lambda" "list_functions" GET \
-    "$OS_BASE/2015-03-31/functions/" \
-    "$LS_BASE/2015-03-31/functions/" \
-    "$MOTO_BASE/2015-03-31/functions/"
+  LAMBDA_FUNCTION_NAME="bench-fn-$$"
+  LAMBDA_DELETE_FUNCTION_NAME="bench-fn-del-$$"
+  LAMBDA_ZIP_B64="UEsDBBQAAAAAABatdlysKm9YNQAAADUAAAASAAAAbGFtYmRhX2Z1bmN0aW9uLnB5ZGVmIGhhbmRsZXIoZXZlbnQsIGNvbnRleHQpOgogICAgcmV0dXJuIHsib2siOiBUcnVlfQpQSwECFAMUAAAAAAAWrXZcrCpvWDUAAAA1AAAAEgAAAAAAAAAAAAAAgAEAAAAAbGFtYmRhX2Z1bmN0aW9uLnB5UEsFBgAAAAABAAEAQAAAAGUAAAAAAA=="
+
+  LAMBDA_CREATE_BODY=$(jq -cn \
+    --arg fn "$LAMBDA_FUNCTION_NAME" \
+    --arg zip "$LAMBDA_ZIP_B64" \
+    '{
+      FunctionName: $fn,
+      Runtime: "python3.12",
+      Handler: "lambda_function.handler",
+      Role: "arn:aws:iam::000000000000:role/test-role",
+      Code: { ZipFile: $zip }
+    }')
+
+  LAMBDA_DELETE_CREATE_BODY=$(jq -cn \
+    --arg fn "$LAMBDA_DELETE_FUNCTION_NAME" \
+    --arg zip "$LAMBDA_ZIP_B64" \
+    '{
+      FunctionName: $fn,
+      Runtime: "python3.12",
+      Handler: "lambda_function.handler",
+      Role: "arn:aws:iam::000000000000:role/test-role",
+      Code: { ZipFile: $zip }
+    }')
+
+  # Moto's multi-service root can mis-route Lambda REST requests to S3 unless
+  # SigV4-like headers are present. The signature content is not validated, so
+  # static dummy values are sufficient to force Lambda routing.
+  MOTO_EXTRA=(
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/lambda/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy"
+    -H "X-Amz-Date: 20260101T000000Z"
+  )
+
+  if seed_all_targets "lambda" POST \
+       "$OS_BASE/2015-03-31/functions/" \
+       "$LS_BASE/2015-03-31/functions/" \
+       "$MOTO_BASE/2015-03-31/functions/" \
+       -H "Content-Type: application/json" \
+       -d "$LAMBDA_CREATE_BODY"; then
+
+    bench_targets "lambda" "list_functions" GET \
+      "$OS_BASE/2015-03-31/functions/" \
+      "$LS_BASE/2015-03-31/functions/" \
+      "$MOTO_BASE/2015-03-31/functions/"
+
+    bench_targets "lambda" "get_function" GET \
+      "$OS_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}" \
+      "$LS_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}" \
+      "$MOTO_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}"
+
+    bench_targets "lambda" "invoke" POST \
+      "$OS_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}/invocations" \
+      "$LS_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}/invocations" \
+      "$MOTO_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}/invocations" \
+      -H "Content-Type: application/json" \
+      -H "X-Amz-Invocation-Type: DryRun" \
+      -d '{}'
+
+    bench_targets "lambda" "update_function_configuration" PUT \
+      "$OS_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}" \
+      "$LS_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}" \
+      "$MOTO_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}" \
+      -H "Content-Type: application/json" \
+      -d '{"Description":"bench-updated","Timeout":30,"MemorySize":256}'
+
+    bench_targets "lambda" "update_function_code" PUT \
+      "$OS_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}/code" \
+      "$LS_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}/code" \
+      "$MOTO_BASE/2015-03-31/functions/${LAMBDA_FUNCTION_NAME}/code" \
+      -H "Content-Type: application/json" \
+      -d "{\"ZipFile\":\"${LAMBDA_ZIP_B64}\"}"
+
+    # Dedicated delete seed to avoid removing the main benchmark function.
+    if seed_all_targets "lambda" POST \
+         "$OS_BASE/2015-03-31/functions/" \
+         "$LS_BASE/2015-03-31/functions/" \
+         "$MOTO_BASE/2015-03-31/functions/" \
+         -H "Content-Type: application/json" \
+         -d "$LAMBDA_DELETE_CREATE_BODY"; then
+      _lambda_saved_req=$REQ_COUNT
+      _lambda_saved_conc=$CONC
+      REQ_COUNT=1
+      CONC=1
+      bench_targets "lambda" "delete_function" DELETE \
+        "$OS_BASE/2015-03-31/functions/${LAMBDA_DELETE_FUNCTION_NAME}" \
+        "$LS_BASE/2015-03-31/functions/${LAMBDA_DELETE_FUNCTION_NAME}" \
+        "$MOTO_BASE/2015-03-31/functions/${LAMBDA_DELETE_FUNCTION_NAME}"
+      REQ_COUNT=$_lambda_saved_req
+      CONC=$_lambda_saved_conc
+    else
+      record_seed_failure "lambda" "os" "delete seed request failed"
+    fi
+  else
+    skip_service "lambda" "Failed to create seed function"
+  fi
+
+  MOTO_EXTRA=()
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1428,10 +1531,19 @@ if is_active "opensearch"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "OpenSearch (REST-JSON)"
 
+  # Moto's multi-service root can mis-route OpenSearch REST requests to S3
+  # unless SigV4-like headers are present.
+  MOTO_EXTRA=(
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/es/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy"
+    -H "X-Amz-Date: 20260101T000000Z"
+  )
+
   bench_targets "opensearch" "list_domain_names" GET \
     "$OS_BASE/2021-01-01/opensearch/domain" \
     "$LS_BASE/2021-01-01/opensearch/domain" \
     "$MOTO_BASE/2021-01-01/opensearch/domain"
+
+  MOTO_EXTRA=()
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1455,10 +1567,19 @@ if is_active "route53"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "Route53 (REST-XML)"
 
+  # Moto's multi-service root can mis-route Route53 REST requests to S3 unless
+  # SigV4-like headers are present.
+  MOTO_EXTRA=(
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/route53/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy"
+    -H "X-Amz-Date: 20260101T000000Z"
+  )
+
   bench_targets "route53" "list_hosted_zones" GET \
     "$OS_BASE/2013-04-01/hostedzone" \
     "$LS_BASE/2013-04-01/hostedzone" \
     "$MOTO_BASE/2013-04-01/hostedzone"
+
+  MOTO_EXTRA=()
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
