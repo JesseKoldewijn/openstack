@@ -30,6 +30,7 @@ quick-xml.workspace = true
 tempfile.workspace = true
 futures-core.workspace = true
 sha2.workspace = true
+xxhash-rust.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

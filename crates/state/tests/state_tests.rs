@@ -106,8 +106,8 @@ mod state_tests {
                 let path = openstack_state::state_path(
                     data_dir,
                     "counter",
-                    &key.account_id(),
-                    &key.region(),
+                    key.account_id(),
+                    key.region(),
                 );
                 openstack_state::save_store(entry.value(), &path).await?;
             }

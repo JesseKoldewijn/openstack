@@ -371,15 +371,20 @@ async fn handle_put_object_async(
     };
     let key = key_from_path(&ctx.path);
 
-    // Check bucket exists — use read lock to avoid blocking concurrent readers.
-    {
-        let bucket_exists = store_bundle
-            .get(&ctx.account_id, &ctx.region)
-            .is_some_and(|store| store.bucket_exists(&bucket));
-        if !bucket_exists {
-            return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
-        }
-    }
+    // Preflight store lookup with one mutable guard: validate bucket existence and
+    // read versioning state without taking separate read/write locks.
+    let versioning_enabled = {
+        let store = match store_bundle.get_mut(&ctx.account_id, &ctx.region) {
+            Some(store) => store,
+            None => return s3_error("NoSuchBucket", "The specified bucket does not exist", 404),
+        };
+
+        let bucket_state = match store.get_bucket(&bucket) {
+            Some(b) => b,
+            None => return s3_error("NoSuchBucket", "The specified bucket does not exist", 404),
+        };
+        bucket_state.versioning.as_str() == "Enabled"
+    };
 
     let content_type = ctx
         .headers
@@ -397,18 +402,6 @@ async fn handle_put_object_async(
                 .and_then(|mk| v.to_str().ok().map(|mv| (mk.to_string(), mv.to_string())))
         })
         .collect();
-
-    // Determine versioning state — use read lock for read-only check.
-    let versioning_enabled = {
-        store_bundle
-            .get(&ctx.account_id, &ctx.region)
-            .is_some_and(|store| {
-                store
-                    .get_bucket(&bucket)
-                    .map(|b| b.versioning.as_str() == "Enabled")
-                    .unwrap_or(false)
-            })
-    };
 
     // Generate version_id now so we can use it for the file path
     let version_id = if versioning_enabled {
@@ -536,23 +529,41 @@ async fn handle_put_object_async(
         delete_marker: false,
     };
 
-    let replaced_file_path = {
-        let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        let prev = store.put_object_version(&bucket, &key, version);
-        if version_id == "null" {
-            prev.and_then(|old| match old {
-                ObjectDataRef::FileRef(path) => {
-                    if new_file_path.as_deref() == Some(path.as_path()) {
-                        None
-                    } else {
-                        Some(path)
-                    }
+    let prev = {
+        let mut store = match store_bundle.get_mut(&ctx.account_id, &ctx.region) {
+            Some(store) => store,
+            None => {
+                if let Some(path) = new_file_path.as_ref() {
+                    let _ = tokio::fs::remove_file(path).await;
                 }
-                _ => None,
-            })
-        } else {
-            None
+                return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+            }
+        };
+
+        if !store.bucket_exists(&bucket) {
+            drop(store);
+            if let Some(path) = new_file_path.as_ref() {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
         }
+
+        store.put_object_version(&bucket, &key, version)
+    };
+
+    let replaced_file_path = if version_id == "null" {
+        prev.and_then(|old| match old {
+            ObjectDataRef::FileRef(path) => {
+                if new_file_path.as_deref() == Some(path.as_path()) {
+                    None
+                } else {
+                    Some(path)
+                }
+            }
+            _ => None,
+        })
+    } else {
+        None
     };
 
     if let Some(path) = replaced_file_path {

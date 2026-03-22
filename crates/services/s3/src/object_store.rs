@@ -8,22 +8,25 @@
 //! ```
 //!
 //! S3 keys can contain characters that are invalid in file paths, so the
-//! key is hashed (SHA-256, hex-encoded) to produce a filesystem-safe
+//! key is hashed (XXH3-128, hex-encoded) to produce a filesystem-safe
 //! directory name.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
+use dashmap::DashSet;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
 use uuid::Uuid;
+use xxhash_rust::xxh3::xxh3_128;
 
 /// Manages object data on the filesystem.
 #[derive(Debug, Clone)]
 pub struct ObjectFileStore {
     base_dir: PathBuf,
+    known_dirs: Arc<DashSet<PathBuf>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,16 +45,35 @@ impl ObjectFileStore {
     pub async fn new(base_dir: impl Into<PathBuf>) -> io::Result<Self> {
         let base_dir = base_dir.into();
         fs::create_dir_all(&base_dir).await?;
-        Ok(Self { base_dir })
+        Ok(Self {
+            base_dir,
+            known_dirs: Arc::new(DashSet::new()),
+        })
     }
 
     // ── Path helpers ────────────────────────────────────────────────
 
     /// Hash an S3 key to a filesystem-safe hex string.
     pub fn key_hash(key: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(key.as_bytes());
-        hex::encode(hasher.finalize())
+        format!("{:032x}", xxh3_128(key.as_bytes()))
+    }
+
+    async fn ensure_dir_exists(&self, dir: &Path) -> io::Result<()> {
+        if self.known_dirs.contains(dir) {
+            return Ok(());
+        }
+        fs::create_dir_all(dir).await?;
+        self.known_dirs.insert(dir.to_path_buf());
+        Ok(())
+    }
+
+    fn ensure_dir_exists_sync(&self, dir: &Path) -> io::Result<()> {
+        if self.known_dirs.contains(dir) {
+            return Ok(());
+        }
+        std::fs::create_dir_all(dir)?;
+        self.known_dirs.insert(dir.to_path_buf());
+        Ok(())
     }
 
     /// Build the directory path for a given object key within a bucket.
@@ -100,7 +122,7 @@ impl ObjectFileStore {
         data: &[u8],
     ) -> io::Result<PathBuf> {
         let dir = self.object_dir(account_id, region, bucket, key);
-        fs::create_dir_all(&dir).await?;
+        self.ensure_dir_exists(&dir).await?;
 
         let final_path = dir.join(version_id);
         let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
@@ -139,7 +161,7 @@ impl ObjectFileStore {
         R: tokio::io::AsyncRead + Unpin,
     {
         let dir = self.object_dir(account_id, region, bucket, key);
-        fs::create_dir_all(&dir).await?;
+        self.ensure_dir_exists(&dir).await?;
 
         let final_path = dir.join(version_id);
         let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
@@ -185,7 +207,7 @@ impl ObjectFileStore {
         use std::io::Write;
 
         let dir = self.object_dir(account_id, region, bucket, key);
-        std::fs::create_dir_all(&dir)?;
+        self.ensure_dir_exists_sync(&dir)?;
 
         let final_path = dir.join(version_id);
         let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
@@ -269,6 +291,9 @@ impl ObjectFileStore {
         // Clean up empty parent directories (key_hash dir, then bucket dir).
         let key_dir = self.object_dir(account_id, region, bucket, key);
         Self::remove_dir_if_empty(&key_dir).await;
+        if fs::metadata(&key_dir).await.is_err() {
+            self.known_dirs.remove(&key_dir);
+        }
 
         Ok(())
     }
@@ -283,6 +308,20 @@ impl ObjectFileStore {
         let dir = self.bucket_dir(account_id, region, bucket);
         match fs::remove_dir_all(&dir).await {
             Ok(()) => {
+                let stale_dirs: Vec<PathBuf> = self
+                    .known_dirs
+                    .iter()
+                    .filter_map(|known| {
+                        if known.as_path().starts_with(&dir) {
+                            Some(known.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for stale in stale_dirs {
+                    self.known_dirs.remove(&stale);
+                }
                 debug!(path = %dir.display(), "Bucket directory deleted");
                 Ok(())
             }
@@ -309,7 +348,7 @@ impl ObjectFileStore {
             src.version_id,
         );
         let dst_dir = self.object_dir(dst.account_id, dst.region, dst.bucket, dst.key);
-        fs::create_dir_all(&dst_dir).await?;
+        self.ensure_dir_exists(&dst_dir).await?;
         let dst = dst_dir.join(dst.version_id);
 
         fs::copy(&src, &dst).await?;
@@ -532,8 +571,8 @@ mod tests {
         let h3 = ObjectFileStore::key_hash("different/key");
         assert_ne!(h1, h3);
 
-        // Should be a valid hex string of length 64 (SHA-256).
-        assert_eq!(h1.len(), 64);
+        // Should be a valid hex string of length 32 (XXH3-128).
+        assert_eq!(h1.len(), 32);
         assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 

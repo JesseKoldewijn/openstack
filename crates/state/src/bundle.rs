@@ -63,6 +63,37 @@ impl<S: Default + Send + Sync + Clone + 'static> AccountRegionBundle<S> {
         }
     }
 
+    /// Get a mutable reference to the store for a given account + region, if it exists.
+    ///
+    /// Uses the same stack-allocated lookup key optimization as [`get`] to
+    /// avoid heap allocation on the write hot path.
+    pub fn get_mut(
+        &self,
+        account_id: &str,
+        region: &str,
+    ) -> Option<dashmap::mapref::one::RefMut<'_, AccountRegionKey, S>> {
+        let a = account_id.as_bytes();
+        let r = region.as_bytes();
+        let total = a.len() + 1 + r.len(); // separator is one null byte
+
+        if total <= 63 {
+            // Fast path: build the combined key on the stack.
+            let mut buf = [0u8; 64];
+            buf[..a.len()].copy_from_slice(a);
+            buf[a.len()] = 0; // null byte separator
+            buf[a.len() + 1..total].copy_from_slice(r);
+            // SAFETY: `a` and `r` are valid UTF-8 (from `&str`); the null byte
+            // is valid in a UTF-8 `str` (it is a one-byte sequence U+0000).
+            let key_str = unsafe { std::str::from_utf8_unchecked(&buf[..total]) };
+            self.stores.get_mut(key_str)
+        } else {
+            // Slow path: fall back to a heap-allocated key for unusually long
+            // account IDs or region strings (should not occur in practice).
+            let key = AccountRegionKey::new(account_id, region);
+            self.stores.get_mut(key.borrow() as &str)
+        }
+    }
+
     /// Returns all (key, store) pairs (for iteration/serialization).
     pub fn iter(
         &self,
@@ -183,5 +214,19 @@ mod tests {
         let found = bundle.get("123456789012", "us-east-1");
         assert!(found.is_some());
         assert_eq!(found.unwrap().count, 99);
+    }
+
+    #[test]
+    fn test_get_mut_is_zero_alloc_compatible() {
+        let bundle: AccountRegionBundle<TestStore> = AccountRegionBundle::new();
+        bundle.get_or_create("123456789012", "us-east-1").count = 1;
+
+        {
+            let mut found = bundle.get_mut("123456789012", "us-east-1");
+            assert!(found.is_some());
+            found.as_mut().unwrap().count = 7;
+        }
+
+        assert_eq!(bundle.get("123456789012", "us-east-1").unwrap().count, 7);
     }
 }
