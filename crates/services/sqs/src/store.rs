@@ -7,26 +7,18 @@ use serde::{Deserialize, Serialize};
 
 static MESSAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn counter_uuid_like(id: u64, variant: char) -> String {
-    format!(
-        "{:08x}-{:04x}-4{:03x}-{}{:03x}-{:012x}",
-        (id >> 32) as u32,
-        (id >> 16) as u16,
-        id as u16 & 0x0fff,
-        variant,
-        ((id >> 12) as u16) & 0x0fff,
-        id & 0x0000_ffff_ffff_ffff,
-    )
-}
-
 fn next_message_id() -> String {
     let id = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    counter_uuid_like(id, '8')
+    let mut out = String::with_capacity(20);
+    let _ = write!(&mut out, "m-{id:016x}");
+    out
 }
 
 fn next_receipt_handle() -> String {
     let id = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    counter_uuid_like(id, '9')
+    let mut out = String::with_capacity(21);
+    let _ = write!(&mut out, "rh-{id:016x}");
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +129,7 @@ impl SqsMessage {
     pub fn begin_receive(&mut self, visibility_timeout_secs: u32, now: &DateTime<Utc>) {
         let next = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         self.receipt_handle.clear();
-        let _ = write!(&mut self.receipt_handle, "{}", counter_uuid_like(next, '9'));
+        let _ = write!(&mut self.receipt_handle, "rh-{next:016x}");
         self.receive_count += 1;
         if let Some(v) = self.attributes.get_mut("ApproximateReceiveCount") {
             v.clear();

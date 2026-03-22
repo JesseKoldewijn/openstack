@@ -113,28 +113,41 @@ impl SecretSummary {
     }
 }
 
-/// Borrowed summary of a secret — avoids cloning `String` fields during
-/// `ListSecrets` by holding `&str` references into the `DashMap` read guard.
 #[derive(Serialize)]
-struct SecretSummaryRef<'a> {
-    #[serde(rename = "ARN")]
-    arn: &'a str,
-    #[serde(rename = "Name")]
-    name: &'a str,
-    #[serde(rename = "Description")]
-    description: &'a str,
-    #[serde(rename = "CreatedDate")]
-    created_date: i64,
-    #[serde(rename = "LastChangedDate")]
-    last_changed_date: i64,
-    #[serde(rename = "DeletedDate", skip_serializing_if = "Option::is_none")]
-    deleted_date: Option<i64>,
+struct ListSecretsResponse {
+    #[serde(rename = "SecretList")]
+    secret_list: Vec<SecretSummary>,
 }
 
-#[derive(Serialize)]
-struct ListSecretsResponseRef<'a> {
-    #[serde(rename = "SecretList")]
-    secret_list: Vec<SecretSummaryRef<'a>>,
+fn resolve_secret_name<'a>(store: &'a SecretsManagerStore, secret_id: &'a str) -> Option<&'a str> {
+    if store.secrets.contains_key(secret_id) {
+        Some(secret_id)
+    } else {
+        store
+            .arn_index
+            .get(secret_id)
+            .map(String::as_str)
+            .or_else(|| {
+                store
+                    .secrets
+                    .values()
+                    .find(|s| s.arn == secret_id)
+                    .map(|s| s.name.as_str())
+            })
+    }
+}
+
+fn rebuild_list_cache(store: &mut SecretsManagerStore) {
+    let secret_list = store
+        .secrets
+        .values()
+        .filter(|s| !s.deleted)
+        .map(SecretSummary::from_secret)
+        .collect::<Vec<_>>();
+    let resp = ListSecretsResponse { secret_list };
+    let mut buf = Vec::with_capacity(64 + store.secrets.len() * 200);
+    serde_json::to_writer(&mut buf, &resp).unwrap();
+    store.list_cache = Some(Bytes::from(buf));
 }
 
 // ---------------------------------------------------------------------------
@@ -166,22 +179,6 @@ impl ServiceProvider for SecretsManagerProvider {
                 );
                 let version_id = Uuid::new_v4().to_string();
 
-                {
-                    if let Some(store) = self.store.get(account_id, region)
-                        && store
-                            .secrets
-                            .get(&name)
-                            .map(|s| !s.deleted)
-                            .unwrap_or(false)
-                    {
-                        return Ok(json_error(
-                            "ResourceExistsException",
-                            &format!("Secret {name} already exists"),
-                            400,
-                        ));
-                    }
-                }
-
                 let version = SecretVersion {
                     version_id: version_id.clone(),
                     secret_string: secret_string.clone(),
@@ -201,7 +198,23 @@ impl ServiceProvider for SecretsManagerProvider {
                     tags: Default::default(),
                 };
                 let mut store = self.store.get_or_create(account_id, region);
-                store.secrets.insert(name.clone(), secret);
+                if store
+                    .secrets
+                    .get(&name)
+                    .map(|s| !s.deleted)
+                    .unwrap_or(false)
+                {
+                    return Ok(json_error(
+                        "ResourceExistsException",
+                        &format!("Secret {name} already exists"),
+                        400,
+                    ));
+                }
+                if let Some(old) = store.secrets.insert(name.clone(), secret) {
+                    store.arn_index.remove(&old.arn);
+                }
+                store.arn_index.insert(arn.clone(), name.clone());
+                store.list_cache = None;
                 Ok(json_ok(json!({
                     "ARN": arn,
                     "Name": name,
@@ -227,10 +240,8 @@ impl ServiceProvider for SecretsManagerProvider {
                         400,
                     ));
                 };
-                let secret = store.secrets.get(&secret_id).or_else(|| {
-                    // Try ARN lookup
-                    store.secrets.values().find(|s| s.arn == secret_id)
-                });
+                let secret = resolve_secret_name(&store, &secret_id)
+                    .and_then(|name| store.secrets.get(name));
                 match secret {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -286,19 +297,17 @@ impl ServiceProvider for SecretsManagerProvider {
                     version_stages: vec!["AWSCURRENT".to_string()],
                 };
                 let mut store = self.store.get_or_create(account_id, region);
-                // Resolve by name or ARN to the canonical name key
-                let resolved_name: Option<String> = if store.secrets.contains_key(&secret_id) {
-                    Some(secret_id.clone())
-                } else {
-                    store
-                        .secrets
-                        .values()
-                        .find(|s| s.arn == secret_id)
-                        .map(|s| s.name.clone())
+                let resolved_name = match resolve_secret_name(&store, &secret_id) {
+                    Some(name) => name.to_string(),
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Secret {secret_id} not found"),
+                            400,
+                        ));
+                    }
                 };
-                let secret = resolved_name
-                    .as_ref()
-                    .and_then(|n| store.secrets.get_mut(n));
+                let secret = store.secrets.get_mut(&resolved_name);
                 match secret {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -317,6 +326,7 @@ impl ServiceProvider for SecretsManagerProvider {
                         let name = s.name.clone();
                         s.versions.push(new_version);
                         s.last_changed = Utc::now();
+                        store.list_cache = None;
                         Ok(json_ok(json!({
                             "ARN": arn,
                             "Name": name,
@@ -341,7 +351,17 @@ impl ServiceProvider for SecretsManagerProvider {
                 let description = str_param(ctx, "Description").map(str::to_owned);
                 let secret_string = str_param(ctx, "SecretString").map(str::to_owned);
                 let mut store = self.store.get_or_create(account_id, region);
-                let secret = store.secrets.get_mut(&secret_id);
+                let resolved_name = match resolve_secret_name(&store, &secret_id) {
+                    Some(name) => name.to_string(),
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Secret {secret_id} not found"),
+                            400,
+                        ));
+                    }
+                };
+                let secret = store.secrets.get_mut(&resolved_name);
                 match secret {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -369,6 +389,7 @@ impl ServiceProvider for SecretsManagerProvider {
                         s.last_changed = Utc::now();
                         let arn = s.arn.clone();
                         let name = s.name.clone();
+                        store.list_cache = None;
                         Ok(json_ok(json!({ "ARN": arn, "Name": name })))
                     }
                 }
@@ -392,10 +413,8 @@ impl ServiceProvider for SecretsManagerProvider {
                         400,
                     ));
                 };
-                let secret = store
-                    .secrets
-                    .get(&secret_id)
-                    .or_else(|| store.secrets.values().find(|s| s.arn == secret_id));
+                let secret = resolve_secret_name(&store, &secret_id)
+                    .and_then(|name| store.secrets.get(name));
                 match secret {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -413,30 +432,21 @@ impl ServiceProvider for SecretsManagerProvider {
             }
 
             "ListSecrets" => {
-                // Serialize inside the DashMap read lock using borrowed refs
-                // to avoid cloning String fields. The read lock is shared so
-                // concurrent readers are not blocked.
-                match self.store.get(account_id, region) {
+                if let Some(store) = self.store.get(account_id, region)
+                    && let Some(cached) = store.list_cache.as_ref()
+                {
+                    return Ok(json_ok_bytes(cached.clone()));
+                }
+
+                match self.store.get_mut(account_id, region) {
                     None => Ok(json_ok_bytes(Bytes::from_static(b"{\"SecretList\":[]}"))),
-                    Some(store) => {
-                        let secret_list: Vec<SecretSummaryRef<'_>> = store
-                            .secrets
-                            .values()
-                            .filter(|s| !s.deleted)
-                            .map(|s| SecretSummaryRef {
-                                arn: &s.arn,
-                                name: &s.name,
-                                description: &s.description,
-                                created_date: s.created.timestamp(),
-                                last_changed_date: s.last_changed.timestamp(),
-                                deleted_date: s.deletion_date.map(|d| d.timestamp()),
-                            })
-                            .collect();
-                        let resp = ListSecretsResponseRef { secret_list };
-                        let mut buf = Vec::with_capacity(64 + store.secrets.len() * 200);
-                        serde_json::to_writer(&mut buf, &resp).unwrap();
-                        Ok(json_ok_bytes(Bytes::from(buf)))
-                        // DashMap read lock released here after serialization
+                    Some(mut store) => {
+                        if store.list_cache.is_none() {
+                            rebuild_list_cache(&mut store);
+                        }
+                        Ok(json_ok_bytes(store.list_cache.clone().unwrap_or_else(
+                            || Bytes::from_static(b"{\"SecretList\":[]}"),
+                        )))
                     }
                 }
             }
@@ -458,7 +468,17 @@ impl ServiceProvider for SecretsManagerProvider {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let mut store = self.store.get_or_create(account_id, region);
-                let secret = store.secrets.get_mut(&secret_id);
+                let resolved_name = match resolve_secret_name(&store, &secret_id) {
+                    Some(name) => name.to_string(),
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Secret {secret_id} not found"),
+                            400,
+                        ));
+                    }
+                };
+                let secret = store.secrets.get_mut(&resolved_name);
                 match secret {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -469,12 +489,15 @@ impl ServiceProvider for SecretsManagerProvider {
                         let arn = s.arn.clone();
                         let name = s.name.clone();
                         if force_delete {
-                            store.secrets.remove(&secret_id);
+                            store.secrets.remove(&resolved_name);
+                            store.arn_index.remove(&arn);
+                            store.list_cache = None;
                             Ok(json_ok(json!({ "ARN": arn, "Name": name })))
                         } else {
                             let deletion_date = Utc::now() + chrono::Duration::days(30);
                             s.deleted = true;
                             s.deletion_date = Some(deletion_date);
+                            store.list_cache = None;
                             Ok(json_ok(json!({
                                 "ARN": arn,
                                 "Name": name,
@@ -497,7 +520,17 @@ impl ServiceProvider for SecretsManagerProvider {
                     }
                 };
                 let mut store = self.store.get_or_create(account_id, region);
-                match store.secrets.get_mut(&secret_id) {
+                let resolved_name = match resolve_secret_name(&store, &secret_id) {
+                    Some(name) => name.to_string(),
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Secret {secret_id} not found"),
+                            400,
+                        ));
+                    }
+                };
+                match store.secrets.get_mut(&resolved_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         &format!("Secret {secret_id} not found"),
@@ -508,6 +541,7 @@ impl ServiceProvider for SecretsManagerProvider {
                         s.deletion_date = None;
                         let arn = s.arn.clone();
                         let name = s.name.clone();
+                        store.list_cache = None;
                         Ok(json_ok(json!({ "ARN": arn, "Name": name })))
                     }
                 }
