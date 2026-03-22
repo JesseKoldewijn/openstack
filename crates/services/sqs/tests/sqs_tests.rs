@@ -55,6 +55,49 @@ fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> Str
         .to_string()
 }
 
+fn extract_tag_value(xml: &str, tag: &str) -> Option<String> {
+    let start_tag = format!("<{tag}>");
+    let end_tag = format!("</{tag}>");
+    let start = xml.find(&start_tag)? + start_tag.len();
+    let end = xml[start..].find(&end_tag)? + start;
+    Some(xml[start..end].to_string())
+}
+
+fn extract_attribute_value(xml: &str, attr_name: &str) -> Option<String> {
+    let needle = format!("<Attribute><Name>{attr_name}</Name><Value>");
+    let start = xml.find(&needle)? + needle.len();
+    let end = xml[start..].find("</Value>")? + start;
+    Some(xml[start..end].to_string())
+}
+
+fn is_uuid_like_message_id(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+
+    let bytes = s.as_bytes();
+    for &idx in &[8usize, 13, 18, 23] {
+        if bytes[idx] != b'-' {
+            return false;
+        }
+    }
+
+    if bytes[14] != b'4' || bytes[19] != b'8' {
+        return false;
+    }
+
+    for (i, b) in bytes.iter().enumerate() {
+        if [8usize, 13, 18, 23].contains(&i) {
+            continue;
+        }
+        if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+
+    true
+}
+
 // Create a fresh provider and a queue, returning (provider, queue_url)
 async fn setup_queue(name: &str) -> (SqsProvider, String) {
     let provider = SqsProvider::new();
@@ -271,6 +314,252 @@ async fn test_receive_empty_queue() {
     let xml = body_str(&resp);
     // No Message elements
     assert!(!xml.contains("<Message>"));
+}
+
+#[tokio::test]
+async fn test_receive_message_with_zero_visibility_timeout() {
+    let (provider, url) = setup_queue("zero-vt-queue").await;
+
+    let send = form_body(&[
+        ("Action", "SendMessage"),
+        ("QueueUrl", &url),
+        ("MessageBody", "zero-vt-body"),
+    ]);
+    provider.dispatch(&make_ctx(&send)).await.unwrap();
+
+    let receive = form_body(&[
+        ("Action", "ReceiveMessage"),
+        ("QueueUrl", &url),
+        ("MaxNumberOfMessages", "1"),
+        ("VisibilityTimeout", "0"),
+    ]);
+
+    let first = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    assert!(body_str(&first).contains("zero-vt-body"));
+
+    let second = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    assert!(body_str(&second).contains("zero-vt-body"));
+}
+
+#[tokio::test]
+async fn test_receive_message_increments_receive_count() {
+    let (provider, url) = setup_queue("receive-count-queue").await;
+
+    let send = form_body(&[
+        ("Action", "SendMessage"),
+        ("QueueUrl", &url),
+        ("MessageBody", "count-body"),
+    ]);
+    provider.dispatch(&make_ctx(&send)).await.unwrap();
+
+    let receive = form_body(&[
+        ("Action", "ReceiveMessage"),
+        ("QueueUrl", &url),
+        ("MaxNumberOfMessages", "1"),
+        ("VisibilityTimeout", "0"),
+    ]);
+
+    let first = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    let first_xml = body_str(&first);
+    assert_eq!(
+        extract_attribute_value(&first_xml, "ApproximateReceiveCount").as_deref(),
+        Some("1")
+    );
+
+    let second = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    let second_xml = body_str(&second);
+    assert_eq!(
+        extract_attribute_value(&second_xml, "ApproximateReceiveCount").as_deref(),
+        Some("2")
+    );
+}
+
+#[tokio::test]
+async fn test_receive_message_receipt_handle_changes_each_receive() {
+    let (provider, url) = setup_queue("receipt-handle-queue").await;
+
+    let send = form_body(&[
+        ("Action", "SendMessage"),
+        ("QueueUrl", &url),
+        ("MessageBody", "handle-body"),
+    ]);
+    provider.dispatch(&make_ctx(&send)).await.unwrap();
+
+    let receive = form_body(&[
+        ("Action", "ReceiveMessage"),
+        ("QueueUrl", &url),
+        ("MaxNumberOfMessages", "1"),
+        ("VisibilityTimeout", "0"),
+    ]);
+
+    let first = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    let first_xml = body_str(&first);
+    let first_rh = extract_tag_value(&first_xml, "ReceiptHandle").unwrap();
+
+    let second = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    let second_xml = body_str(&second);
+    let second_rh = extract_tag_value(&second_xml, "ReceiptHandle").unwrap();
+
+    assert_ne!(first_rh, second_rh);
+}
+
+#[tokio::test]
+async fn test_receive_multiple_messages_max_cap() {
+    let (provider, url) = setup_queue("max-cap-queue").await;
+
+    for i in 0..15 {
+        let send = form_body(&[
+            ("Action", "SendMessage"),
+            ("QueueUrl", &url),
+            ("MessageBody", &format!("bulk-{i}")),
+        ]);
+        provider.dispatch(&make_ctx(&send)).await.unwrap();
+    }
+
+    let receive = form_body(&[
+        ("Action", "ReceiveMessage"),
+        ("QueueUrl", &url),
+        ("MaxNumberOfMessages", "10"),
+        ("VisibilityTimeout", "300"),
+    ]);
+
+    let first = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    let first_xml = body_str(&first);
+    assert_eq!(first_xml.matches("<Message>").count(), 10);
+
+    let second = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    let second_xml = body_str(&second);
+    assert_eq!(second_xml.matches("<Message>").count(), 5);
+}
+
+#[tokio::test]
+async fn test_receive_skips_invisible_messages() {
+    let (provider, url) = setup_queue("skip-invisible-queue").await;
+
+    for body in ["alpha", "beta", "gamma"] {
+        let send = form_body(&[
+            ("Action", "SendMessage"),
+            ("QueueUrl", &url),
+            ("MessageBody", body),
+        ]);
+        provider.dispatch(&make_ctx(&send)).await.unwrap();
+    }
+
+    let first_receive = form_body(&[
+        ("Action", "ReceiveMessage"),
+        ("QueueUrl", &url),
+        ("MaxNumberOfMessages", "1"),
+        ("VisibilityTimeout", "300"),
+    ]);
+    let first = provider.dispatch(&make_ctx(&first_receive)).await.unwrap();
+    let first_xml = body_str(&first);
+    let first_body = extract_tag_value(&first_xml, "Body").unwrap();
+
+    let second_receive = form_body(&[
+        ("Action", "ReceiveMessage"),
+        ("QueueUrl", &url),
+        ("MaxNumberOfMessages", "10"),
+        ("VisibilityTimeout", "300"),
+    ]);
+    let second = provider.dispatch(&make_ctx(&second_receive)).await.unwrap();
+    let second_xml = body_str(&second);
+
+    assert!(!second_xml.contains(&first_body));
+    assert_eq!(second_xml.matches("<Message>").count(), 2);
+}
+
+#[tokio::test]
+async fn test_message_id_is_uuid_like() {
+    let (provider, url) = setup_queue("uuid-like-id-queue").await;
+
+    let send = form_body(&[
+        ("Action", "SendMessage"),
+        ("QueueUrl", &url),
+        ("MessageBody", "uuid-like-body"),
+    ]);
+    let resp = provider.dispatch(&make_ctx(&send)).await.unwrap();
+    let xml = body_str(&resp);
+    let message_id = extract_tag_value(&xml, "MessageId").unwrap();
+
+    assert!(is_uuid_like_message_id(&message_id));
+}
+
+#[tokio::test]
+async fn test_md5_of_body_is_correct() {
+    let (provider, url) = setup_queue("md5-queue").await;
+
+    let send = form_body(&[
+        ("Action", "SendMessage"),
+        ("QueueUrl", &url),
+        ("MessageBody", "abc"),
+    ]);
+    let resp = provider.dispatch(&make_ctx(&send)).await.unwrap();
+    let xml = body_str(&resp);
+    let md5 = extract_tag_value(&xml, "MD5OfMessageBody").unwrap();
+
+    assert_eq!(md5, "900150983cd24fb0d6963f7d28e17f72");
+}
+
+#[tokio::test]
+async fn test_system_attributes_present_on_receive() {
+    let (provider, url) = setup_queue("system-attrs-queue").await;
+
+    let send = form_body(&[
+        ("Action", "SendMessage"),
+        ("QueueUrl", &url),
+        ("MessageBody", "attrs-body"),
+    ]);
+    provider.dispatch(&make_ctx(&send)).await.unwrap();
+
+    let receive = form_body(&[
+        ("Action", "ReceiveMessage"),
+        ("QueueUrl", &url),
+        ("MaxNumberOfMessages", "1"),
+    ]);
+    let resp = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    let xml = body_str(&resp);
+
+    assert!(xml.contains("<Name>ApproximateFirstReceiveTimestamp</Name>"));
+    assert!(xml.contains("<Name>ApproximateReceiveCount</Name>"));
+    assert!(xml.contains("<Name>SentTimestamp</Name>"));
+}
+
+#[tokio::test]
+async fn test_receive_with_redrive_policy_removes_poison_messages() {
+    let provider = SqsProvider::new();
+    let redrive =
+        r#"{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:000000000000:dlq","maxReceiveCount":2}"#;
+    let create = form_body(&[
+        ("Action", "CreateQueue"),
+        ("QueueName", "redrive-queue"),
+        ("Attribute.1.Name", "RedrivePolicy"),
+        ("Attribute.1.Value", redrive),
+    ]);
+    let create_resp = provider.dispatch(&make_ctx(&create)).await.unwrap();
+    let url = extract_tag_value(&body_str(&create_resp), "QueueUrl").unwrap();
+
+    let send = form_body(&[
+        ("Action", "SendMessage"),
+        ("QueueUrl", &url),
+        ("MessageBody", "poison"),
+    ]);
+    provider.dispatch(&make_ctx(&send)).await.unwrap();
+
+    let receive = form_body(&[
+        ("Action", "ReceiveMessage"),
+        ("QueueUrl", &url),
+        ("MaxNumberOfMessages", "1"),
+        ("VisibilityTimeout", "0"),
+    ]);
+
+    let first = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    assert!(body_str(&first).contains("poison"));
+
+    let second = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    assert!(body_str(&second).contains("poison"));
+
+    let third = provider.dispatch(&make_ctx(&receive)).await.unwrap();
+    assert!(!body_str(&third).contains("poison"));
 }
 
 #[tokio::test]

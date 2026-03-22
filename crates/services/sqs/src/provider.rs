@@ -686,39 +686,13 @@ fn handle_receive_message(
     };
 
     let messages = q.receive_messages(max, vt);
-    let should_redrive = if let Some(rp) = q.redrive_policy.as_ref() {
-        let max_receive_count = rp.max_receive_count;
-        q.messages
-            .iter()
-            .any(|m| m.receive_count >= max_receive_count)
-    } else {
-        false
-    };
+    let redrive_max = q.redrive_policy.as_ref().map(|rp| rp.max_receive_count);
 
     let mut inner = String::with_capacity(messages.len() * 512);
     for idx in messages {
         let Some(msg) = q.messages.get(idx) else {
             continue;
         };
-
-        let mut attrs_xml = String::with_capacity(msg.attributes.len() * 64);
-        for (k, v) in &msg.attributes {
-            attrs_xml.push_str("<Attribute><Name>");
-            push_xml_escaped(&mut attrs_xml, k);
-            attrs_xml.push_str("</Name><Value>");
-            push_xml_escaped(&mut attrs_xml, v);
-            attrs_xml.push_str("</Value></Attribute>");
-        }
-        let mut msg_attrs_xml = String::with_capacity(msg.message_attributes.len() * 128);
-        for (k, v) in &msg.message_attributes {
-            msg_attrs_xml.push_str("<MessageAttribute><Name>");
-            push_xml_escaped(&mut msg_attrs_xml, k);
-            msg_attrs_xml.push_str("</Name><Value><DataType>");
-            push_xml_escaped(&mut msg_attrs_xml, &v.data_type);
-            msg_attrs_xml.push_str("</DataType><StringValue>");
-            push_xml_escaped(&mut msg_attrs_xml, v.string_value.as_deref().unwrap_or(""));
-            msg_attrs_xml.push_str("</StringValue></Value></MessageAttribute>");
-        }
 
         inner.push_str("<Message><MessageId>");
         inner.push_str(&msg.message_id);
@@ -729,12 +703,30 @@ fn handle_receive_message(
         inner.push_str("</MD5OfBody><Body>");
         push_xml_escaped(&mut inner, &msg.body);
         inner.push_str("</Body>");
-        inner.push_str(&attrs_xml);
-        inner.push_str(&msg_attrs_xml);
+        for (k, v) in &msg.attributes {
+            inner.push_str("<Attribute><Name>");
+            push_xml_escaped(&mut inner, k);
+            inner.push_str("</Name><Value>");
+            push_xml_escaped(&mut inner, v);
+            inner.push_str("</Value></Attribute>");
+        }
+        for (k, v) in &msg.message_attributes {
+            inner.push_str("<MessageAttribute><Name>");
+            push_xml_escaped(&mut inner, k);
+            inner.push_str("</Name><Value><DataType>");
+            push_xml_escaped(&mut inner, &v.data_type);
+            inner.push_str("</DataType><StringValue>");
+            push_xml_escaped(&mut inner, v.string_value.as_deref().unwrap_or(""));
+            inner.push_str("</StringValue></Value></MessageAttribute>");
+        }
         inner.push_str("</Message>");
     }
 
-    if should_redrive {
+    if let Some(max_receive_count) = redrive_max
+        && q.messages
+            .iter()
+            .any(|m| m.receive_count >= max_receive_count)
+    {
         q.remove_dlq_candidates();
     }
 

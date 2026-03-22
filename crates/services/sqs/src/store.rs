@@ -91,13 +91,14 @@ impl SqsMessage {
         let md5 = md5_hex(body.as_bytes());
         let message_id = next_message_id();
         let receipt_handle = next_receipt_handle();
+        let sent_at = Utc::now();
         let visible_after = if delay_seconds > 0 {
-            Some(Utc::now() + chrono::Duration::seconds(delay_seconds as i64))
+            Some(sent_at + chrono::Duration::seconds(delay_seconds as i64))
         } else {
             None
         };
 
-        let mut attributes = HashMap::new();
+        let mut attributes = HashMap::with_capacity(3);
         attributes.insert(
             "ApproximateFirstReceiveTimestamp".to_string(),
             "0".to_string(),
@@ -105,7 +106,7 @@ impl SqsMessage {
         attributes.insert("ApproximateReceiveCount".to_string(), "0".to_string());
         attributes.insert(
             "SentTimestamp".to_string(),
-            Utc::now().timestamp_millis().to_string(),
+            sent_at.timestamp_millis().to_string(),
         );
 
         Self {
@@ -115,7 +116,7 @@ impl SqsMessage {
             md5_of_body: md5,
             attributes,
             message_attributes,
-            sent_at: Utc::now(),
+            sent_at,
             visible_after,
             receive_count: 0,
             delay_seconds,
@@ -154,7 +155,7 @@ impl SqsMessage {
         }
         if visibility_timeout_secs > 0 {
             self.visible_after =
-                Some(now.to_owned() + chrono::Duration::seconds(visibility_timeout_secs as i64));
+                Some(*now + chrono::Duration::seconds(visibility_timeout_secs as i64));
         } else {
             self.visible_after = None;
         }
@@ -284,9 +285,24 @@ impl SqsQueue {
         max_number: usize,
         visibility_timeout: Option<u32>,
     ) -> Vec<usize> {
+        if max_number == 0 || self.messages.is_empty() {
+            return Vec::new();
+        }
+
         let vt = visibility_timeout.unwrap_or(self.visibility_timeout);
-        let mut received = Vec::with_capacity(max_number);
         let now = Utc::now();
+
+        if max_number == 1 {
+            for (idx, msg) in self.messages.iter_mut().enumerate() {
+                if msg.is_visible_at(&now) {
+                    msg.begin_receive(vt, &now);
+                    return vec![idx];
+                }
+            }
+            return Vec::new();
+        }
+
+        let mut received = Vec::with_capacity(max_number);
 
         for (idx, msg) in self.messages.iter_mut().enumerate() {
             if received.len() >= max_number {
