@@ -707,6 +707,36 @@ fn test_store_versioning() {
 }
 
 #[test]
+fn test_store_non_versioned_overwrite_keeps_single_version() {
+    let mut store = S3Store::new();
+    store.create_bucket("bucket", "us-east-1");
+
+    store.put_object(
+        "bucket",
+        "k",
+        ObjectDataRef::Inline(Bytes::from_static(b"v1")),
+        "text/plain",
+        HashMap::new(),
+    );
+    store.put_object(
+        "bucket",
+        "k",
+        ObjectDataRef::Inline(Bytes::from_static(b"v2")),
+        "text/plain",
+        HashMap::new(),
+    );
+
+    let objs = store.list_objects("bucket");
+    let obj = objs.into_iter().find(|o| o.key == "k").unwrap();
+    assert_eq!(obj.versions.len(), 1);
+    assert_eq!(obj.versions[0].version_id, "null");
+    assert_eq!(
+        obj.versions[0].data,
+        ObjectDataRef::Inline(Bytes::from_static(b"v2"))
+    );
+}
+
+#[test]
 fn test_store_multipart() {
     let mut store = S3Store::new();
     store.create_bucket("bucket", "us-east-1");
@@ -790,7 +820,7 @@ async fn test_put_object_via_spooled_body() {
 }
 
 /// Task 4.6 — Parameterized test: small (inline, 100 B) and large (disk-spilled,
-/// 2 MiB, above 1 MiB threshold) bodies both produce correct ETags and content.
+/// 300 KiB, above 256 KiB threshold) bodies both produce correct ETags and content.
 #[tokio::test]
 async fn test_put_object_spooled_inline_and_disk() {
     let provider = new_provider().await;
@@ -799,7 +829,7 @@ async fn test_put_object_spooled_inline_and_disk() {
     let ctx = make_ctx("PUT", "/threshold-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
 
-    // Inline case: 100 bytes — well below the 1 MiB threshold
+    // Inline case: 100 bytes — well below the 256 KiB threshold
     let inline_data: Vec<u8> = (0u8..100).collect();
     let inline_etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&inline_data)));
 
@@ -825,8 +855,8 @@ async fn test_put_object_spooled_inline_and_disk() {
     let got = resp.body.into_bytes().await.unwrap();
     assert_eq!(&got[..], &inline_data[..]);
 
-    // Disk-spilled case: 2 MiB — above the 1 MiB provider threshold
-    let large_data: Vec<u8> = (0u8..255).cycle().take(2 * 1024 * 1024).collect();
+    // Disk-spilled case: 300 KiB — above the 256 KiB provider threshold
+    let large_data: Vec<u8> = (0u8..255).cycle().take(300 * 1024).collect();
     let large_etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&large_data)));
 
     // Use threshold=0 so SpooledBody spills immediately to disk

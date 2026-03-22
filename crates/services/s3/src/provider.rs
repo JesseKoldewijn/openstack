@@ -25,7 +25,7 @@ use crate::store::{ObjectDataRef, S3Store};
 ///
 /// Objects above the threshold are still written to disk and streamed
 /// from disk on reads, which is appropriate for large blobs.
-const INLINE_OBJECT_THRESHOLD: u64 = 1024 * 1024; // 1 MiB
+const INLINE_OBJECT_THRESHOLD: u64 = 256 * 1024; // 256 KiB
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
@@ -467,24 +467,39 @@ async fn handle_put_object_async(
     };
 
     // Build version and store in S3Store (short-lived guard)
-    let response_headers = {
-        let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        let version = crate::store::ObjectVersion {
-            version_id: version_id.clone(),
-            last_modified: chrono::Utc::now(),
-            etag: etag.clone(),
-            content_type,
-            content_encoding: None,
-            content_disposition: None,
-            cache_control: None,
-            size,
-            metadata,
-            acl: "private".to_string(),
-            data: object_data,
-            delete_marker: false,
-        };
-        store.put_object_version(&bucket, &key, version);
+    let version = crate::store::ObjectVersion {
+        version_id: version_id.clone(),
+        last_modified: chrono::Utc::now(),
+        etag: etag.clone(),
+        content_type,
+        content_encoding: None,
+        content_disposition: None,
+        cache_control: None,
+        size,
+        metadata,
+        acl: "private".to_string(),
+        data: object_data,
+        delete_marker: false,
+    };
 
+    let replaced_file_path = {
+        let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+        let prev = store.put_object_version(&bucket, &key, version);
+        if version_id == "null" {
+            prev.and_then(|old| match old.data {
+                ObjectDataRef::FileRef(path) => Some(path),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    };
+
+    if let Some(path) = replaced_file_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    let response_headers = {
         let mut headers = vec![("ETag".to_string(), etag)];
         if version_id != "null" {
             headers.push(("x-amz-version-id".to_string(), version_id));
@@ -953,16 +968,28 @@ async fn handle_copy_object_async(
         delete_marker: false,
     };
 
-    let (etag, last_modified) = {
+    let (etag, last_modified, replaced_file_path) = {
         let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        store.put_object_version(&dest_bucket, &dest_key, version);
+        let prev = store.put_object_version(&dest_bucket, &dest_key, version);
+        let replaced = if dest_version_id == "null" {
+            prev.and_then(|old| match old.data {
+                ObjectDataRef::FileRef(path) => Some(path),
+                _ => None,
+            })
+        } else {
+            None
+        };
 
         let v = store.get_object(&dest_bucket, &dest_key);
         match v {
-            Some(v) => (v.etag.clone(), v.last_modified),
-            None => (src_etag, src_last_modified),
+            Some(v) => (v.etag.clone(), v.last_modified, replaced),
+            None => (src_etag, src_last_modified, replaced),
         }
     };
+
+    if let Some(path) = replaced_file_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 
     xml_ok(&format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -1542,9 +1569,21 @@ async fn handle_complete_multipart_upload_async(
         delete_marker: false,
     };
 
-    {
+    let replaced_file_path = {
         let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
-        store.complete_multipart_upload_with_version(&upload_id, version);
+        let prev = store.complete_multipart_upload_with_version(&upload_id, version);
+        if version_id == "null" {
+            prev.and_then(|old| match old.data {
+                ObjectDataRef::FileRef(path) => Some(path),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    };
+
+    if let Some(path) = replaced_file_path {
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     let location = format!("http://localhost:4566/{bucket}/{key}");

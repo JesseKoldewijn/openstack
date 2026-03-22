@@ -400,12 +400,18 @@ impl S3Store {
 
         if let Some(obj) = objects.get_mut(key) {
             let prev = obj.versions.first().cloned();
-            obj.versions.insert(0, version.clone());
-            // Keep at most 100 non-current versions to avoid unbounded growth
-            obj.versions.truncate(100);
+            if version.version_id == "null" {
+                // Non-versioned bucket: overwrite current object in place.
+                obj.versions.clear();
+                obj.versions.push(version);
+            } else {
+                obj.versions.insert(0, version);
+                // Keep at most 100 non-current versions to avoid unbounded growth
+                obj.versions.truncate(100);
+            }
             prev
         } else {
-            objects.insert(key.to_string(), S3Object::new(key, version.clone()));
+            objects.insert(key.to_string(), S3Object::new(key, version));
             None
         }
     }
@@ -423,8 +429,14 @@ impl S3Store {
         let objects = self.objects.entry(bucket.to_string()).or_default();
         if let Some(obj) = objects.get_mut(key) {
             let prev = obj.versions.first().cloned();
-            obj.versions.insert(0, version);
-            obj.versions.truncate(100);
+            if version.version_id == "null" {
+                // Non-versioned bucket: overwrite current object in place.
+                obj.versions.clear();
+                obj.versions.push(version);
+            } else {
+                obj.versions.insert(0, version);
+                obj.versions.truncate(100);
+            }
             prev
         } else {
             objects.insert(key.to_string(), S3Object::new(key, version));
@@ -631,7 +643,12 @@ impl S3Store {
 
         let objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
-            obj.versions.insert(0, version.clone());
+            if version.version_id == "null" {
+                obj.versions.clear();
+                obj.versions.push(version.clone());
+            } else {
+                obj.versions.insert(0, version.clone());
+            }
         } else {
             objects.insert(
                 upload.key.clone(),
@@ -655,7 +672,12 @@ impl S3Store {
 
         let objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
-            obj.versions.insert(0, version.clone());
+            if version.version_id == "null" {
+                obj.versions.clear();
+                obj.versions.push(version.clone());
+            } else {
+                obj.versions.insert(0, version.clone());
+            }
         } else {
             objects.insert(
                 upload.key.clone(),

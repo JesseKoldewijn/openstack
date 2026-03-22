@@ -500,6 +500,20 @@ jobs:
         with:
           gate-json: benchmark-gate.json
           post-pr-comment: ${{ github.event_name == 'pull_request' }}
+      - name: Enforce benchmark gate verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f benchmark-gate.json ]; then
+            echo "benchmark-gate.json missing"
+            exit 1
+          fi
+          verdict="$(jq -r '.verdict // "FAIL"' benchmark-gate.json)"
+          echo "Benchmark gate verdict: ${verdict}"
+          if [ "${verdict}" != "PASS" ]; then
+            echo "Benchmark gate failed"
+            exit 1
+          fi
       - name: Upload benchmark report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
