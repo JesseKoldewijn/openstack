@@ -378,7 +378,7 @@ fn handle_delete_queue(store: &mut SqsStore, params: &HashMap<String, String>) -
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
     let name = queue_name_from_url(url);
-    if !store.delete_queue(&name) {
+    if !store.delete_queue(name) {
         return sqs_error(
             "AWS.SimpleQueueService.NonExistentQueue",
             "Queue does not exist",
@@ -404,7 +404,7 @@ fn handle_get_queue_url(store: &SqsStore, params: &HashMap<String, String>) -> D
         Some(n) => n.clone(),
         None => return sqs_error("MissingParameter", "QueueName is required"),
     };
-    match store.get_queue_by_name(&name) {
+    match store.get_queue_by_name(name.as_str()) {
         None => sqs_error(
             "AWS.SimpleQueueService.NonExistentQueue",
             "Queue does not exist",
@@ -426,7 +426,7 @@ fn handle_get_queue_attributes(
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
     let name = queue_name_from_url(url);
-    let q = match store.get_queue_by_name(&name) {
+    let q = match store.get_queue_by_name(name) {
         None => {
             return sqs_error(
                 "AWS.SimpleQueueService.NonExistentQueue",
@@ -509,7 +509,7 @@ fn handle_set_queue_attributes(
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
     let name = queue_name_from_url(url);
-    let q = match store.get_queue_by_name_mut(&name) {
+    let q = match store.get_queue_by_name_mut(name) {
         None => {
             return sqs_error(
                 "AWS.SimpleQueueService.NonExistentQueue",
@@ -529,7 +529,7 @@ fn handle_purge_queue(store: &mut SqsStore, params: &HashMap<String, String>) ->
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
     let name = queue_name_from_url(url);
-    match store.get_queue_by_name_mut(&name) {
+    match store.get_queue_by_name_mut(name) {
         None => sqs_error(
             "AWS.SimpleQueueService.NonExistentQueue",
             "Queue does not exist",
@@ -556,7 +556,7 @@ fn handle_send_message(store: &mut SqsStore, params: &HashMap<String, String>) -
     let dedup_id = params.get("MessageDeduplicationId").cloned();
     let msg_attrs = extract_message_attributes(params);
 
-    let q = match store.get_queue_by_name_mut(&name) {
+    let q = match store.get_queue_by_name_mut(name) {
         None => {
             return sqs_error(
                 "AWS.SimpleQueueService.NonExistentQueue",
@@ -620,7 +620,7 @@ fn handle_send_message_batch(
                     ))
                     .cloned();
 
-                let q = match store.get_queue_by_name_mut(&name) {
+                let q = match store.get_queue_by_name_mut(name) {
                     None => break,
                     Some(q) => q,
                 };
@@ -672,7 +672,7 @@ fn handle_receive_message(
     let vt: Option<u32> = params.get("VisibilityTimeout").and_then(|v| v.parse().ok());
 
     let name = queue_name_from_url(url);
-    let q = match store.get_queue_by_name_mut(&name) {
+    let q = match store.get_queue_by_name_mut(name) {
         None => {
             return sqs_error(
                 "AWS.SimpleQueueService.NonExistentQueue",
@@ -751,7 +751,7 @@ fn handle_delete_message(
         None => return sqs_error("MissingParameter", "ReceiptHandle is required"),
     };
     let name = queue_name_from_url(url);
-    if let Some(q) = store.get_queue_by_name_mut(&name) {
+    if let Some(q) = store.get_queue_by_name_mut(name) {
         q.delete_message(rh);
     }
     xml_no_result("DeleteMessage", &new_request_id())
@@ -774,7 +774,7 @@ fn handle_delete_message_batch(
         let rh_key = format!("DeleteMessageBatchRequestEntry.{i}.ReceiptHandle");
         match (params.get(&id_key), params.get(&rh_key)) {
             (Some(id), Some(rh)) => {
-                if let Some(q) = store.get_queue_by_name_mut(&name) {
+                if let Some(q) = store.get_queue_by_name_mut(name) {
                     q.delete_message(rh);
                 }
                 inner.push_str(&format!(
@@ -807,7 +807,7 @@ fn handle_change_message_visibility(
         .unwrap_or(30);
 
     let name = queue_name_from_url(url);
-    if let Some(q) = store.get_queue_by_name_mut(&name) {
+    if let Some(q) = store.get_queue_by_name_mut(name) {
         q.change_visibility(rh, vt);
     }
     xml_no_result("ChangeMessageVisibility", &new_request_id())
@@ -835,7 +835,7 @@ fn handle_change_message_visibility_batch(
                     .get(&vt_key)
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(30);
-                if let Some(q) = store.get_queue_by_name_mut(&name) {
+                if let Some(q) = store.get_queue_by_name_mut(name) {
                     q.change_visibility(rh, vt);
                 }
                 inner.push_str(&format!(
@@ -906,7 +906,7 @@ impl ServiceProvider for SqsProvider {
                             400,
                         ));
                     };
-                    match store.get_queue_by_name(&name) {
+                    match store.get_queue_by_name(name.as_str()) {
                         Some(q) => {
                             sqs_json_response(serde_json::json!({ "QueueUrl": q.url.clone() }))
                         }
@@ -976,7 +976,7 @@ impl ServiceProvider for SqsProvider {
                         let message_group_id = params.get("MessageGroupId").cloned();
                         let dedup_id = params.get("MessageDeduplicationId").cloned();
                         let msg_attrs = extract_message_attributes(&params);
-                        let q = match store.get_queue_by_name_mut(&name) {
+                        let q = match store.get_queue_by_name_mut(name) {
                             Some(q) => q,
                             None => {
                                 return Ok(sqs_json_error(
@@ -1033,7 +1033,7 @@ impl ServiceProvider for SqsProvider {
                         let vt: Option<u32> =
                             params.get("VisibilityTimeout").and_then(|v| v.parse().ok());
                         let name = queue_name_from_url(url);
-                        let q = match store.get_queue_by_name_mut(&name) {
+                        let q = match store.get_queue_by_name_mut(name) {
                             Some(q) => q,
                             None => {
                                 return Ok(sqs_json_error(
@@ -1078,7 +1078,7 @@ impl ServiceProvider for SqsProvider {
                             }
                         };
                         let name = queue_name_from_url(url);
-                        if store.delete_queue(&name) {
+                        if store.delete_queue(name) {
                             sqs_json_response(serde_json::json!({}))
                         } else {
                             sqs_json_error(
