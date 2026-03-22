@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,6 +57,54 @@ impl<R: std::io::Read> std::io::Read for Md5Read<R> {
             self.hasher.update(&buf[..n]);
         }
         Ok(n)
+    }
+}
+
+enum MultipartPartReader {
+    Inline(std::io::Cursor<Bytes>),
+    File(std::fs::File),
+}
+
+impl std::io::Read for MultipartPartReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Inline(reader) => std::io::Read::read(reader, buf),
+            Self::File(reader) => std::io::Read::read(reader, buf),
+        }
+    }
+}
+
+struct MultipartRead {
+    readers: VecDeque<MultipartPartReader>,
+}
+
+impl MultipartRead {
+    fn from_data_refs(data_refs: Vec<ObjectDataRef>) -> io::Result<Self> {
+        let mut readers = VecDeque::with_capacity(data_refs.len());
+        for data_ref in data_refs {
+            match data_ref {
+                ObjectDataRef::Inline(bytes) => {
+                    readers.push_back(MultipartPartReader::Inline(std::io::Cursor::new(bytes)));
+                }
+                ObjectDataRef::FileRef(path) => {
+                    readers.push_back(MultipartPartReader::File(std::fs::File::open(path)?));
+                }
+            }
+        }
+        Ok(Self { readers })
+    }
+}
+
+impl std::io::Read for MultipartRead {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while let Some(reader) = self.readers.front_mut() {
+            let n = std::io::Read::read(reader, buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            self.readers.pop_front();
+        }
+        Ok(0)
     }
 }
 
@@ -491,7 +540,7 @@ async fn handle_put_object_async(
         let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
         let prev = store.put_object_version(&bucket, &key, version);
         if version_id == "null" {
-            prev.and_then(|old| match old.data {
+            prev.and_then(|old| match old {
                 ObjectDataRef::FileRef(path) => {
                     if new_file_path.as_deref() == Some(path.as_path()) {
                         None
@@ -617,9 +666,8 @@ async fn handle_get_object_async(
                     } else {
                         match ObjectFileStore::read_object_at(&path).await {
                             Ok(file) => {
-                                // Stream directly through ReaderStream. Use a larger
-                                // chunk size to reduce syscall churn on large downloads.
-                                const READ_BUF: usize = 2 * 1024 * 1024;
+                                // Stream directly through ReaderStream.
+                                const READ_BUF: usize = 512 * 1024;
                                 let stream = ReaderStream::with_capacity(file, READ_BUF);
                                 ResponseBody::Streaming {
                                     stream: Box::pin(stream),
@@ -988,7 +1036,7 @@ async fn handle_copy_object_async(
         let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
         let prev = store.put_object_version(&dest_bucket, &dest_key, version);
         let replaced = if dest_version_id == "null" {
-            prev.and_then(|old| match old.data {
+            prev.and_then(|old| match old {
                 ObjectDataRef::FileRef(path) => {
                     if new_file_path.as_deref() == Some(path.as_path()) {
                         None
@@ -1076,7 +1124,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     let mut content_keys: Vec<String> = Vec::new();
 
     if delimiter.is_empty() {
-        content_keys = all_keys.clone();
+        content_keys = std::mem::take(&mut all_keys);
     } else {
         for key in &all_keys {
             let suffix = &key[prefix.len()..];
@@ -1194,7 +1242,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     let mut common_prefixes: Vec<String> = Vec::new();
     let mut content_keys: Vec<String> = Vec::new();
     if delimiter.is_empty() {
-        content_keys = all_keys.clone();
+        content_keys = std::mem::take(&mut all_keys);
     } else {
         for key in &all_keys {
             let suffix = &key[prefix.len()..];
@@ -1515,65 +1563,98 @@ async fn handle_complete_multipart_upload_async(
         "null".to_string()
     };
 
-    // Concatenate parts to final file on disk (async I/O)
-    // Read each part, compute combined MD5, write to final location
-    let mut combined = Vec::new();
-    for (_pn, data_ref, _size) in &part_data {
-        match data_ref {
-            ObjectDataRef::Inline(bytes) => {
-                combined.extend_from_slice(bytes);
-            }
-            ObjectDataRef::FileRef(path) => match tokio::fs::read(path).await {
-                Ok(bytes) => combined.extend_from_slice(&bytes),
-                Err(e) => {
-                    warn!(error = %e, path = %path.display(), "Failed to read part file");
-                    return s3_error("InternalError", "Failed to read part", 500);
+    let estimated_size: u64 = part_data.iter().map(|(_, _, size)| *size).sum();
+
+    // For small assembled objects, keep the existing inline path.
+    let assembled_data = if estimated_size <= INLINE_OBJECT_THRESHOLD {
+        let mut combined = Vec::with_capacity(estimated_size as usize);
+        for (_pn, data_ref, _size) in &part_data {
+            match data_ref {
+                ObjectDataRef::Inline(bytes) => {
+                    combined.extend_from_slice(bytes);
                 }
-            },
+                ObjectDataRef::FileRef(path) => match tokio::fs::read(path).await {
+                    Ok(bytes) => combined.extend_from_slice(&bytes),
+                    Err(e) => {
+                        warn!(error = %e, path = %path.display(), "Failed to read part file");
+                        return s3_error("InternalError", "Failed to read part", 500);
+                    }
+                },
+            }
         }
-    }
 
-    let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&combined)));
-    let size = combined.len() as u64;
+        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&combined)));
+        let size = combined.len() as u64;
 
-    // Store assembled object inline if small; write to disk for large objects.
-    let assembled_data = if size <= INLINE_OBJECT_THRESHOLD {
         // Clean up any file-backed parts before going inline.
         for (_pn, data_ref, _size) in &part_data {
             if let ObjectDataRef::FileRef(path) = data_ref {
                 let _ = tokio::fs::remove_file(path).await;
             }
         }
-        ObjectDataRef::Inline(Bytes::from(combined))
+
+        (etag, size, ObjectDataRef::Inline(Bytes::from(combined)))
     } else {
-        // Write combined data to final object file
-        let file_path = match file_store
-            .write_object(
-                &ctx.account_id,
-                &ctx.region,
-                &bucket,
-                &key,
-                &version_id,
-                &combined,
-            )
-            .await
-        {
-            Ok(p) => p,
+        // Stream all parts directly to the final object file with bounded buffering.
+        let parts_for_reader: Vec<ObjectDataRef> = part_data
+            .iter()
+            .map(|(_, data_ref, _)| data_ref.clone())
+            .collect();
+
+        let fs_clone = file_store.clone();
+        let account_id = ctx.account_id.clone();
+        let region = ctx.region.clone();
+        let bucket_cloned = bucket.clone();
+        let key_cloned = key.clone();
+        let version_id_cloned = version_id.clone();
+
+        let join = tokio::task::spawn_blocking(move || {
+            let mut multipart_reader = MultipartRead::from_data_refs(parts_for_reader)?;
+            let mut hashing_reader = Md5Read::new(&mut multipart_reader);
+            let (path, bytes_written) = fs_clone.write_object_from_sync_reader(
+                &account_id,
+                &region,
+                &bucket_cloned,
+                &key_cloned,
+                &version_id_cloned,
+                &mut hashing_reader,
+            )?;
+            let digest = hashing_reader.finalize();
+            Ok::<(PathBuf, u64, md5::digest::Output<md5::Md5>), io::Error>((
+                path,
+                bytes_written,
+                digest,
+            ))
+        })
+        .await;
+
+        let (file_path, size, digest) = match join {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                warn!(error = %e, "Failed to stream assembled object to filesystem");
+                return s3_error("InternalError", "Failed to store object", 500);
+            }
             Err(e) => {
-                warn!(error = %e, "Failed to write assembled object to filesystem");
+                warn!(error = %e, "Assemble object task panicked");
                 return s3_error("InternalError", "Failed to store object", 500);
             }
         };
 
-        // Clean up part files
+        // Clean up part files after successful assembly.
         for (_pn, data_ref, _size) in &part_data {
             if let ObjectDataRef::FileRef(path) = data_ref {
                 let _ = tokio::fs::remove_file(path).await;
             }
         }
 
-        ObjectDataRef::FileRef(file_path)
+        (
+            format!("\"{}\"", hex::encode(digest)),
+            size,
+            ObjectDataRef::FileRef(file_path),
+        )
     };
+
+    let (etag, size, assembled_data) = assembled_data;
 
     let new_file_path = match &assembled_data {
         ObjectDataRef::FileRef(path) => Some(path.clone()),
@@ -1600,7 +1681,7 @@ async fn handle_complete_multipart_upload_async(
         let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
         let prev = store.complete_multipart_upload_with_version(&upload_id, version);
         if version_id == "null" {
-            prev.and_then(|old| match old.data {
+            prev.and_then(|old| match old {
                 ObjectDataRef::FileRef(path) => {
                     if new_file_path.as_deref() == Some(path.as_path()) {
                         None

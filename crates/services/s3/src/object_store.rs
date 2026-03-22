@@ -146,9 +146,8 @@ impl ObjectFileStore {
 
         let mut file = fs::File::create(&tmp_path).await?;
 
-        // Use a larger 1 MiB read buffer to reduce read/write syscall churn on
-        // medium and large uploads while keeping per-request memory bounded.
-        const COPY_BUF: usize = 1024 * 1024;
+        // 512 KiB keeps throughput strong while reducing per-request RSS.
+        const COPY_BUF: usize = 512 * 1024;
         let mut buf_reader = tokio::io::BufReader::with_capacity(COPY_BUF, reader);
         let bytes_written = tokio::io::copy_buf(&mut buf_reader, &mut file).await?;
         file.flush().await?;
@@ -193,8 +192,8 @@ impl ObjectFileStore {
 
         let mut file = std::fs::File::create(&tmp_path)?;
 
-        // 1 MiB copy buffer — improves throughput and p95 on large PUT payloads.
-        let mut buf = vec![0u8; 1024 * 1024];
+        // 512 KiB keeps throughput strong while reducing per-request RSS.
+        let mut buf = vec![0u8; 512 * 1024];
         let mut bytes_written = 0u64;
         loop {
             let n = reader.read(&mut buf)?;

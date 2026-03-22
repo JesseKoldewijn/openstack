@@ -368,7 +368,7 @@ impl S3Store {
         data: ObjectDataRef,
         content_type: impl Into<String>,
         metadata: HashMap<String, String>,
-    ) -> Option<ObjectVersion> {
+    ) -> Option<ObjectDataRef> {
         let versioning = self
             .buckets
             .get(bucket)
@@ -399,7 +399,7 @@ impl S3Store {
         let objects = self.objects.entry(bucket.to_string()).or_default();
 
         if let Some(obj) = objects.get_mut(key) {
-            let prev = obj.versions.first().cloned();
+            let prev = obj.versions.first().map(|v| v.data.clone());
             if version.version_id == "null" {
                 // Non-versioned bucket: overwrite current object in place.
                 obj.versions.clear();
@@ -425,10 +425,10 @@ impl S3Store {
         bucket: &str,
         key: &str,
         version: ObjectVersion,
-    ) -> Option<ObjectVersion> {
+    ) -> Option<ObjectDataRef> {
         let objects = self.objects.entry(bucket.to_string()).or_default();
         if let Some(obj) = objects.get_mut(key) {
-            let prev = obj.versions.first().cloned();
+            let prev = obj.versions.first().map(|v| v.data.clone());
             if version.version_id == "null" {
                 // Non-versioned bucket: overwrite current object in place.
                 obj.versions.clear();
@@ -645,18 +645,20 @@ impl S3Store {
         if let Some(obj) = objects.get_mut(&upload.key) {
             if version.version_id == "null" {
                 obj.versions.clear();
-                obj.versions.push(version.clone());
+                obj.versions.push(version);
             } else {
-                obj.versions.insert(0, version.clone());
+                obj.versions.insert(0, version);
             }
+            obj.versions.first().cloned()
         } else {
             objects.insert(
                 upload.key.clone(),
-                S3Object::new(upload.key.clone(), version.clone()),
+                S3Object::new(upload.key.clone(), version),
             );
+            objects
+                .get(&upload.key)
+                .and_then(|obj| obj.versions.first().cloned())
         }
-
-        Some(version)
     }
 
     /// Complete a multipart upload with a pre-assembled `ObjectVersion`.
@@ -670,23 +672,23 @@ impl S3Store {
         &mut self,
         upload_id: &str,
         version: ObjectVersion,
-    ) -> Option<ObjectVersion> {
+    ) -> Option<ObjectDataRef> {
         let upload = self.multipart_uploads.remove(upload_id)?;
 
         let objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
-            let prev = obj.versions.first().cloned();
+            let prev = obj.versions.first().map(|v| v.data.clone());
             if version.version_id == "null" {
                 obj.versions.clear();
-                obj.versions.push(version.clone());
+                obj.versions.push(version);
             } else {
-                obj.versions.insert(0, version.clone());
+                obj.versions.insert(0, version);
             }
             prev
         } else {
             objects.insert(
                 upload.key.clone(),
-                S3Object::new(upload.key.clone(), version.clone()),
+                S3Object::new(upload.key.clone(), version),
             );
             None
         }
