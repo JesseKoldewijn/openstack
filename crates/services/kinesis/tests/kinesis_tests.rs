@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bytes::Bytes;
 use openstack_kinesis::KinesisProvider;
 use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -127,12 +127,12 @@ async fn test_put_record_missing_stream_matches_localstack_shape() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
-    assert_eq!(resp.content_type, "application/x-amz-json-1.1");
+    assert_eq!(resp.content_type, "application/json");
     let b = body(&resp);
     assert_eq!(b["__type"], "ResourceNotFoundException");
     assert_eq!(
         b["message"],
-        "Stream arn:aws:kinesis:us-east-1:000000000000:stream/missing-stream not found"
+        "Stream arn arn:aws:kinesis:us-east-1:000000000000:stream/missing-stream not found"
     );
 }
 

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_dynamodb::DynamoDbProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -117,12 +117,10 @@ async fn test_create_table_already_exists() {
         .unwrap();
     assert_eq!(resp.status_code, 400);
     let b = body(&resp);
-    assert!(
-        b["__type"]
-            .as_str()
-            .unwrap()
-            .contains("ResourceInUseException")
-    );
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("ResourceInUseException"));
 }
 
 #[tokio::test]
@@ -149,13 +147,11 @@ async fn test_delete_table() {
         .unwrap();
     assert_eq!(resp2.status_code, 400);
     let b = body(&resp2);
-    assert!(
-        b["__type"]
-            .as_str()
-            .unwrap()
-            .contains("ResourceNotFoundException")
-    );
-    assert_eq!(resp2.content_type, "application/x-amz-json-1.0");
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("ResourceNotFoundException"));
+    assert_eq!(resp2.content_type, "application/json");
 }
 
 #[tokio::test]
@@ -465,12 +461,10 @@ async fn test_put_item_condition_check_fails() {
     // Condition fails because item doesn't exist yet
     assert_eq!(resp.status_code, 400);
     let b = body(&resp);
-    assert!(
-        b["__type"]
-            .as_str()
-            .unwrap()
-            .contains("ConditionalCheckFailedException")
-    );
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("ConditionalCheckFailedException"));
 }
 
 // ---------------------------------------------------------------------------
@@ -897,12 +891,10 @@ async fn test_transact_write_condition_cancel() {
         .unwrap();
     assert_eq!(resp.status_code, 400);
     let b = body(&resp);
-    assert!(
-        b["__type"]
-            .as_str()
-            .unwrap()
-            .contains("TransactionCanceledException")
-    );
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("TransactionCanceledException"));
 }
 
 #[tokio::test]
@@ -1219,7 +1211,7 @@ async fn test_operations_on_missing_table_return_404() {
             "op={op}, body={b}"
         );
         assert_eq!(
-            resp.content_type, "application/x-amz-json-1.0",
+            resp.content_type, "application/json",
             "expected JSON error content type for {op}"
         );
     }

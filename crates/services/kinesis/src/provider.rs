@@ -2,14 +2,14 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::store::{KinesisStore, ShardIteratorState, ShardIteratorType};
 
@@ -54,7 +54,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -344,7 +344,7 @@ impl ServiceProvider for KinesisProvider {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         &format!(
-                            "Stream arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
+                            "Stream arn arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
                         ),
                         400,
                     )),
@@ -409,7 +409,7 @@ impl ServiceProvider for KinesisProvider {
                         return Ok(json_error(
                             "ResourceNotFoundException",
                             &format!(
-                                "Stream arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
+                                "Stream arn arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
                             ),
                             400,
                         ));

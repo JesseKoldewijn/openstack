@@ -8,7 +8,7 @@ use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::store::{Parameter, ParameterType, SsmStore};
 
@@ -53,7 +53,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }

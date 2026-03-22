@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_kms::KmsProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -114,7 +114,7 @@ async fn test_encrypt_decrypt() {
     let p = KmsProvider::new();
     let key_id = create_key(&p).await;
 
-    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     let plaintext = B64.encode("hello world");
 
     let resp = p
@@ -217,7 +217,7 @@ async fn test_describe_key_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert_eq!(resp.content_type, "application/x-amz-json-1.1");
+    assert_eq!(resp.content_type, "application/json");
     let payload = body(&resp);
     assert_eq!(payload["__type"], "NotFoundException");
     assert_eq!(

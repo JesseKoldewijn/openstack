@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 use openstack_ssm::SsmProvider;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -219,7 +219,7 @@ async fn test_delete_parameter() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert_eq!(resp.content_type, "application/x-amz-json-1.1");
+    assert_eq!(resp.content_type, "application/json");
     let payload = body(&resp);
     assert_eq!(payload["__type"], "ParameterNotFound");
     assert_eq!(payload["message"], "Parameter /del not found.");

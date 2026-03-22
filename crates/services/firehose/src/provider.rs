@@ -8,7 +8,7 @@ use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::store::{
@@ -56,7 +56,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -185,7 +185,7 @@ impl ServiceProvider for FirehoseProvider {
                 if store.streams.remove(&stream_name).is_none() {
                     return Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Delivery stream {stream_name} not found"),
+                        &format!("Firehose {stream_name} under account {account_id} not found."),
                         400,
                     ));
                 }
@@ -206,14 +206,14 @@ impl ServiceProvider for FirehoseProvider {
                 let Some(store) = self.store.get(account_id, region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Delivery stream {stream_name} not found"),
+                        &format!("Firehose {stream_name} under account {account_id} not found."),
                         400,
                     ));
                 };
                 match store.streams.get(&stream_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Delivery stream {stream_name} not found"),
+                        &format!("Firehose {stream_name} under account {account_id} not found."),
                         400,
                     )),
                     Some(s) => Ok(json_ok(json!({
@@ -266,7 +266,7 @@ impl ServiceProvider for FirehoseProvider {
                 match store.streams.get_mut(&stream_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Delivery stream {stream_name} not found"),
+                        &format!("Firehose {stream_name} under account {account_id} not found."),
                         400,
                     )),
                     Some(s) => {
@@ -298,7 +298,7 @@ impl ServiceProvider for FirehoseProvider {
                 match store.streams.get_mut(&stream_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Delivery stream {stream_name} not found"),
+                        &format!("Firehose {stream_name} under account {account_id} not found."),
                         400,
                     )),
                     Some(s) => {
