@@ -22,6 +22,15 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
     }
 }
 
+fn make_query_ctx(operation: &str, action: &str, form_body: &str) -> RequestContext {
+    let mut ctx = make_ctx(operation, json!({}));
+    let mut query_params = HashMap::new();
+    query_params.insert("Action".to_string(), action.to_string());
+    ctx.raw_body = Some(Bytes::from(form_body.as_bytes().to_vec()));
+    ctx.query_params = query_params;
+    ctx
+}
+
 fn body(resp: &DispatchResponse) -> Value {
     serde_json::from_slice(resp.body.as_bytes()).expect("valid JSON")
 }
@@ -111,6 +120,57 @@ async fn test_get_metric_statistics() {
     assert_eq!(dp["Average"], 20.0);
     assert_eq!(dp["Sum"], 60.0);
     assert_eq!(dp["Maximum"], 30.0);
+}
+
+#[tokio::test]
+async fn test_get_metric_statistics_empty_query_protocol_returns_xml() {
+    let p = CloudWatchProvider::new();
+    let mut ctx = make_query_ctx(
+        "GetMetricStatistics",
+        "GetMetricStatistics",
+        "Action=GetMetricStatistics&Version=2010-08-01&Namespace=AWS%2FLogs&MetricName=IncomingLogEvents&StartTime=2024-01-01T00%3A00%3A00Z&EndTime=2024-01-01T01%3A00%3A00Z&Period=60&Statistics.member.1=Sum",
+    );
+    ctx.request_body = json!({
+        "Namespace": "AWS/Logs",
+        "MetricName": "IncomingLogEvents",
+        "StartTime": "2024-01-01T00:00:00Z",
+        "EndTime": "2024-01-01T01:00:00Z",
+        "Period": 60,
+        "Statistics": ["Sum"],
+    });
+
+    let resp = p.dispatch(&ctx).await.unwrap();
+
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(&*resp.content_type, "text/xml");
+    let xml = body_str(&resp);
+    assert!(xml.contains("<GetMetricStatisticsResponse"));
+    assert!(xml.contains("<GetMetricStatisticsResult>"));
+    assert!(xml.contains("<Datapoints />"));
+    assert!(xml.contains("<Label>IncomingLogEvents</Label>"));
+}
+
+#[tokio::test]
+async fn test_get_metric_statistics_empty_json_protocol_returns_json() {
+    let p = CloudWatchProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetMetricStatistics",
+            json!({
+                "Namespace": "AWS/Logs",
+                "MetricName": "IncomingLogEvents",
+                "Period": 60,
+                "Statistics": ["Sum"],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(&*resp.content_type, "application/x-amz-json-1.1");
+    let b = body(&resp);
+    assert_eq!(b["Label"], "IncomingLogEvents");
+    assert_eq!(b["Datapoints"], json!([]));
 }
 
 #[tokio::test]

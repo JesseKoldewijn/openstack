@@ -281,6 +281,15 @@ impl ServiceProvider for CloudWatchProvider {
                 let namespace = str_param(ctx, "Namespace").unwrap_or_default();
                 let metric_name = str_param(ctx, "MetricName").unwrap_or_default();
                 let Some(store) = self.store.get(account_id, region) else {
+                    if is_query_protocol_request(ctx) {
+                        return Ok(query_ok(
+                            "GetMetricStatistics",
+                            &format!(
+                                "<GetMetricStatisticsResult><Datapoints /><Label>{}</Label></GetMetricStatisticsResult>",
+                                xml_escape(&metric_name)
+                            ),
+                        ));
+                    }
                     return Ok(json_ok(json!({ "Datapoints": [], "Label": metric_name })));
                 };
 
