@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -103,7 +104,16 @@ fn sqs_json_error(code: &str, message: &str, status_code: u16) -> DispatchRespon
 }
 
 fn new_request_id() -> String {
-    uuid::Uuid::new_v4().to_string()
+    static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+    let next = REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+        (next >> 32) as u32,
+        (next >> 16) as u16,
+        next as u16 & 0x0fff,
+        ((next >> 12) as u16) & 0x0fff,
+        next & 0x0000_ffff_ffff_ffff,
+    )
 }
 
 fn escape_xml(s: &str) -> Cow<'_, str> {

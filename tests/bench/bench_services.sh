@@ -1482,6 +1482,11 @@ if is_active "sqs"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "SQS (Query-XML)"
 
+  # Moto needs SQS routing hints; otherwise query requests may be routed to S3.
+  MOTO_EXTRA=(-H "Host: sqs.us-east-1.amazonaws.com" \
+    -H "X-Amz-Date: 20260101T000000Z" \
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/sqs/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy")
+
   SQS_QUEUE_NAME="bench-queue-$$"
   SQS_QUEUE_URL="http://localhost:4566/000000000000/${SQS_QUEUE_NAME}"
   SQS_QUEUE_URL_ENC=$(jq -nr --arg v "$SQS_QUEUE_URL" '$v|@uri')
@@ -1531,9 +1536,9 @@ if is_active "sqs"; then
         _sqs_recv_os=$(curl -s -X POST "$OS_BASE" \
           -H "Content-Type: application/x-www-form-urlencoded" \
           -d "Action=ReceiveMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MaxNumberOfMessages=1") || true
-        SQS_RH_OS="${_sqs_recv_os#*<ReceiptHandle>}"
+        SQS_RH_OS="${_sqs_recv_os#*ReceiptHandle>}"
         if [[ "$SQS_RH_OS" != "$_sqs_recv_os" ]]; then
-          SQS_RH_OS="${SQS_RH_OS%%</ReceiptHandle>*}"
+          SQS_RH_OS="${SQS_RH_OS%%<*}"
         else
           SQS_RH_OS=""
         fi
@@ -1544,9 +1549,9 @@ if is_active "sqs"; then
         _sqs_recv_ls=$(curl -s -X POST "$LS_BASE" \
           -H "Content-Type: application/x-www-form-urlencoded" \
           -d "Action=ReceiveMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MaxNumberOfMessages=1") || true
-        SQS_RH_LS="${_sqs_recv_ls#*<ReceiptHandle>}"
+        SQS_RH_LS="${_sqs_recv_ls#*ReceiptHandle>}"
         if [[ "$SQS_RH_LS" != "$_sqs_recv_ls" ]]; then
-          SQS_RH_LS="${SQS_RH_LS%%</ReceiptHandle>*}"
+          SQS_RH_LS="${SQS_RH_LS%%<*}"
         else
           SQS_RH_LS=""
         fi
@@ -1556,10 +1561,11 @@ if is_active "sqs"; then
       if target_active moto && [[ "${SEED_MOTO:-0}" -eq 1 ]]; then
         _sqs_recv_moto=$(curl -s -X POST "$MOTO_BASE" \
           -H "Content-Type: application/x-www-form-urlencoded" \
-          -d "Action=ReceiveMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MaxNumberOfMessages=1") || true
-        SQS_RH_MOTO="${_sqs_recv_moto#*<ReceiptHandle>}"
+          -d "Action=ReceiveMessage&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&MaxNumberOfMessages=1" \
+          "${MOTO_EXTRA[@]}") || true
+        SQS_RH_MOTO="${_sqs_recv_moto#*ReceiptHandle>}"
         if [[ "$SQS_RH_MOTO" != "$_sqs_recv_moto" ]]; then
-          SQS_RH_MOTO="${SQS_RH_MOTO%%</ReceiptHandle>*}"
+          SQS_RH_MOTO="${SQS_RH_MOTO%%<*}"
         else
           SQS_RH_MOTO=""
         fi
@@ -1592,6 +1598,8 @@ if is_active "sqs"; then
   else
     skip_service "sqs" "Unable to seed CreateQueue on openstack"
   fi
+
+  MOTO_EXTRA=()
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

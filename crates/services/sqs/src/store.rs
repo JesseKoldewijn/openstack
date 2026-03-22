@@ -1,9 +1,33 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+
+static MESSAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn counter_uuid_like(id: u64, variant: char) -> String {
+    format!(
+        "{:08x}-{:04x}-4{:03x}-{}{:03x}-{:012x}",
+        (id >> 32) as u32,
+        (id >> 16) as u16,
+        id as u16 & 0x0fff,
+        variant,
+        ((id >> 12) as u16) & 0x0fff,
+        id & 0x0000_ffff_ffff_ffff,
+    )
+}
+
+fn next_message_id() -> String {
+    let id = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    counter_uuid_like(id, '8')
+}
+
+fn next_receipt_handle() -> String {
+    let id = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    counter_uuid_like(id, '9')
+}
 
 // ---------------------------------------------------------------------------
 // Message attribute value
@@ -61,8 +85,8 @@ impl SqsMessage {
     ) -> Self {
         let body = body.into();
         let md5 = md5_hex(body.as_bytes());
-        let message_id = Uuid::new_v4().to_string();
-        let receipt_handle = Uuid::new_v4().to_string();
+        let message_id = next_message_id();
+        let receipt_handle = next_receipt_handle();
         let visible_after = if delay_seconds > 0 {
             Some(Utc::now() + chrono::Duration::seconds(delay_seconds as i64))
         } else {
@@ -111,8 +135,9 @@ impl SqsMessage {
 
     /// Make a new receipt handle for this receive attempt and set visibility timeout.
     pub fn begin_receive(&mut self, visibility_timeout_secs: u32, now: &DateTime<Utc>) {
+        let next = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         self.receipt_handle.clear();
-        let _ = write!(&mut self.receipt_handle, "{}", Uuid::new_v4().hyphenated());
+        let _ = write!(&mut self.receipt_handle, "{}", counter_uuid_like(next, '9'));
         self.receive_count += 1;
         if let Some(v) = self.attributes.get_mut("ApproximateReceiveCount") {
             v.clear();
