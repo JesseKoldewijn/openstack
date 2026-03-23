@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -38,7 +39,7 @@ fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -53,7 +54,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -435,7 +436,13 @@ impl ServiceProvider for StepFunctionsProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "StateMachineDoesNotExist",
+                        &format!("State Machine Does Not Exist: '{arn}'"),
+                        400,
+                    ));
+                };
                 match store.state_machines.get(&arn) {
                     Some(sm) => Ok(json_ok(json!({
                         "stateMachineArn": sm.state_machine_arn,
@@ -448,8 +455,8 @@ impl ServiceProvider for StepFunctionsProvider {
                     }))),
                     None => Ok(json_error(
                         "StateMachineDoesNotExist",
-                        &format!("State machine {arn} not found"),
-                        404,
+                        &format!("State Machine Does Not Exist: '{arn}'"),
+                        400,
                     )),
                 }
             }
@@ -458,7 +465,9 @@ impl ServiceProvider for StepFunctionsProvider {
             // ListStateMachines
             // ----------------------------------------------------------------
             "ListStateMachines" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "stateMachines": [] })));
+                };
                 let machines: Vec<Value> = store
                     .state_machines
                     .values()
@@ -502,8 +511,8 @@ impl ServiceProvider for StepFunctionsProvider {
                 } else {
                     Ok(json_error(
                         "StateMachineDoesNotExist",
-                        &format!("State machine {arn} not found"),
-                        404,
+                        &format!("State Machine Does Not Exist: '{arn}'"),
+                        400,
                     ))
                 }
             }
@@ -527,14 +536,20 @@ impl ServiceProvider for StepFunctionsProvider {
                     str_param(ctx, "name").unwrap_or_else(|| Uuid::new_v4().to_string());
 
                 let definition = {
-                    let store = self.store.get_or_create(account_id, region);
+                    let Some(store) = self.store.get(account_id, region) else {
+                        return Ok(json_error(
+                            "StateMachineDoesNotExist",
+                            &format!("State Machine Does Not Exist: '{sm_arn}'"),
+                            400,
+                        ));
+                    };
                     match store.state_machines.get(&sm_arn) {
                         Some(sm) => sm.definition.clone(),
                         None => {
                             return Ok(json_error(
                                 "StateMachineDoesNotExist",
-                                &format!("State machine {sm_arn} not found"),
-                                404,
+                                &format!("State Machine Does Not Exist: '{sm_arn}'"),
+                                400,
                             ));
                         }
                     }
@@ -568,6 +583,19 @@ impl ServiceProvider for StepFunctionsProvider {
                 };
 
                 let mut store = self.store.get_or_create(account_id, region);
+                if !store
+                    .state_machines
+                    .contains_key(&execution.state_machine_arn)
+                {
+                    return Ok(json_error(
+                        "StateMachineDoesNotExist",
+                        &format!(
+                            "State Machine Does Not Exist: '{}'",
+                            execution.state_machine_arn
+                        ),
+                        400,
+                    ));
+                }
                 store.executions.insert(exec_arn.clone(), execution);
 
                 Ok(json_ok(json!({
@@ -590,7 +618,13 @@ impl ServiceProvider for StepFunctionsProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ExecutionDoesNotExist",
+                        &format!("Execution {exec_arn} not found"),
+                        404,
+                    ));
+                };
                 match store.executions.get(&exec_arn) {
                     Some(e) => {
                         let mut obj = json!({
@@ -629,7 +663,9 @@ impl ServiceProvider for StepFunctionsProvider {
             "ListExecutions" => {
                 let sm_arn = str_param(ctx, "stateMachineArn");
                 let status_filter = str_param(ctx, "statusFilter");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "executions": [] })));
+                };
                 let executions: Vec<Value> = store
                     .executions
                     .values()

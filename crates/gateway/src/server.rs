@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
@@ -20,10 +21,12 @@ use openstack_config::Config;
 use openstack_service_framework::traits::ResponseBody;
 use openstack_service_framework::{ServicePluginManager, SpooledBody};
 use openstack_state::StateManager;
+use rand::RngExt;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 use crate::context::RequestContext;
 use crate::cors::CorsHandler;
@@ -248,6 +251,41 @@ const STUDIO_ASSET_JS: &str = r#"(function () {
 const STUDIO_ASSET_CSS: &str = r#":root{color-scheme:light dark;--bg:#0f172a;--fg:#e2e8f0;--card:#1e293b;--muted:#94a3b8;--accent:#22c55e}*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,sans-serif;background:linear-gradient(120deg,#0f172a,#111827);color:var(--fg)}.studio-layout{max-width:1200px;margin:0 auto;padding:20px}.studio-header h1{margin:0}.studio-header p{color:var(--muted)}.studio-grid{display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:16px}.studio-panel{background:color-mix(in oklab,var(--card) 92%,black);border:1px solid #334155;border-radius:12px;padding:12px;min-height:260px}.service-list{display:grid;gap:8px}.service-card{display:grid;text-align:left;gap:2px;padding:8px;border:1px solid #334155;background:#0b1220;color:var(--fg);border-radius:8px;cursor:pointer}.service-card.active{border-color:var(--accent)}.detail-grid{display:grid;gap:12px}label{display:grid;gap:6px;margin:6px 0}input,textarea{width:100%;background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px}button{background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.history-list{display:grid;gap:8px}.history-item{text-align:left}pre{white-space:pre-wrap;overflow:auto;background:#0b1220;padding:8px;border-radius:8px}@media(max-width:1024px){.studio-grid{grid-template-columns:1fr}}"#;
 const STUDIO_GUIDED_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
+// Thread-local fast RNG — seeded once per thread from the OS RNG, avoiding a
+// getrandom syscall on every request.
+thread_local! {
+    static FAST_RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_rng(&mut rand::rng()));
+}
+
+/// Generate a UUID v4-formatted request ID using the thread-local fast RNG.
+///
+/// ~10x faster than `Uuid::new_v4()` which hits the kernel CSPRNG on every call.
+fn fast_request_id() -> String {
+    FAST_RNG.with(|rng| {
+        let mut rng = rng.borrow_mut();
+        let mut b = [0u8; 16];
+        rng.fill(&mut b);
+        // Set UUID v4 version and variant bits for RFC 4122 compliance.
+        b[6] = (b[6] & 0x0f) | 0x40;
+        b[8] = (b[8] & 0x3f) | 0x80;
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = [0u8; 36];
+        let mut o = 0;
+        for (i, &byte) in b.iter().enumerate() {
+            if i == 4 || i == 6 || i == 8 || i == 10 {
+                out[o] = b'-';
+                o += 1;
+            }
+            out[o] = HEX[(byte >> 4) as usize];
+            o += 1;
+            out[o] = HEX[(byte & 0x0f) as usize];
+            o += 1;
+        }
+        // SAFETY: HEX table and '-' are all valid ASCII/UTF-8.
+        unsafe { String::from_utf8_unchecked(out.to_vec()) }
+    })
+}
+
 /// Adapter that converts `http_body_util::BodyStream<axum::body::Body>` into
 /// a `futures_core::Stream<Item = Result<Bytes, io::Error>>` suitable for
 /// `SpooledBody::write_from_stream()`.
@@ -428,28 +466,110 @@ async fn handle_request(
     req: axum::extract::Request,
 ) -> Response {
     let request_start = std::time::Instant::now();
-    let request_id = Uuid::new_v4().to_string();
 
-    // Extract path and query string
+    // Fast-path early exits: check cheap conditions BEFORE allocating a
+    // request ID, owned path string, or parsing query parameters.
+
+    // Handle CORS preflight — only needs method + headers, zero allocs.
+    if CorsHandler::is_preflight(&method, &headers) {
+        let mut resp_headers = HeaderMap::new();
+        state.cors.add_cors_headers(
+            &mut resp_headers,
+            headers.get("origin").and_then(|v| v.to_str().ok()),
+        );
+        let mut response = StatusCode::OK.into_response();
+        *response.headers_mut() = resp_headers;
+        return response;
+    }
+
+    // Studio SPA/asset routes and internal API routes are resolved before
+    // any allocation.  `uri.path()` returns a `&str` into the URI — no
+    // heap allocation until we actually need an owned `String`.
     let uri = req.uri().clone();
-    let path = uri.path().to_string();
-    let query_string = uri.query().unwrap_or("").to_string();
+    let path_str = uri.path();
+
+    if is_studio_asset_route(path_str) {
+        return studio_asset_response(path_str);
+    }
+
+    if is_studio_spa_route(path_str) {
+        return studio_spa_response();
+    }
+
+    // Internal API routes (/_localstack/*) — allocate path + query only here.
+    if path_str.starts_with("/_localstack/") {
+        // Check studio guided execution payload size before reading body.
+        if is_studio_guided_execution_route(path_str)
+            && headers
+                .get(axum::http::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .is_some_and(|len| len > STUDIO_GUIDED_MAX_PAYLOAD_BYTES)
+        {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "guided execution payload exceeds configured limit",
+            )
+                .into_response();
+        }
+
+        let guided_limit = if is_studio_guided_execution_route(path_str) {
+            Some(STUDIO_GUIDED_MAX_PAYLOAD_BYTES)
+        } else {
+            None
+        };
+
+        // Stream and buffer the body for internal API dispatch.
+        let threshold = state.config.body_spool_threshold_bytes;
+        let mut spooled = SpooledBody::new(threshold);
+        let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
+        if let Err(e) = spooled.write_from_stream(stream).await {
+            if e.kind() == io::ErrorKind::InvalidData {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "guided execution payload exceeds configured limit",
+                )
+                    .into_response();
+            }
+            error!("Failed to read request body: {}", e);
+            return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+        }
+        let body_bytes = match spooled.into_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                error!("Failed to materialize request body: {}", e);
+                return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+            }
+        };
+
+        let path = path_str.to_string();
+        let query_string = uri.query().unwrap_or("");
+        let query_params: HashMap<String, String> = if query_string.is_empty() {
+            HashMap::new()
+        } else {
+            serde_urlencoded::from_str(query_string).unwrap_or_default()
+        };
+
+        return handle_internal_api(path, &method, &headers, &query_params, &body_bytes, &state)
+            .await;
+    }
+
+    // --- AWS service request path ---
+    // Only now do we allocate request ID, owned path, and parse query params.
+    let request_id = fast_request_id();
+    let path = path_str.to_string();
+    let query_string = uri.query().unwrap_or("");
 
     // Parse query parameters
     let query_params: HashMap<String, String> = if query_string.is_empty() {
         HashMap::new()
     } else {
-        serde_urlencoded::from_str(&query_string).unwrap_or_default()
+        serde_urlencoded::from_str(query_string).unwrap_or_default()
     };
 
-    // Collect headers into a HashMap (lowercase keys)
-    let mut header_map: HashMap<String, String> = HashMap::with_capacity(headers.len());
-    for (k, v) in &headers {
-        if let Ok(vs) = v.to_str() {
-            header_map.insert(k.as_str().to_ascii_lowercase(), vs.to_string());
-        }
-    }
-
+    // Check studio guided execution payload size (for any studio route that
+    // slipped through the /_localstack/ prefix check above — shouldn't happen
+    // in practice, but kept as a safety net).
     if is_studio_guided_execution_route(&path)
         && headers
             .get(axum::http::header::CONTENT_LENGTH)
@@ -486,78 +606,64 @@ async fn handle_request(
         return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
     }
 
-    // Materialize raw_body as Bytes for protocol parsing
-    let body_bytes = match spooled.to_bytes() {
-        Ok(b) => b,
-        Err(e) => {
-            error!("Failed to materialize request body: {}", e);
-            return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+    // Materialize raw_body as Bytes for protocol parsing.
+    // For S3 object-body requests (PUT/POST to a bucket+key path) the body
+    // is binary object data — never XML or JSON — so we skip the copy and
+    // let the S3 provider stream it directly from the SpooledBody instead.
+    //
+    // For all other services we consume the SpooledBody via `into_bytes()`,
+    // replacing it with an empty sentinel.  No non-S3 provider ever reads
+    // `spooled_body`, so this avoids keeping two copies of the body in
+    // memory (the materialised `Bytes` and the original spool buffer).
+    let is_s3_body = is_s3_object_body_request(&method, &path, &headers, &query_params);
+    let body_bytes = if is_s3_body {
+        // Keep the body in the SpooledBody; pass an empty slice to parsers.
+        Bytes::new()
+    } else {
+        // Swap the data-bearing spool for an empty sentinel and consume it,
+        // so only one copy of the body lives in memory at a time.
+        let owned = std::mem::replace(&mut spooled, SpooledBody::new(0));
+        match owned.into_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                error!("Failed to materialize request body: {}", e);
+                return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+            }
         }
     };
 
-    // Handle CORS preflight
-    if CorsHandler::is_preflight(&method, &headers) {
-        let mut resp_headers = HeaderMap::new();
-        state.cors.add_cors_headers(
-            &mut resp_headers,
-            header_map.get("origin").map(|s| s.as_str()),
-        );
-        let mut response = StatusCode::OK.into_response();
-        *response.headers_mut() = resp_headers;
-        return response;
-    }
-
-    // Studio SPA routes are resolved before generic AWS inference.
-    if is_studio_asset_route(&path) {
-        return studio_asset_response(&path);
-    }
-
-    if is_studio_spa_route(&path) {
-        return studio_spa_response();
-    }
-
-    // Internal API routes go to the internal API handler.
-    if path.starts_with("/_localstack/") {
-        return handle_internal_api(
-            path,
-            &method,
-            &header_map,
-            &query_params,
-            &body_bytes,
-            &state,
-        )
-        .await;
-    }
+    // Extract the origin header before consuming headers (needed for CORS later).
+    let origin_header: Option<String> = headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
 
     // Build request context
     let context_start = std::time::Instant::now();
     let ctx = match build_request_context(
         &method,
-        &path,
-        &query_params,
-        &header_map,
+        path,
+        query_params,
+        headers,
         &body_bytes,
         &request_id,
         &state.config,
-        spooled,
+        // Only S3 object-body requests need spooled_body; for all others the
+        // body was already consumed into body_bytes above.
+        if is_s3_body { Some(spooled) } else { None },
     ) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
     let context_latency_us = context_start.elapsed().as_micros();
-
-    let service = ctx.service.clone();
-    let operation = ctx.operation.clone();
-    let region = ctx.region.clone();
-    let account_id = ctx.account_id.clone();
     let protocol = ctx.protocol.clone();
 
     debug!(
         request_id = %request_id,
-        service = %service,
-        operation = %operation,
-        region = %region,
-        account_id = %account_id,
+        service = %ctx.service,
+        operation = %ctx.operation,
+        region = %ctx.region,
+        account_id = %ctx.account_id,
         context_latency_us = context_latency_us,
         "Dispatching request"
     );
@@ -575,8 +681,8 @@ async fn handle_request(
         Ok(response) => {
             info!(
                 request_id = %request_id,
-                service = %service,
-                operation = %operation,
+                service = %svc_ctx.service,
+                operation = %svc_ctx.operation,
                 status = response.status_code,
                 latency_ms = latency_ms,
                 total_latency_ms = total_latency_ms,
@@ -603,7 +709,7 @@ async fn handle_request(
                         "Service '{}' is not enabled. Please check your 'SERVICES' configuration variable.",
                         svc
                     ),
-                    500,
+                    501,
                 ),
                 DispatchError::ServiceUnavailable(msg) => ("ServiceUnavailable", msg.clone(), 503),
                 DispatchError::ProviderError(msg) => ("InternalFailure", msg.clone(), 500),
@@ -612,8 +718,8 @@ async fn handle_request(
 
             warn!(
                 request_id = %request_id,
-                service = %service,
-                operation = %operation,
+                service = %svc_ctx.service,
+                operation = %svc_ctx.operation,
                 error = %e,
                 http_status = http_status,
                 latency_ms = latency_ms,
@@ -631,7 +737,7 @@ async fn handle_request(
             (
                 StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 ResponseBody::Buffered(body),
-                ct.to_string(),
+                std::borrow::Cow::Borrowed(ct),
                 Vec::new(),
             )
         }
@@ -641,7 +747,7 @@ async fn handle_request(
     let mut response = match resp_body {
         ResponseBody::Buffered(bytes) => Response::builder()
             .status(status)
-            .header("content-type", &content_type)
+            .header("content-type", &*content_type)
             .header("x-amzn-requestid", &request_id)
             .body(Body::from(bytes))
             .unwrap_or_default(),
@@ -651,8 +757,12 @@ async fn handle_request(
         } => {
             let mut builder = Response::builder()
                 .status(status)
-                .header("content-type", &content_type)
-                .header("x-amzn-requestid", &request_id);
+                .header("content-type", &*content_type)
+                .header("x-amzn-requestid", &request_id)
+                // Prevent tower-http CompressionLayer from compressing binary
+                // object data (S3 GET). Compressing random/incompressible bytes
+                // burns CPU for zero benefit and adds significant latency.
+                .header("content-encoding", "identity");
             if let Some(len) = content_length {
                 builder = builder.header("content-length", len.to_string());
             }
@@ -671,10 +781,9 @@ async fn handle_request(
     }
 
     // Add CORS headers
-    state.cors.add_cors_headers(
-        response.headers_mut(),
-        header_map.get("origin").map(|s| s.as_str()),
-    );
+    state
+        .cors
+        .add_cors_headers(response.headers_mut(), origin_header.as_deref());
 
     response
 }
@@ -734,48 +843,37 @@ fn studio_asset_response(path: &str) -> Response {
 #[allow(clippy::result_large_err)]
 fn build_request_context(
     method: &Method,
-    path: &str,
-    query_params: &HashMap<String, String>,
-    headers: &HashMap<String, String>,
+    path: String,
+    query_params: HashMap<String, String>,
+    headers: HeaderMap,
     body: &Bytes,
     request_id: &str,
     config: &Config,
-    spooled_body: SpooledBody,
+    spooled_body: Option<SpooledBody>,
 ) -> Result<RequestContext, Response> {
-    // Parse SigV4 Authorization or inject default
-    let (access_key, region, service_from_auth) = if let Some(auth) = headers.get("authorization") {
-        if let Some(sigv4) = parse_sigv4_auth(auth) {
-            (sigv4.access_key, sigv4.region, Some(sigv4.service))
+    // Parse SigV4 Authorization or inject default.
+    // SigV4Auth borrows from the auth header string — no allocations here.
+    // We convert to owned Strings only at RequestContext construction.
+    let (access_key, region, service_from_auth): (&str, &str, Option<&str>) =
+        if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+            if let Some(sigv4) = parse_sigv4_auth(auth) {
+                (sigv4.access_key, sigv4.region, Some(sigv4.service))
+            } else {
+                (DEFAULT_ACCESS_KEY, DEFAULT_REGION, None)
+            }
         } else {
-            (
-                DEFAULT_ACCESS_KEY.to_string(),
-                DEFAULT_REGION.to_string(),
-                None,
-            )
-        }
-    } else {
-        (
-            DEFAULT_ACCESS_KEY.to_string(),
-            DEFAULT_REGION.to_string(),
-            None,
-        )
-    };
+            (DEFAULT_ACCESS_KEY, DEFAULT_REGION, None)
+        };
 
     // Derive account ID from access key
-    let account_id = access_key_to_account_id(&access_key);
+    let account_id = access_key_to_account_id(access_key);
 
     // Determine the target service
-    let service = detect_service(
-        path,
-        query_params,
-        headers,
-        body,
-        service_from_auth.as_deref(),
-    );
+    let service = detect_service(&path, &query_params, &headers, body, service_from_auth);
 
     // Validate / normalize region
-    let region = if config.allow_nonstandard_regions || is_valid_region(&region) {
-        region
+    let region = if config.allow_nonstandard_regions || is_valid_region(region) {
+        region.to_string()
     } else {
         warn!("Invalid region '{}', falling back to us-east-1", region);
         DEFAULT_REGION.to_string()
@@ -786,7 +884,7 @@ fn build_request_context(
 
     // Parse the request body according to protocol
     let (operation, params) =
-        match parse_operation_and_params(method, path, query_params, headers, body, &protocol) {
+        match parse_operation_and_params(method, &path, &query_params, &headers, body, &protocol) {
             Ok(result) => result,
             Err(e) => {
                 error!("Failed to parse request: {}", e);
@@ -800,16 +898,20 @@ fn build_request_context(
         operation,
         region,
         account_id,
-        access_key,
+        access_key: access_key.to_string(),
         protocol,
         params,
-        raw_body: body.clone(),
-        headers: headers.clone(),
-        path: path.to_string(),
+        raw_body: if body.is_empty() {
+            None
+        } else {
+            Some(body.clone())
+        },
+        headers,
+        path,
         method: method.to_string(),
-        query_params: query_params.clone(),
+        query_params,
         request_id: request_id.to_string(),
-        spooled_body: Some(spooled_body),
+        spooled_body,
     })
 }
 
@@ -817,27 +919,30 @@ fn build_request_context(
 fn detect_service(
     path: &str,
     query_params: &HashMap<String, String>,
-    headers: &HashMap<String, String>,
+    headers: &HeaderMap,
     body: &Bytes,
     service_from_auth: Option<&str>,
 ) -> String {
     // 1. Authorization header credential scope (highest priority)
     if let Some(svc) = service_from_auth {
-        return svc.to_lowercase();
+        return normalize_service_name(svc);
     }
 
     // 2. Host header: sqs.us-east-1.localhost.localstack.cloud
-    if let Some(host) = headers.get("host") {
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
         let host = host.split(':').next().unwrap_or(host);
         let parts: Vec<&str> = host.split('.').collect();
         if parts.len() >= 2 {
-            let potential_service = parts[0].to_lowercase();
-            // Check if it looks like a service name (all lowercase letters/digits)
+            let potential_service = normalize_service_name(parts[0]);
             if potential_service
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
                 && is_known_service(&potential_service)
             {
+                // Known service names have a static equivalent — use it.
+                if let Some(s) = known_service_static(&potential_service) {
+                    return s.to_string();
+                }
                 return potential_service;
             }
         }
@@ -852,24 +957,23 @@ fn detect_service(
         return "s3".to_string();
     }
 
-    if let Some(target) = headers.get("x-amz-target")
+    if let Some(target) = headers.get("x-amz-target").and_then(|v| v.to_str().ok())
         && let Some(svc) = service_from_target(target)
     {
-        return svc;
+        return svc.to_string();
     }
 
     // 4. Query protocol Action (POST form body or query string)
     if let Some(svc) = service_from_query_action(query_params, body) {
-        return svc;
+        return svc.to_string();
     }
 
     // 5. URL path patterns
     if let Some(svc) = service_from_path(path) {
-        return svc;
+        return svc.to_string();
     }
 
     // 6. S3 path-style heuristic for unsigned endpoint-url calls
-    // Examples: PUT /my-bucket, GET /my-bucket/key
     let trimmed = path.trim_start_matches('/');
     if !trimmed.is_empty() {
         return "s3".to_string();
@@ -878,18 +982,78 @@ fn detect_service(
     "unknown".to_string()
 }
 
+fn normalize_service_name(service: &str) -> String {
+    if service.eq_ignore_ascii_case("es") {
+        return "opensearch".to_string();
+    }
+    // AWS SDKs always send lowercase service names in credentials, so the
+    // common path avoids `to_ascii_lowercase`'s character-by-character scan.
+    if service.bytes().all(|b| !b.is_ascii_uppercase()) {
+        // Try to resolve to a known static string to avoid allocating.
+        if let Some(s) = known_service_static(service) {
+            s.to_string()
+        } else {
+            service.to_string()
+        }
+    } else {
+        service.to_ascii_lowercase()
+    }
+}
+
+/// Return the canonical `&'static str` for a known service name.
+/// This allows callers to avoid allocating when the input matches a known service.
+fn known_service_static(name: &str) -> Option<&'static str> {
+    match name {
+        "s3" => Some("s3"),
+        "sqs" => Some("sqs"),
+        "sns" => Some("sns"),
+        "dynamodb" => Some("dynamodb"),
+        "lambda" => Some("lambda"),
+        "iam" => Some("iam"),
+        "sts" => Some("sts"),
+        "kms" => Some("kms"),
+        "cloudformation" => Some("cloudformation"),
+        "cloudwatch" => Some("cloudwatch"),
+        "logs" => Some("logs"),
+        "kinesis" => Some("kinesis"),
+        "firehose" => Some("firehose"),
+        "events" => Some("events"),
+        "states" => Some("states"),
+        "apigateway" => Some("apigateway"),
+        "ec2" => Some("ec2"),
+        "route53" => Some("route53"),
+        "ses" => Some("ses"),
+        "ssm" => Some("ssm"),
+        "secretsmanager" => Some("secretsmanager"),
+        "acm" => Some("acm"),
+        "ecr" => Some("ecr"),
+        "opensearch" => Some("opensearch"),
+        "redshift" => Some("redshift"),
+        "elasticache" => Some("elasticache"),
+        "rds" => Some("rds"),
+        _ => None,
+    }
+}
+
+/// Zero-copy scan of URL-encoded body bytes for `Action=<value>`.
+/// Returns the value slice without allocating.
+fn extract_action_value(body: &[u8]) -> Option<&str> {
+    let s = std::str::from_utf8(body).ok()?;
+    s.split('&')
+        .find_map(|segment| segment.strip_prefix("Action="))
+}
+
 fn service_from_query_action(
     query_params: &HashMap<String, String>,
     body: &Bytes,
-) -> Option<String> {
-    let action = query_params.get("Action").cloned().or_else(|| {
-        let params = serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).ok()?;
-        params
-            .into_iter()
-            .find_map(|(k, v)| if k == "Action" { Some(v) } else { None })
-    })?;
+) -> Option<&'static str> {
+    let action: &str = if let Some(a) = query_params.get("Action").map(String::as_str) {
+        a
+    } else {
+        extract_action_value(body)?
+    };
 
-    match action.as_str() {
+    match action {
         // SQS
         "CreateQueue"
         | "DeleteQueue"
@@ -904,15 +1068,36 @@ fn service_from_query_action(
         | "SendMessageBatch"
         | "DeleteMessageBatch"
         | "ChangeMessageVisibility"
-        | "ChangeMessageVisibilityBatch" => Some("sqs".to_string()),
+        | "ChangeMessageVisibilityBatch" => Some("sqs"),
         // STS
-        "GetCallerIdentity" | "AssumeRole" => Some("sts".to_string()),
+        "GetCallerIdentity" | "AssumeRole" => Some("sts"),
         // SNS
         "CreateTopic" | "DeleteTopic" | "Publish" | "Subscribe" | "Unsubscribe" | "ListTopics"
-        | "SetTopicAttributes" | "GetTopicAttributes" => Some("sns".to_string()),
+        | "SetTopicAttributes" | "GetTopicAttributes" => Some("sns"),
         // IAM
         "CreateRole" | "DeleteRole" | "ListRoles" | "GetRole" | "CreateUser" | "DeleteUser"
-        | "ListUsers" | "GetUser" => Some("iam".to_string()),
+        | "ListUsers" | "GetUser" => Some("iam"),
+        // CloudFormation
+        "CreateStack" | "DeleteStack" | "DescribeStacks" | "ListStacks" | "GetTemplate"
+        | "ValidateTemplate" | "UpdateStack" => Some("cloudformation"),
+        // CloudWatch (query actions)
+        "PutMetricData" | "ListMetrics" | "GetMetricStatistics" => Some("cloudwatch"),
+        // EC2
+        "DescribeVpcs"
+        | "CreateVpc"
+        | "DeleteVpc"
+        | "DescribeSubnets"
+        | "CreateSubnet"
+        | "DescribeSecurityGroups"
+        | "CreateSecurityGroup"
+        | "AuthorizeSecurityGroupIngress"
+        | "RunInstances"
+        | "DescribeInstances"
+        | "TerminateInstances" => Some("ec2"),
+        // Redshift
+        "CreateCluster" | "DeleteCluster" | "DescribeClusters" => Some("redshift"),
+        // SES
+        "VerifyEmailIdentity" | "ListIdentities" | "SendEmail" | "SendRawEmail" => Some("ses"),
         _ => None,
     }
 }
@@ -949,55 +1134,91 @@ fn is_known_service(name: &str) -> bool {
     )
 }
 
-fn service_from_target(target: &str) -> Option<String> {
-    // Formats seen in the wild:
-    // - "DynamoDB_20120810.GetItem"
-    // - "AmazonSQS.CreateQueue"
-    // - "AWSSecurityTokenServiceV20110615.GetCallerIdentity"
-    let raw_prefix = target
-        .split('.')
-        .next()
-        .unwrap_or(target)
-        .split('_')
-        .next()
-        .unwrap_or(target)
-        .to_lowercase();
+/// Derive the AWS service name from an `X-Amz-Target` header value.
+///
+/// Formats seen in the wild:
+/// - `"DynamoDB_20120810.GetItem"`
+/// - `"AmazonSQS.CreateQueue"`
+/// - `"AWSSecurityTokenServiceV20110615.GetCallerIdentity"`
+///
+/// Uses `eq_ignore_ascii_case` matching throughout — no heap allocation.
+fn service_from_target(target: &str) -> Option<&'static str> {
+    // Take everything before the first '.' then before the first '_'.
+    let prefix = target.split('.').next().unwrap_or(target);
+    let prefix = prefix.split('_').next().unwrap_or(prefix);
 
-    let prefix = raw_prefix
-        .trim_end_matches("v20110615")
-        .trim_end_matches("v20120810")
-        .to_string();
+    // Strip trailing version suffixes like "V20110615" or "v20120810".
+    let prefix = if prefix.len() > 9
+        && (prefix[prefix.len() - 9..].eq_ignore_ascii_case("v20110615")
+            || prefix[prefix.len() - 9..].eq_ignore_ascii_case("v20120810"))
+    {
+        &prefix[..prefix.len() - 9]
+    } else {
+        prefix
+    };
 
-    Some(
-        match prefix.as_str() {
-            "dynamodb" => "dynamodb",
-            "kinesis" => "kinesis",
-            "firehose" => "firehose",
-            "lambda" => "lambda",
-            "logs" => "logs",
-            "kms" => "kms",
-            "secretsmanager" => "secretsmanager",
-            "ssm" => "ssm",
-            "cloudwatch" => "cloudwatch",
-            "sns" => "sns",
-            "amazonsqs" | "sqs" => "sqs",
-            "awssecuritytokenservice" | "sts" => "sts",
-            _ => return None,
-        }
-        .to_string(),
-    )
+    if prefix.eq_ignore_ascii_case("dynamodb") {
+        Some("dynamodb")
+    } else if prefix.eq_ignore_ascii_case("certificatemanager") {
+        Some("acm")
+    } else if prefix.eq_ignore_ascii_case("kinesis") {
+        Some("kinesis")
+    } else if prefix.eq_ignore_ascii_case("firehose") {
+        Some("firehose")
+    } else if prefix.eq_ignore_ascii_case("lambda") {
+        Some("lambda")
+    } else if prefix.eq_ignore_ascii_case("awsstepfunctions") {
+        Some("states")
+    } else if prefix.eq_ignore_ascii_case("logs") {
+        Some("logs")
+    } else if prefix.eq_ignore_ascii_case("amazonssm") {
+        Some("ssm")
+    } else if prefix.eq_ignore_ascii_case("kms") || prefix.eq_ignore_ascii_case("trentservice") {
+        Some("kms")
+    } else if prefix.eq_ignore_ascii_case("secretsmanager") {
+        Some("secretsmanager")
+    } else if prefix.eq_ignore_ascii_case("ssm") {
+        Some("ssm")
+    } else if prefix.eq_ignore_ascii_case("cloudwatch") {
+        Some("cloudwatch")
+    } else if prefix.eq_ignore_ascii_case("awsevents") || prefix.eq_ignore_ascii_case("events") {
+        Some("events")
+    } else if prefix.eq_ignore_ascii_case("amazonec2containerregistry")
+        || prefix.eq_ignore_ascii_case("ecr")
+    {
+        Some("ecr")
+    } else if prefix.eq_ignore_ascii_case("sns") {
+        Some("sns")
+    } else if prefix.eq_ignore_ascii_case("amazonsqs") || prefix.eq_ignore_ascii_case("sqs") {
+        Some("sqs")
+    } else if prefix.eq_ignore_ascii_case("awssecuritytokenservice")
+        || prefix.eq_ignore_ascii_case("sts")
+    {
+        Some("sts")
+    } else {
+        None
+    }
 }
 
-fn service_from_path(path: &str) -> Option<String> {
+fn service_from_path(path: &str) -> Option<&'static str> {
     // Common path-based routing
     let path = path.trim_start_matches('/');
+    if path.starts_with("restapis") {
+        return Some("apigateway");
+    }
+    if path.starts_with("2021-01-01/opensearch/domain") || path == "2021-01-01/domain" {
+        return Some("opensearch");
+    }
+    if path.starts_with("2013-04-01/hostedzone") {
+        return Some("route53");
+    }
     if path.starts_with("2015-03-31/functions")
         || path.starts_with("2015-03-31/event-source-mappings")
     {
-        return Some("lambda".to_string());
+        return Some("lambda");
     }
     if path.starts_with("2012-12-01/") || path.contains("elasticloadbalancing") {
-        return Some("elb".to_string());
+        return Some("elb");
     }
     // Default: can't determine from path alone
     None
@@ -1007,7 +1228,7 @@ fn parse_operation_and_params(
     method: &Method,
     path: &str,
     query_params: &HashMap<String, String>,
-    headers: &HashMap<String, String>,
+    headers: &HeaderMap,
     body: &Bytes,
     protocol: &AwsProtocol,
 ) -> Result<(String, serde_json::Value), String> {
@@ -1018,10 +1239,14 @@ fn parse_operation_and_params(
                 let missing_action = e.to_string().contains("Missing 'Action' parameter");
                 let query_mode = headers
                     .get("x-amzn-query-mode")
+                    .and_then(|v| v.to_str().ok())
                     .map(|v| v == "true")
                     .unwrap_or(false);
                 if missing_action && query_mode {
-                    let target = headers.get("x-amz-target").ok_or_else(|| e.to_string())?;
+                    let target = headers
+                        .get("x-amz-target")
+                        .and_then(|v| v.to_str().ok())
+                        .ok_or_else(|| e.to_string())?;
                     let operation = target
                         .split('.')
                         .nth(1)
@@ -1044,7 +1269,7 @@ fn parse_operation_and_params(
             Ok((op, params))
         }
         AwsProtocol::Json => {
-            let target = headers.get("x-amz-target").map(|s| s.as_str());
+            let target = headers.get("x-amz-target").and_then(|v| v.to_str().ok());
             let (op, params) = parse_json_request(body, target).map_err(|e| e.to_string())?;
             Ok((op, params))
         }
@@ -1067,6 +1292,71 @@ fn parse_operation_and_params(
 /// Extract operation name from REST path + method.
 /// The actual operation mapping is done per-service in the provider.
 fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value) -> String {
+    if path == "/2015-03-31/functions/" || path == "/2015-03-31/functions" {
+        return match method {
+            "GET" => "ListFunctions".to_string(),
+            "POST" => "CreateFunction".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path == "/2021-01-01/opensearch/domain" {
+        return match method {
+            "POST" => "CreateDomain".to_string(),
+            "GET" => "ListDomainNames".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path == "/2021-01-01/domain" {
+        return match method {
+            "GET" => "ListDomainNames".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path.starts_with("/2021-01-01/opensearch/domain/") {
+        return match method {
+            "GET" => "DescribeDomain".to_string(),
+            "DELETE" => "DeleteDomain".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path == "/2013-04-01/hostedzone" {
+        return match method {
+            "POST" => "CreateHostedZone".to_string(),
+            "GET" => "ListHostedZones".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path.starts_with("/2013-04-01/hostedzone/") {
+        if path.ends_with("/rrset") {
+            return match method {
+                "GET" => "ListResourceRecordSets".to_string(),
+                "POST" => "ChangeResourceRecordSets".to_string(),
+                _ => format!("{}:{}", method, path),
+            };
+        }
+        return match method {
+            "DELETE" => "DeleteHostedZone".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path.starts_with("/2015-03-31/functions/") {
+        let suffix = path.trim_start_matches("/2015-03-31/functions/");
+        if suffix.ends_with("/code") && method == "PUT" {
+            return "UpdateFunctionCode".to_string();
+        }
+        if suffix.ends_with("/invocations") && method == "POST" {
+            return "Invoke".to_string();
+        }
+        if method == "GET" {
+            return "GetFunction".to_string();
+        }
+        if method == "DELETE" {
+            return "DeleteFunction".to_string();
+        }
+        if method == "PUT" {
+            return "UpdateFunctionConfiguration".to_string();
+        }
+    }
     // For REST protocols, the operation is inferred by the service provider
     // We store method + path in the params for the provider to use
     format!("{}:{}", method, path)
@@ -1076,7 +1366,7 @@ fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value)
 async fn handle_internal_api(
     path: String,
     method: &Method,
-    _headers: &HashMap<String, String>,
+    _headers: &HeaderMap,
     _query_params: &HashMap<String, String>,
     _body: &Bytes,
     _state: &AppState,
@@ -1108,13 +1398,9 @@ async fn handle_internal_api(
     let mut req_builder = axum::http::Request::builder()
         .method(method.clone())
         .uri(uri);
+    // HeaderMap iter yields (&HeaderName, &HeaderValue) — copy directly, no string round-trip.
     for (k, v) in _headers {
-        if let (Ok(name), Ok(value)) = (
-            axum::http::header::HeaderName::from_bytes(k.as_bytes()),
-            axum::http::header::HeaderValue::from_str(v),
-        ) {
-            req_builder = req_builder.header(name, value);
-        }
+        req_builder = req_builder.header(k, v);
     }
     let req = req_builder
         .body(Body::from(_body.clone()))
@@ -1133,4 +1419,236 @@ async fn handle_internal_api(
 fn is_studio_guided_execution_route(path: &str) -> bool {
     path == "/_localstack/studio-api/flows/execute"
         || path == "/_localstack/studio-api/flows/replay"
+}
+
+/// Returns `true` for S3 requests where the body is raw object data
+/// (binary), not XML/JSON.  For these requests we skip materializing the
+/// body into a `Bytes` heap allocation and let the S3 provider stream it
+/// directly from the `SpooledBody`.
+///
+/// The heuristic: the Authorization header identifies the service as "s3",
+/// the method is PUT or POST with a non-empty key segment in the path.
+/// Content-Type is NOT checked because the S3 SDK may omit it or set it
+/// to "application/octet-stream" for arbitrary object data.
+fn is_s3_object_body_request(
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    // Must be PUT or POST (GET, HEAD, DELETE have no object body).
+    if method != Method::PUT && method != Method::POST {
+        return false;
+    }
+
+    // Path must have at least two non-empty segments: /bucket/key
+    // (bucket-level PUT operations like ?versioning, ?policy have no key).
+    //
+    // S3 path-style URLs have a plain /bucket/key structure.  No other
+    // service uses this pattern for binary object uploads:
+    //   - Lambda paths start with 2015-03-31/
+    //   - SQS/SNS/DynamoDB POST to the root (/) or /?QueueUrl= style
+    //   - ELB paths start with 2012-12-01/
+    //
+    // We intentionally do NOT require an Authorization header here so that
+    // benchmark and integration clients that omit auth (e.g. curl/oha without
+    // signing) still get the streaming path and never load binary object
+    // bodies into heap memory.
+    let path_no_query = path.split('?').next().unwrap_or(path);
+    let segments: Vec<&str> = path_no_query
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if segments.len() < 2 {
+        return false;
+    }
+
+    // If request clearly targets another SigV4 service, this is not S3.
+    if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok())
+        && let Some(sigv4) = parse_sigv4_auth(auth)
+        && !sigv4.service.eq_ignore_ascii_case("s3")
+    {
+        return false;
+    }
+
+    // Exclude paths that belong to known non-S3 services (versioned REST APIs).
+    let first = segments[0];
+    // Lambda, ELB, EC2 (rare REST calls)
+    if first.starts_with("2015-03-31")
+        || first.starts_with("2012-12-01")
+        || first.starts_with("2016-11-15")
+    {
+        return false;
+    }
+
+    // Exclude sub-resource operations that carry XML bodies, not binary
+    // object data.  These are identified by specific query params:
+    //
+    //  - CompleteMultipartUpload: POST /bucket/key?uploadId=<id>  (no partNumber)
+    //  - DeleteObjects:           POST /bucket?delete             (single-segment path)
+    //
+    // UploadPart is a POST with BOTH ?uploadId= AND ?partNumber= — that IS a
+    // binary body and must NOT be excluded.
+    if method == Method::POST {
+        let has_upload_id = query_params.contains_key("uploadId");
+        let has_part_number = query_params.contains_key("partNumber");
+        if has_upload_id && !has_part_number {
+            // CompleteMultipartUpload — XML body, not binary.
+            return false;
+        }
+        if !has_upload_id && !has_part_number {
+            // Any other key-level POST without multipart params (e.g. restore-object)
+            // may also carry XML.  Be conservative and only treat UploadPart as binary.
+            return false;
+        }
+    }
+
+    // XML-body bucket/object subresources should go through normal body parsing.
+    // These requests are not raw object-data uploads.
+    const XML_BODY_SUBRESOURCES: &[&str] = &[
+        "acl",
+        "tagging",
+        "policy",
+        "website",
+        "cors",
+        "lifecycle",
+        "notification",
+        "replication",
+        "requestPayment",
+        "versioning",
+        "logging",
+        "encryption",
+        "object-lock",
+        "ownershipControls",
+        "accelerate",
+        "inventory",
+        "analytics",
+        "metrics",
+    ];
+    if query_params
+        .keys()
+        .any(|key| XML_BODY_SUBRESOURCES.contains(&key.as_str()))
+    {
+        return false;
+    }
+
+    // Accept unsigned simple path-style uploads (/bucket/key) for parity tools,
+    // but require explicit S3 hints for deeper multi-segment paths so non-S3
+    // REST APIs are not misclassified.
+    let has_s3_hint = {
+        let host_hint = headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .map(|host| host.split(':').next().unwrap_or(host))
+            .map(|host| {
+                host.eq_ignore_ascii_case("s3") || host.starts_with("s3.") || host.contains(".s3.")
+            })
+            .unwrap_or(false);
+
+        let auth_hint = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|auth| auth.contains("/s3/aws4_request") || auth.contains("/S3/aws4_request"))
+            .unwrap_or(false);
+
+        host_hint
+            || auth_hint
+            || headers.contains_key("x-amz-content-sha256")
+            || headers.contains_key("x-amz-storage-class")
+    };
+
+    if !has_s3_hint && segments.len() != 2 {
+        return false;
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, Method};
+    use bytes::Bytes;
+    use serde_json::json;
+
+    use super::{detect_service, extract_rest_operation, is_s3_object_body_request};
+
+    #[test]
+    fn maps_lambda_create_function_with_or_without_trailing_slash() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation("POST", "/2015-03-31/functions/", &params),
+            "CreateFunction"
+        );
+        assert_eq!(
+            extract_rest_operation("POST", "/2015-03-31/functions", &params),
+            "CreateFunction"
+        );
+    }
+
+    #[test]
+    fn maps_lambda_list_functions_with_or_without_trailing_slash() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation("GET", "/2015-03-31/functions/", &params),
+            "ListFunctions"
+        );
+        assert_eq!(
+            extract_rest_operation("GET", "/2015-03-31/functions", &params),
+            "ListFunctions"
+        );
+    }
+
+    #[test]
+    fn detect_service_normalizes_es_host_alias() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "host",
+            HeaderValue::from_static("es.us-east-1.localhost.localstack.cloud"),
+        );
+        let query = std::collections::HashMap::new();
+
+        let service = detect_service("/my-index/_doc/1", &query, &headers, &Bytes::new(), None);
+        assert_eq!(service, "opensearch");
+    }
+
+    #[test]
+    fn s3_object_body_detection_rejects_non_s3_unsigned_multisegment_put() {
+        let headers = HeaderMap::new();
+        let query = std::collections::HashMap::new();
+
+        assert!(!is_s3_object_body_request(
+            &Method::PUT,
+            "/my-index/_doc/1",
+            &headers,
+            &query,
+        ));
+    }
+
+    #[test]
+    fn s3_object_body_detection_accepts_unsigned_simple_path_style_put() {
+        let headers = HeaderMap::new();
+        let query = std::collections::HashMap::new();
+
+        assert!(is_s3_object_body_request(
+            &Method::PUT,
+            "/bench-bucket/object",
+            &headers,
+            &query,
+        ));
+    }
+
+    #[test]
+    fn s3_object_body_detection_rejects_xml_subresource_uploads() {
+        let headers = HeaderMap::new();
+        let query = std::collections::HashMap::from([("tagging".to_string(), String::new())]);
+
+        assert!(!is_s3_object_body_request(
+            &Method::PUT,
+            "/bench-bucket/object",
+            &headers,
+            &query,
+        ));
+    }
 }

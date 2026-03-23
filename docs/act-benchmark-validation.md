@@ -6,22 +6,31 @@ Use this playbook to validate benchmark and benchmark-gate behavior locally befo
 
 - Docker running
 - `act` installed (`act --version`)
-- `GH_TOKEN` exported (required for baseline discovery through `gh`)
+- `oha` installed (`oha --version`) — install from <https://github.com/hatoo/oha>
+- `jq` installed (`jq --version`)
+
+## Run non-main PR benchmark lane (smoke profile)
 
 ```bash
-export GH_TOKEN=<github_token>
-```
-
-## Run non-main PR benchmark lane (fair-low-core)
-
-```bash
-act pull_request -W .github/workflows/ci.yml -j benchmark-smoke-fast --env GH_TOKEN="$GH_TOKEN"
+act pull_request -W .github/workflows/ci.yml -j benchmark-smoke-fast
 ```
 
 Also run a parity lane in the same event context:
 
 ```bash
-act pull_request -W .github/workflows/ci.yml -j parity-all-services-fast --env GH_TOKEN="$GH_TOKEN"
+act pull_request -W .github/workflows/ci.yml -j parity-all-services-fast
+```
+
+## Run main-target PR benchmark lane (standard profile)
+
+```bash
+act pull_request -W .github/workflows/ci.yml -j benchmark-smoke-full
+```
+
+## Run deep benchmark locally
+
+```bash
+./tests/bench/bench_services.sh --profile deep --output benchmark-report.json
 ```
 
 ## Deterministic runtime-image checks
@@ -44,46 +53,33 @@ After pushing the workflow change branch, validate on GitHub Actions:
 - Capture run URL and the matching image id lines as evidence in PR notes.
 
 Expected outcomes:
-- Benchmark job runs and emits report artifacts.
-- Benchmark-gate step runs with diagnostics.
-- If no baseline can be resolved in local simulation, gate fails with explicit diagnostic reason.
+- Benchmark job runs `bench_services.sh` and emits `benchmark-report.json`.
+- Gate step runs `bench_gate.sh` and emits `benchmark_gate_summary.md`.
+- Gate summary is appended to the workflow step summary.
 
-## Run main-target PR benchmark lane (fair-medium-core)
+## Gate pass/fail local validation
+
+Pass-path (run gate on a report):
 
 ```bash
-act pull_request -W .github/workflows/ci.yml -j benchmark-smoke-full --env GH_TOKEN="$GH_TOKEN"
+./tests/bench/bench_gate.sh \
+  --report benchmark-report.json \
+  --output-markdown benchmark_gate_summary.md
+echo "Exit code: $?"
 ```
 
-## Gate pass/fail local script validation
-
-Pass-path (same current and baseline):
+Adjust thresholds to test failure paths:
 
 ```bash
-python3 scripts/benchmark_regression_gate.py \
-  --lane fair-low-core \
-  --current target/benchmark-reports/fair-low-wave1-cross-target-validity.json \
-  --previous target/benchmark-reports/fair-low-wave1-cross-target-validity.json \
-  --strict-missing-baseline \
-  --output-json target/benchmark-reports/benchmark-gate-fair-low-core-local-pass.json \
-  --output-markdown target/benchmark-reports/benchmark-gate-fair-low-core-local-pass.md
-```
-
-Intentional fail-path (synthetic degraded baseline comparison):
-
-```bash
-python3 scripts/benchmark_regression_gate.py \
-  --lane fair-low-core \
-  --current target/benchmark-reports/gate-current-fail.json \
-  --previous target/benchmark-reports/gate-baseline-fail.json \
-  --strict-missing-baseline \
-  --output-json target/benchmark-reports/benchmark-gate-fair-low-core-local-fail.json \
-  --output-markdown target/benchmark-reports/benchmark-gate-fair-low-core-local-fail.md
+./tests/bench/bench_gate.sh \
+  --report benchmark-report.json \
+  --p95-threshold 0.5 \
+  --output-markdown benchmark_gate_summary.md
+echo "Exit code: $?"
 ```
 
 ## Troubleshooting
 
-- `missing_gh_token`: export `GH_TOKEN` and rerun.
-- `github_api_query_failed`: verify network access and GitHub API token scopes.
-- `baseline_artifact_not_found`: verify workflow file and artifact name, or seed a new successful baseline run.
-- `data_quality_no_valid_performance`: check benchmark report validity fields and invalid-reasons output.
+- `oha: command not found`: install oha — `curl -sSfL https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64 -o /usr/local/bin/oha && chmod +x /usr/local/bin/oha`
+- `jq: command not found`: install jq via package manager (`apt install jq`, `brew install jq`).
 - `Runtime image provenance mismatch`: verify producer artifact download/load steps and ensure no job retags/rebuilds the OpenStack runtime image.

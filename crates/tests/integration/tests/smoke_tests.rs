@@ -2,7 +2,11 @@
 //! These tests spin up a real HTTP server and use reqwest to talk to it.
 
 mod common {
+    use std::time::{Duration, Instant};
+
     use openstack_integration_tests::harness::TestHarness;
+
+    pub const LATENCY_GUARDRAIL: Duration = Duration::from_millis(50);
 
     pub async fn health_check(harness: &TestHarness) {
         let resp = harness
@@ -12,6 +16,20 @@ mod common {
             .await
             .unwrap();
         assert!(resp.status().is_success(), "health check failed");
+    }
+
+    pub async fn send_with_latency(
+        request: reqwest::RequestBuilder,
+        operation: &str,
+    ) -> reqwest::Response {
+        let started = Instant::now();
+        let resp = request.send().await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed <= LATENCY_GUARDRAIL,
+            "{operation} exceeded latency guardrail: {elapsed:?} > {LATENCY_GUARDRAIL:?}"
+        );
+        resp
     }
 }
 
@@ -465,6 +483,382 @@ async fn smoke_kinesis_stream_lifecycle() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200, "DeleteStream failed");
+
+    harness.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Additional service smoke + latency guardrails
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn smoke_opensearch_domain_lifecycle_with_latency_guardrail() {
+    let harness =
+        openstack_integration_tests::harness::TestHarness::start_services("opensearch").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/2021-01-01/opensearch/domain", "es", "us-east-1")
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({ "DomainName": "smoke-domain" })),
+        "OpenSearch CreateDomain",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "CreateDomain failed");
+
+    let resp = common::send_with_latency(
+        harness.aws_get(
+            "/2021-01-01/opensearch/domain/smoke-domain",
+            "es",
+            "us-east-1",
+        ),
+        "OpenSearch DescribeDomain",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DescribeDomain failed");
+
+    let resp = common::send_with_latency(
+        harness.aws_delete(
+            "/2021-01-01/opensearch/domain/smoke-domain",
+            "es",
+            "us-east-1",
+        ),
+        "OpenSearch DeleteDomain",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DeleteDomain failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_cloudformation_stack_lifecycle_with_latency_guardrail() {
+    let harness =
+        openstack_integration_tests::harness::TestHarness::start_services("cloudformation").await;
+    common::health_check(&harness).await;
+
+    let template = r#"{"Resources":{"Bucket":{"Type":"AWS::S3::Bucket"}}}"#;
+    let create_body = format!(
+        "Action=CreateStack&Version=2010-05-15&StackName=smoke-stack&TemplateBody={}",
+        urlencoding::encode(template)
+    );
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "cloudformation", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(create_body),
+        "CloudFormation CreateStack",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "CreateStack failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "cloudformation", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=DescribeStacks&Version=2010-05-15&StackName=smoke-stack"),
+        "CloudFormation DescribeStacks",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DescribeStacks failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "cloudformation", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=DeleteStack&Version=2010-05-15&StackName=smoke-stack"),
+        "CloudFormation DeleteStack",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DeleteStack failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_stepfunctions_lifecycle_with_latency_guardrail() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("states").await;
+    common::health_check(&harness).await;
+
+    let definition = serde_json::json!({
+        "StartAt": "Done",
+        "States": {
+            "Done": {
+                "Type": "Pass",
+                "Result": { "ok": true },
+                "End": true
+            }
+        }
+    });
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "states", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.0")
+            .header("x-amz-target", "AWSStepFunctions.CreateStateMachine")
+            .json(&serde_json::json!({
+                "name": "smoke-machine",
+                "definition": serde_json::to_string(&definition).unwrap(),
+                "roleArn": "arn:aws:iam::000000000000:role/sf-role"
+            })),
+        "StepFunctions CreateStateMachine",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "CreateStateMachine failed");
+    let create_json: serde_json::Value = resp.json().await.unwrap();
+    let arn = create_json["stateMachineArn"].as_str().unwrap().to_string();
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "states", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.0")
+            .header("x-amz-target", "AWSStepFunctions.StartExecution")
+            .json(&serde_json::json!({
+                "stateMachineArn": arn,
+                "input": "{}"
+            })),
+        "StepFunctions StartExecution",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "StartExecution failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_apigateway_lifecycle_with_latency_guardrail() {
+    let harness =
+        openstack_integration_tests::harness::TestHarness::start_services("apigateway").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/restapis", "apigateway", "us-east-1")
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({ "name": "smoke-api" })),
+        "ApiGateway CreateRestApi",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 201, "CreateRestApi failed");
+    let api: serde_json::Value = resp.json().await.unwrap();
+    let api_id = api["id"].as_str().unwrap();
+
+    let resp = common::send_with_latency(
+        harness.aws_get(&format!("/restapis/{api_id}"), "apigateway", "us-east-1"),
+        "ApiGateway GetRestApi",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "GetRestApi failed");
+
+    let resp = common::send_with_latency(
+        harness.aws_delete(&format!("/restapis/{api_id}"), "apigateway", "us-east-1"),
+        "ApiGateway DeleteRestApi",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 202, "DeleteRestApi failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_cloudwatch_metrics_with_latency_guardrail() {
+    let harness =
+        openstack_integration_tests::harness::TestHarness::start_services("cloudwatch").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "cloudwatch", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amzn-query-mode", "true")
+            .header("x-amz-target", "CloudWatch.PutMetricData")
+            .json(&serde_json::json!({
+                "Namespace": "SmokeNS",
+                "MetricData": [
+                    {
+                        "MetricName": "RequestCount",
+                        "Value": 1.0
+                    }
+                ]
+            })),
+        "CloudWatch PutMetricData",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "PutMetricData failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "cloudwatch", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amzn-query-mode", "true")
+            .header("x-amz-target", "CloudWatch.ListMetrics")
+            .json(&serde_json::json!({
+                "Namespace": "SmokeNS",
+                "MetricName": "RequestCount"
+            })),
+        "CloudWatch ListMetrics",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "ListMetrics failed");
+    let payload: serde_json::Value = resp.json().await.unwrap();
+    let metrics = payload["Metrics"].as_array().cloned().unwrap_or_default();
+    assert!(
+        metrics
+            .iter()
+            .any(|m| m["MetricName"].as_str() == Some("RequestCount")),
+        "ListMetrics should include RequestCount"
+    );
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_firehose_stream_lifecycle_with_latency_guardrail() {
+    let harness =
+        openstack_integration_tests::harness::TestHarness::start_services("firehose").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "firehose", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "Firehose_20150804.CreateDeliveryStream")
+            .json(&serde_json::json!({
+                "DeliveryStreamName": "smoke-firehose",
+                "S3DestinationConfiguration": {
+                    "BucketARN": "arn:aws:s3:::my-test-bucket",
+                    "RoleARN": "arn:aws:iam::000000000000:role/firehose-role"
+                }
+            })),
+        "Firehose CreateDeliveryStream",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "CreateDeliveryStream failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "firehose", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "Firehose_20150804.DescribeDeliveryStream")
+            .json(&serde_json::json!({ "DeliveryStreamName": "smoke-firehose" })),
+        "Firehose DescribeDeliveryStream",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DescribeDeliveryStream failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "firehose", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "Firehose_20150804.DeleteDeliveryStream")
+            .json(&serde_json::json!({ "DeliveryStreamName": "smoke-firehose" })),
+        "Firehose DeleteDeliveryStream",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DeleteDeliveryStream failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_route53_hosted_zone_lifecycle_with_latency_guardrail() {
+    let harness =
+        openstack_integration_tests::harness::TestHarness::start_services("route53").await;
+    common::health_check(&harness).await;
+
+    let create_body = r#"<CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><Name>smoke.example.com</Name><CallerReference>smoke-r53-1</CallerReference></CreateHostedZoneRequest>"#;
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/2013-04-01/hostedzone", "route53", "us-east-1")
+            .header("content-type", "application/xml")
+            .body(create_body),
+        "Route53 CreateHostedZone",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 201, "CreateHostedZone failed");
+    let xml = resp.text().await.unwrap();
+    let id_start = xml.find("<Id>").unwrap() + 4;
+    let id_end = xml.find("</Id>").unwrap();
+    let zone_id = xml[id_start..id_end].trim_start_matches("/hostedzone/");
+
+    let resp = common::send_with_latency(
+        harness.aws_get(
+            &format!("/2013-04-01/hostedzone/{zone_id}/rrset"),
+            "route53",
+            "us-east-1",
+        ),
+        "Route53 ListResourceRecordSets",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "ListResourceRecordSets failed");
+
+    let resp = common::send_with_latency(
+        harness.aws_delete(
+            &format!("/2013-04-01/hostedzone/{zone_id}"),
+            "route53",
+            "us-east-1",
+        ),
+        "Route53 DeleteHostedZone",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DeleteHostedZone failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_iam_and_sts_query_with_latency_guardrail() {
+    let harness =
+        openstack_integration_tests::harness::TestHarness::start_services("iam,sts").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "iam", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=CreateUser&Version=2010-05-08&UserName=smoke-iam-user"),
+        "IAM CreateUser",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "CreateUser failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "sts", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=GetCallerIdentity&Version=2011-06-15"),
+        "STS GetCallerIdentity",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "GetCallerIdentity failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_lambda_invoke_path_with_latency_guardrail() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("lambda").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post(
+                "/2015-03-31/functions/missing-func/invocations",
+                "lambda",
+                "us-east-1",
+            )
+            .header("content-type", "application/json")
+            .body("{}"),
+        "Lambda Invoke missing function",
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "Invoke should return not found"
+    );
 
     harness.shutdown();
 }
@@ -994,6 +1388,151 @@ async fn smoke_s3_copy_object_cross_bucket() {
         .send()
         .await
         .unwrap();
+
+    harness.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S3 Multi-Size Upload Round-Trip (task 5.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Upload objects of several sizes (1 KB, 256 KB, 1 MB, 10 MB, 50 MB) via HTTP
+/// and verify that GetObject returns the exact same bytes for each.
+///
+/// This exercises both the inline path (≤ 256 KiB) and the disk-streaming path
+/// (> 256 KiB) through the full gateway stack.
+#[tokio::test]
+async fn smoke_s3_multi_size_upload_round_trip() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("s3").await;
+
+    // Create bucket
+    let resp = harness
+        .aws_put("/size-bucket", "s3", "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "CreateBucket failed");
+
+    let sizes: &[(&str, usize)] = &[
+        ("1kb.bin", 1_024),
+        ("256kb.bin", 256 * 1_024),
+        ("1mb.bin", 1_024 * 1_024),
+        ("10mb.bin", 10 * 1_024 * 1_024),
+        ("50mb.bin", 50 * 1_024 * 1_024),
+    ];
+
+    for (key, size) in sizes {
+        let body: Vec<u8> = (0..(*size)).map(|i| (i % 251) as u8).collect();
+
+        // PutObject
+        let resp = harness
+            .aws_put(&format!("/size-bucket/{key}"), "s3", "us-east-1")
+            .header("content-type", "application/octet-stream")
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "PutObject {key} ({size} bytes) failed"
+        );
+        assert!(
+            resp.headers().contains_key("etag"),
+            "PutObject {key} should return ETag"
+        );
+
+        // GetObject and verify content
+        let resp = harness
+            .aws_get(&format!("/size-bucket/{key}"), "s3", "us-east-1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "GetObject {key} failed");
+        let got = resp.bytes().await.unwrap();
+        assert_eq!(got.len(), *size, "GetObject {key}: length mismatch");
+        assert_eq!(&got[..], &body[..], "GetObject {key}: content mismatch");
+    }
+
+    harness.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S3 Concurrent PutObject to Same Key (task 5.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Upload 10 objects concurrently to the same key.  All requests should succeed
+/// (no 500 errors), and the final GetObject should return one valid body.
+///
+/// This validates that the UUID-suffixed temp file fix (Phase 2) eliminates the
+/// race condition that caused ~50% error rates in the CI benchmark gate.
+#[tokio::test]
+async fn smoke_s3_concurrent_put_same_key() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("s3").await;
+
+    // Create bucket
+    let resp = harness
+        .aws_put("/race-bucket", "s3", "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "CreateBucket failed");
+
+    // Upload 10 concurrent PutObject requests to the same key.
+    // Clone the underlying reqwest::Client (cheap, shares a connection pool).
+    let num_tasks = 10usize;
+    let base_url = harness.base_url.clone();
+    let client = harness.client.clone();
+    let mut handles = Vec::with_capacity(num_tasks);
+
+    for i in 0..num_tasks {
+        let url = format!("{base_url}/race-bucket/contested.bin");
+        let c = client.clone();
+        handles.push(tokio::spawn(async move {
+            let body: Vec<u8> = vec![(i as u8) * 10; 4096]; // 4 KiB distinct payload per task
+            c.put(&url)
+                .header("content-type", "application/octet-stream")
+                .header(
+                    "authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/s3/aws4_request, \
+                     SignedHeaders=host;x-amz-date, \
+                     Signature=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .header("x-amz-date", "20260306T000000Z")
+                .body(body)
+                .send()
+                .await
+                .expect("HTTP send failed")
+                .status()
+                .as_u16()
+        }));
+    }
+
+    let mut error_count = 0usize;
+    for handle in handles {
+        let status = handle.await.expect("task panicked");
+        if status != 200 {
+            error_count += 1;
+        }
+    }
+    assert_eq!(
+        error_count, 0,
+        "{error_count} out of {num_tasks} concurrent PutObject requests failed"
+    );
+
+    // Final GetObject — must return 200 with a valid body
+    let resp = harness
+        .aws_get("/race-bucket/contested.bin", "s3", "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "GetObject after concurrent put failed"
+    );
+    let got = resp.bytes().await.unwrap();
+    assert_eq!(got.len(), 4096, "final object size should be 4 KiB");
 
     harness.shutdown();
 }

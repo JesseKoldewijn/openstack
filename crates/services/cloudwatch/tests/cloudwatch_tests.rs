@@ -12,13 +12,23 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
+}
+
+fn make_query_ctx(operation: &str, action: &str, form_body: &str) -> RequestContext {
+    let mut ctx = make_ctx(operation, json!({}));
+    let mut query_params = HashMap::new();
+    query_params.insert("Action".to_string(), action.to_string());
+    ctx.raw_body = Some(Bytes::from(form_body.as_bytes().to_vec()));
+    ctx.query_params = query_params;
+    ctx
 }
 
 fn body(resp: &DispatchResponse) -> Value {
@@ -78,6 +88,45 @@ async fn test_list_metrics() {
 }
 
 #[tokio::test]
+async fn test_list_metrics_query_protocol_includes_dimensions() {
+    let p = CloudWatchProvider::new();
+    p.dispatch(&make_ctx(
+        "PutMetricData",
+        json!({
+            "Namespace": "TestNS",
+            "MetricData": [
+                {
+                    "MetricName": "MyMetric",
+                    "Value": 1.0,
+                    "Unit": "Count",
+                    "Dimensions": [
+                        { "Name": "Service", "Value": "api" },
+                        { "Name": "Env", "Value": "dev" }
+                    ]
+                }
+            ]
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let mut ctx = make_query_ctx(
+        "ListMetrics",
+        "ListMetrics",
+        "Action=ListMetrics&Version=2010-08-01&Namespace=TestNS",
+    );
+    ctx.request_body = json!({ "Namespace": "TestNS" });
+
+    let resp = p.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(&*resp.content_type, "text/xml");
+    let xml = body_str(&resp);
+    assert!(xml.contains("<Dimensions>"));
+    assert!(xml.contains("<Name>Service</Name>"));
+    assert!(xml.contains("<Value>api</Value>"));
+}
+
+#[tokio::test]
 async fn test_get_metric_statistics() {
     let p = CloudWatchProvider::new();
     for v in [10.0, 20.0, 30.0] {
@@ -110,6 +159,57 @@ async fn test_get_metric_statistics() {
     assert_eq!(dp["Average"], 20.0);
     assert_eq!(dp["Sum"], 60.0);
     assert_eq!(dp["Maximum"], 30.0);
+}
+
+#[tokio::test]
+async fn test_get_metric_statistics_empty_query_protocol_returns_xml() {
+    let p = CloudWatchProvider::new();
+    let mut ctx = make_query_ctx(
+        "GetMetricStatistics",
+        "GetMetricStatistics",
+        "Action=GetMetricStatistics&Version=2010-08-01&Namespace=AWS%2FLogs&MetricName=IncomingLogEvents&StartTime=2024-01-01T00%3A00%3A00Z&EndTime=2024-01-01T01%3A00%3A00Z&Period=60&Statistics.member.1=Sum",
+    );
+    ctx.request_body = json!({
+        "Namespace": "AWS/Logs",
+        "MetricName": "IncomingLogEvents",
+        "StartTime": "2024-01-01T00:00:00Z",
+        "EndTime": "2024-01-01T01:00:00Z",
+        "Period": 60,
+        "Statistics": ["Sum"],
+    });
+
+    let resp = p.dispatch(&ctx).await.unwrap();
+
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(&*resp.content_type, "text/xml");
+    let xml = body_str(&resp);
+    assert!(xml.contains("<GetMetricStatisticsResponse"));
+    assert!(xml.contains("<GetMetricStatisticsResult>"));
+    assert!(xml.contains("<Datapoints />"));
+    assert!(xml.contains("<Label>IncomingLogEvents</Label>"));
+}
+
+#[tokio::test]
+async fn test_get_metric_statistics_empty_json_protocol_returns_json() {
+    let p = CloudWatchProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetMetricStatistics",
+            json!({
+                "Namespace": "AWS/Logs",
+                "MetricName": "IncomingLogEvents",
+                "Period": 60,
+                "Statistics": ["Sum"],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(&*resp.content_type, "application/x-amz-json-1.1");
+    let b = body(&resp);
+    assert_eq!(b["Label"], "IncomingLogEvents");
+    assert_eq!(b["Datapoints"], json!([]));
 }
 
 #[tokio::test]

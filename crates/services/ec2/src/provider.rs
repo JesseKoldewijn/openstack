@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -43,7 +44,7 @@ fn xml_ok(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -53,12 +54,13 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <Response><Errors><Error>\
 <Code>{code}</Code><Message>{message}</Message>\
-</Error></Errors></Response>"
+</Error></Errors><RequestID>{}</RequestID></Response>",
+        req_id()
     );
     DispatchResponse {
         status_code: status,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -126,7 +128,9 @@ impl ServiceProvider for Ec2Provider {
             // DescribeVpcs
             // ----------------------------------------------------------------
             "DescribeVpcs" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok("DescribeVpcs", &rid, "<vpcSet></vpcSet>"));
+                };
                 let items: String = store
                     .vpcs
                     .values()
@@ -201,7 +205,9 @@ impl ServiceProvider for Ec2Provider {
             // DescribeSubnets
             // ----------------------------------------------------------------
             "DescribeSubnets" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok("DescribeSubnets", &rid, "<subnetSet></subnetSet>"));
+                };
                 let items: String = store
                     .subnets
                     .values()
@@ -251,7 +257,13 @@ impl ServiceProvider for Ec2Provider {
             // DescribeSecurityGroups
             // ----------------------------------------------------------------
             "DescribeSecurityGroups" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok(
+                        "DescribeSecurityGroups",
+                        &rid,
+                        "<securityGroupInfo></securityGroupInfo>",
+                    ));
+                };
                 let items: String = store
                     .security_groups
                     .values()
@@ -335,10 +347,10 @@ impl ServiceProvider for Ec2Provider {
 
                 // Fetch vpc_id from subnet if possible
                 let vpc_id = {
-                    let store = self.store.get_or_create(account_id, region);
+                    let store = self.store.get(account_id, region);
                     store
-                        .subnets
-                        .get(&subnet_id)
+                        .as_ref()
+                        .and_then(|s| s.subnets.get(&subnet_id))
                         .map(|s| s.vpc_id.clone())
                         .unwrap_or_default()
                 };
@@ -377,7 +389,13 @@ impl ServiceProvider for Ec2Provider {
             // DescribeInstances
             // ----------------------------------------------------------------
             "DescribeInstances" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok(
+                        "DescribeInstances",
+                        &rid,
+                        "<reservationSet></reservationSet>",
+                    ));
+                };
                 let instance_items: String = store
                     .instances
                     .values()
@@ -412,8 +430,8 @@ impl ServiceProvider for Ec2Provider {
                     let mut result = Vec::new();
                     loop {
                         let key = format!("InstanceId.{idx}");
-                        if let Some(id) = ctx.query_params.get(&key) {
-                            result.push(id.clone());
+                        if let Some(id) = str_param(ctx, &key) {
+                            result.push(id.to_string());
                         } else {
                             break;
                         }
@@ -421,6 +439,31 @@ impl ServiceProvider for Ec2Provider {
                     }
                     result
                 };
+                let Some(existing_store) = self.store.get(account_id, region) else {
+                    if let Some(id) = ids.first() {
+                        return Ok(xml_error(
+                            "InvalidInstanceID.NotFound",
+                            &format!("The instance ID '{id}' does not exist"),
+                            400,
+                        ));
+                    }
+                    return Ok(xml_ok(
+                        "TerminateInstances",
+                        &rid,
+                        "<instancesSet></instancesSet>",
+                    ));
+                };
+                for id in &ids {
+                    if !existing_store.instances.contains_key(id) {
+                        return Ok(xml_error(
+                            "InvalidInstanceID.NotFound",
+                            &format!("The instance ID '{id}' does not exist"),
+                            400,
+                        ));
+                    }
+                }
+
+                drop(existing_store);
                 let mut store = self.store.get_or_create(account_id, region);
                 for id in &ids {
                     if let Some(inst) = store.instances.get_mut(id) {

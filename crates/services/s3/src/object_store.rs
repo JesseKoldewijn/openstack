@@ -8,21 +8,26 @@
 //! ```
 //!
 //! S3 keys can contain characters that are invalid in file paths, so the
-//! key is hashed (SHA-256, hex-encoded) to produce a filesystem-safe
+//! key is hashed (XXH3-128, hex-encoded) to produce a filesystem-safe
 //! directory name.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use dashmap::DashSet;
 use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
+use uuid::Uuid;
+use xxhash_rust::xxh3::xxh3_128;
 
 /// Manages object data on the filesystem.
 #[derive(Debug, Clone)]
 pub struct ObjectFileStore {
     base_dir: PathBuf,
+    known_dirs: Arc<DashSet<PathBuf>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,16 +46,42 @@ impl ObjectFileStore {
     pub async fn new(base_dir: impl Into<PathBuf>) -> io::Result<Self> {
         let base_dir = base_dir.into();
         fs::create_dir_all(&base_dir).await?;
-        Ok(Self { base_dir })
+        Ok(Self {
+            base_dir,
+            known_dirs: Arc::new(DashSet::new()),
+        })
     }
 
     // ── Path helpers ────────────────────────────────────────────────
 
     /// Hash an S3 key to a filesystem-safe hex string.
     pub fn key_hash(key: &str) -> String {
+        format!("{:032x}", xxh3_128(key.as_bytes()))
+    }
+
+    /// Legacy SHA-256 hash used by older object path layouts.
+    fn key_hash_legacy_sha256(key: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
         hex::encode(hasher.finalize())
+    }
+
+    async fn ensure_dir_exists(&self, dir: &Path) -> io::Result<()> {
+        if self.known_dirs.contains(dir) {
+            return Ok(());
+        }
+        fs::create_dir_all(dir).await?;
+        self.known_dirs.insert(dir.to_path_buf());
+        Ok(())
+    }
+
+    fn ensure_dir_exists_sync(&self, dir: &Path) -> io::Result<()> {
+        if self.known_dirs.contains(dir) {
+            return Ok(());
+        }
+        std::fs::create_dir_all(dir)?;
+        self.known_dirs.insert(dir.to_path_buf());
+        Ok(())
     }
 
     /// Build the directory path for a given object key within a bucket.
@@ -60,6 +91,20 @@ impl ObjectFileStore {
             .join(region)
             .join(bucket)
             .join(Self::key_hash(key))
+    }
+
+    fn object_dir_legacy(
+        &self,
+        account_id: &str,
+        region: &str,
+        bucket: &str,
+        key: &str,
+    ) -> PathBuf {
+        self.base_dir
+            .join(account_id)
+            .join(region)
+            .join(bucket)
+            .join(Self::key_hash_legacy_sha256(key))
     }
 
     /// Build the full file path for a specific object version.
@@ -73,6 +118,42 @@ impl ObjectFileStore {
     ) -> PathBuf {
         self.object_dir(account_id, region, bucket, key)
             .join(version_id)
+    }
+
+    fn object_path_legacy(
+        &self,
+        account_id: &str,
+        region: &str,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> PathBuf {
+        self.object_dir_legacy(account_id, region, bucket, key)
+            .join(version_id)
+    }
+
+    async fn resolve_existing_object_path(
+        &self,
+        account_id: &str,
+        region: &str,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> io::Result<PathBuf> {
+        let current = self.object_path(account_id, region, bucket, key, version_id);
+        if fs::metadata(&current).await.is_ok() {
+            return Ok(current);
+        }
+
+        let legacy = self.object_path_legacy(account_id, region, bucket, key, version_id);
+        if fs::metadata(&legacy).await.is_ok() {
+            return Ok(legacy);
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "object file not found in current or legacy layout",
+        ))
     }
 
     /// Build the bucket-level directory path.
@@ -99,10 +180,10 @@ impl ObjectFileStore {
         data: &[u8],
     ) -> io::Result<PathBuf> {
         let dir = self.object_dir(account_id, region, bucket, key);
-        fs::create_dir_all(&dir).await?;
+        self.ensure_dir_exists(&dir).await?;
 
         let final_path = dir.join(version_id);
-        let tmp_path = dir.join(format!("{}.tmp", version_id));
+        let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
 
         let mut file = fs::File::create(&tmp_path).await?;
         file.write_all(data).await?;
@@ -138,13 +219,17 @@ impl ObjectFileStore {
         R: tokio::io::AsyncRead + Unpin,
     {
         let dir = self.object_dir(account_id, region, bucket, key);
-        fs::create_dir_all(&dir).await?;
+        self.ensure_dir_exists(&dir).await?;
 
         let final_path = dir.join(version_id);
-        let tmp_path = dir.join(format!("{}.tmp", version_id));
+        let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
 
         let mut file = fs::File::create(&tmp_path).await?;
-        let bytes_written = tokio::io::copy(reader, &mut file).await?;
+
+        // 512 KiB keeps throughput strong while reducing per-request RSS.
+        const COPY_BUF: usize = 512 * 1024;
+        let mut buf_reader = tokio::io::BufReader::with_capacity(COPY_BUF, reader);
+        let bytes_written = tokio::io::copy_buf(&mut buf_reader, &mut file).await?;
         file.flush().await?;
         drop(file);
 
@@ -154,6 +239,59 @@ impl ObjectFileStore {
             path = %final_path.display(),
             size = bytes_written,
             "Object written to filesystem (streamed)"
+        );
+
+        Ok((final_path, bytes_written))
+    }
+
+    /// Write object data from a synchronous reader, streaming to disk.
+    ///
+    /// Intended for use inside [`tokio::task::spawn_blocking`] closures so
+    /// that disk I/O does not block tokio worker threads.
+    ///
+    /// Returns `(final_path, bytes_written)`.
+    pub fn write_object_from_sync_reader<R>(
+        &self,
+        account_id: &str,
+        region: &str,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        reader: &mut R,
+    ) -> io::Result<(PathBuf, u64)>
+    where
+        R: std::io::Read,
+    {
+        use std::io::Write;
+
+        let dir = self.object_dir(account_id, region, bucket, key);
+        self.ensure_dir_exists_sync(&dir)?;
+
+        let final_path = dir.join(version_id);
+        let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
+
+        let mut file = std::fs::File::create(&tmp_path)?;
+
+        // 512 KiB keeps throughput strong while reducing per-request RSS.
+        let mut buf = vec![0u8; 512 * 1024];
+        let mut bytes_written = 0u64;
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            bytes_written += n as u64;
+        }
+        file.flush()?;
+        drop(file);
+
+        std::fs::rename(&tmp_path, &final_path)?;
+
+        debug!(
+            path = %final_path.display(),
+            size = bytes_written,
+            "Object written to filesystem (sync streamed)"
         );
 
         Ok((final_path, bytes_written))
@@ -173,7 +311,9 @@ impl ObjectFileStore {
         key: &str,
         version_id: &str,
     ) -> io::Result<fs::File> {
-        let path = self.object_path(account_id, region, bucket, key, version_id);
+        let path = self
+            .resolve_existing_object_path(account_id, region, bucket, key, version_id)
+            .await?;
         fs::File::open(&path).await
     }
 
@@ -196,21 +336,53 @@ impl ObjectFileStore {
         key: &str,
         version_id: &str,
     ) -> io::Result<()> {
-        let path = self.object_path(account_id, region, bucket, key, version_id);
-        match fs::remove_file(&path).await {
+        let current_path = self.object_path(account_id, region, bucket, key, version_id);
+        let legacy_path = self.object_path_legacy(account_id, region, bucket, key, version_id);
+
+        let mut deleted = false;
+        match fs::remove_file(&current_path).await {
             Ok(()) => {
-                debug!(path = %path.display(), "Object file deleted");
+                deleted = true;
+                debug!(path = %current_path.display(), "Object file deleted");
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                // Already gone — not an error.
-                debug!(path = %path.display(), "Object file already absent");
+                match fs::remove_file(&legacy_path).await {
+                    Ok(()) => {
+                        deleted = true;
+                        debug!(path = %legacy_path.display(), "Legacy object file deleted");
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        // Already gone — not an error.
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             Err(e) => return Err(e),
         }
 
-        // Clean up empty parent directories (key_hash dir, then bucket dir).
-        let key_dir = self.object_dir(account_id, region, bucket, key);
-        Self::remove_dir_if_empty(&key_dir).await;
+        if !deleted {
+            debug!(
+                current_path = %current_path.display(),
+                legacy_path = %legacy_path.display(),
+                "Object file already absent"
+            );
+        }
+
+        // Clean up empty parent directories in both current and legacy layouts.
+        let current_key_dir = self.object_dir(account_id, region, bucket, key);
+        let legacy_key_dir = self.object_dir_legacy(account_id, region, bucket, key);
+
+        Self::remove_dir_if_empty(&current_key_dir).await;
+        if fs::metadata(&current_key_dir).await.is_err() {
+            self.known_dirs.remove(&current_key_dir);
+        }
+
+        if legacy_key_dir != current_key_dir {
+            Self::remove_dir_if_empty(&legacy_key_dir).await;
+            if fs::metadata(&legacy_key_dir).await.is_err() {
+                self.known_dirs.remove(&legacy_key_dir);
+            }
+        }
 
         Ok(())
     }
@@ -225,6 +397,20 @@ impl ObjectFileStore {
         let dir = self.bucket_dir(account_id, region, bucket);
         match fs::remove_dir_all(&dir).await {
             Ok(()) => {
+                let stale_dirs: Vec<PathBuf> = self
+                    .known_dirs
+                    .iter()
+                    .filter_map(|known| {
+                        if known.as_path().starts_with(&dir) {
+                            Some(known.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for stale in stale_dirs {
+                    self.known_dirs.remove(&stale);
+                }
                 debug!(path = %dir.display(), "Bucket directory deleted");
                 Ok(())
             }
@@ -243,15 +429,17 @@ impl ObjectFileStore {
         src: ObjectLocation<'_>,
         dst: ObjectLocation<'_>,
     ) -> io::Result<PathBuf> {
-        let src = self.object_path(
-            src.account_id,
-            src.region,
-            src.bucket,
-            src.key,
-            src.version_id,
-        );
+        let src = self
+            .resolve_existing_object_path(
+                src.account_id,
+                src.region,
+                src.bucket,
+                src.key,
+                src.version_id,
+            )
+            .await?;
         let dst_dir = self.object_dir(dst.account_id, dst.region, dst.bucket, dst.key);
-        fs::create_dir_all(&dst_dir).await?;
+        self.ensure_dir_exists(&dst_dir).await?;
         let dst = dst_dir.join(dst.version_id);
 
         fs::copy(&src, &dst).await?;
@@ -474,8 +662,8 @@ mod tests {
         let h3 = ObjectFileStore::key_hash("different/key");
         assert_ne!(h1, h3);
 
-        // Should be a valid hex string of length 64 (SHA-256).
-        assert_eq!(h1.len(), 64);
+        // Should be a valid hex string of length 32 (XXH3-128).
+        assert_eq!(h1.len(), 32);
         assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
@@ -504,6 +692,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_writes_same_key_no_race() {
+        // Spawning 10 concurrent tasks writing to the same version_id
+        // ("null") used to race on the shared `null.tmp` temp file.
+        // With UUID-suffixed temp files each task gets its own temp path
+        // and all writes should complete successfully.
+        let (store, _tmp) = make_store().await;
+        let store = std::sync::Arc::new(store);
+
+        // Write 10 different data payloads concurrently to the same key.
+        let handles: Vec<_> = (0u8..10)
+            .map(|i| {
+                let store = std::sync::Arc::clone(&store);
+                tokio::spawn(async move {
+                    store
+                        .write_object("acct1", "us-east-1", "bkt", "same-key", "null", &[i; 64])
+                        .await
+                })
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await);
+        }
+        for join_result in results {
+            // Every task must have finished without a filesystem error.
+            join_result
+                .expect("task panicked")
+                .expect("write_object failed");
+        }
+
+        // The final object file must exist (last writer wins via rename).
+        let key_dir = store.object_dir("acct1", "us-east-1", "bkt", "same-key");
+        let final_path = key_dir.join("null");
+        assert!(final_path.exists(), "final object file should exist");
+        let final_bytes = tokio::fs::read(&final_path).await.unwrap();
+        assert_eq!(final_bytes.len(), 64);
+        assert!(
+            (0u8..10).any(|i| final_bytes == vec![i; 64]),
+            "final object should match one complete writer payload"
+        );
+
+        // No .tmp files should remain.
+        let mut entries = tokio::fs::read_dir(&key_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.ends_with(".tmp"), "orphaned temp file found: {name}");
+        }
+    }
+
+    #[tokio::test]
     async fn atomic_write_no_partial_visible() {
         let (store, _tmp) = make_store().await;
         let path = store.object_path("acct1", "us-east-1", "bkt", "k", "v1");
@@ -524,5 +764,25 @@ mod tests {
         let dir = path.parent().unwrap();
         let tmp_path = dir.join("v1.tmp");
         assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn read_object_falls_back_to_legacy_sha256_layout() {
+        let (store, _tmp) = make_store().await;
+        let legacy_dir = store.object_dir_legacy("acct1", "us-east-1", "bkt", "legacy-key");
+        tokio::fs::create_dir_all(&legacy_dir).await.unwrap();
+        let legacy_path = legacy_dir.join("v1");
+        tokio::fs::write(&legacy_path, b"legacy-data")
+            .await
+            .unwrap();
+
+        let mut file = store
+            .read_object("acct1", "us-east-1", "bkt", "legacy-key", "v1")
+            .await
+            .expect("legacy object should be readable");
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"legacy-data");
     }
 }

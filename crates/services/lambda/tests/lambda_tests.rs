@@ -17,11 +17,12 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -33,11 +34,33 @@ fn make_ctx_with_path(operation: &str, body: Value, path: &str) -> RequestContex
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: path.to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
+        spooled_body: None,
+    }
+}
+
+fn make_ctx_with_path_and_raw_body(
+    operation: &str,
+    raw_body: Vec<u8>,
+    path: &str,
+) -> RequestContext {
+    RequestContext {
+        service: "lambda".to_string(),
+        operation: operation.to_string(),
+        region: "us-east-1".to_string(),
+        account_id: "000000000000".to_string(),
+        request_body: Value::Null,
+        raw_body: Some(Bytes::from(raw_body)),
+        headers: Default::default(),
+        path: path.to_string(),
+        method: "POST".to_string(),
+        query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -140,6 +163,34 @@ async fn test_get_function_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 404);
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "ResourceNotFoundException");
+    assert_eq!(payload["Type"], "User");
+    assert_eq!(
+        payload["Message"],
+        "Function not found: arn:aws:lambda:us-east-1:000000000000:function:no-such-func"
+    );
+}
+
+#[tokio::test]
+async fn test_invoke_rejects_non_utf8_payload() {
+    let p = LambdaProvider::new();
+    let _ = create_function(&p, "invoke-func").await;
+
+    let resp = p
+        .dispatch(&make_ctx_with_path_and_raw_body(
+            "Invoke",
+            vec![0xff, 0xfe, 0xfd],
+            "/2015-03-31/functions/invoke-func/invocations",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status_code, 400);
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "InvalidRequestContentException");
+    assert_eq!(payload["Message"], "Invoke payload must be valid UTF-8");
 }
 
 #[tokio::test]
@@ -553,11 +604,12 @@ async fn test_docker_invoke_python() {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: json!({}),
-        raw_body: Bytes::from(b"{\"key\": \"value\"}".to_vec()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(b"{\"key\": \"value\"}".to_vec())),
+        headers: Default::default(),
         path: "/2015-03-31/functions/docker-python-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let invoke_resp = p.dispatch(&invoke_ctx).await.unwrap();
@@ -595,15 +647,19 @@ async fn test_docker_invoke_async() {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: json!({}),
-        raw_body: Bytes::from(b"{}".to_vec()),
+        raw_body: Some(Bytes::from(b"{}".to_vec())),
         headers: {
-            let mut h = HashMap::new();
-            h.insert("x-amz-invocation-type".to_string(), "Event".to_string());
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(
+                axum::http::header::HeaderName::from_static("x-amz-invocation-type"),
+                axum::http::header::HeaderValue::from_static("Event"),
+            );
             h
         },
         path: "/2015-03-31/functions/async-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let resp = p.dispatch(&invoke_ctx).await.unwrap();
@@ -652,11 +708,12 @@ def handler(event, context):
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: json!({}),
-        raw_body: Bytes::from(b"{}".to_vec()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(b"{}".to_vec())),
+        headers: Default::default(),
         path: "/2015-03-31/functions/timeout-fn/invocations".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let resp = p.dispatch(&invoke_ctx).await.unwrap();

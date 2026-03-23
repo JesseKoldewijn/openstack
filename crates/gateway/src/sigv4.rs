@@ -2,17 +2,19 @@
 ///
 /// Format: AWS4-HMAC-SHA256 Credential=ACCESS_KEY/DATE/REGION/SERVICE/aws4_request,
 ///         SignedHeaders=..., Signature=...
+///
+/// Fields borrow from the input auth header string to avoid allocating 3
+/// Strings on every request. The caller converts to owned only where needed.
 #[derive(Debug, Default)]
-pub struct SigV4Auth {
-    pub access_key: String,
-    pub region: String,
-    pub service: String,
-    pub date: String,
+pub struct SigV4Auth<'a> {
+    pub access_key: &'a str,
+    pub region: &'a str,
+    pub service: &'a str,
 }
 
 /// Parse a SigV4 Authorization header value.
 /// Returns None if the header is not a valid SigV4 header.
-pub fn parse_sigv4_auth(auth: &str) -> Option<SigV4Auth> {
+pub fn parse_sigv4_auth(auth: &str) -> Option<SigV4Auth<'_>> {
     if !auth.starts_with("AWS4-HMAC-SHA256") {
         return None;
     }
@@ -32,16 +34,19 @@ pub fn parse_sigv4_auth(auth: &str) -> Option<SigV4Auth> {
     })?;
 
     // credential scope: ACCESS_KEY/DATE/REGION/SERVICE/aws4_request
-    let parts: Vec<&str> = credential.split('/').collect();
-    if parts.len() < 5 {
+    let mut parts = credential.splitn(5, '/');
+    let access_key = parts.next()?;
+    let _date = parts.next()?;
+    let region = parts.next()?;
+    let service = parts.next()?;
+    if parts.next()? != "aws4_request" {
         return None;
     }
 
     Some(SigV4Auth {
-        access_key: parts[0].to_string(),
-        date: parts[1].to_string(),
-        region: parts[2].to_string(),
-        service: parts[3].to_string(),
+        access_key,
+        region,
+        service,
     })
 }
 
@@ -136,7 +141,6 @@ mod tests {
         assert_eq!(parsed.access_key, "AKID123");
         assert_eq!(parsed.region, "us-east-1");
         assert_eq!(parsed.service, "sqs");
-        assert_eq!(parsed.date, "20260306");
     }
 
     #[test]

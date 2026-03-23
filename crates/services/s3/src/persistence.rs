@@ -39,7 +39,7 @@ impl PersistableStore for S3PersistableStore {
     async fn save(&self, data_dir: &Path) -> Result<(), anyhow::Error> {
         for entry in self.bundle.iter() {
             let key = entry.key();
-            let path = openstack_state::state_path(data_dir, "s3", &key.account_id, &key.region);
+            let path = openstack_state::state_path(data_dir, "s3", key.account_id(), key.region());
 
             // Clone the store so we can relativize FileRef paths without
             // holding the DashMap guard or mutating the live store.
@@ -177,6 +177,8 @@ fn resolve_data_ref(data: &mut ObjectDataRef, base: &Path, bucket: &str, key: &s
 mod tests {
     use std::collections::HashMap;
 
+    use bytes::Bytes;
+
     use super::*;
     use crate::store::{ObjectVersion, S3Object, S3Store};
 
@@ -221,7 +223,12 @@ mod tests {
         let base = PathBuf::from("/data/s3/objects");
         let mut store = S3Store::default();
 
-        let version = ObjectVersion::new(b"hello".to_vec(), "text/plain", HashMap::new(), false);
+        let version = ObjectVersion::new(
+            Bytes::from_static(b"hello"),
+            "text/plain",
+            HashMap::new(),
+            false,
+        );
         let s3_obj = S3Object::new("inline-key", version);
         store
             .objects
@@ -232,11 +239,11 @@ mod tests {
         // Relativize should not touch Inline data
         relativize_paths(&mut store, &base);
         let data = &store.objects["mybucket"]["inline-key"].versions[0].data;
-        assert_eq!(data, &ObjectDataRef::Inline(b"hello".to_vec()));
+        assert_eq!(data, &ObjectDataRef::Inline(Bytes::from_static(b"hello")));
 
         // Resolve should not touch Inline data
         resolve_and_verify_paths(&mut store, &base);
         let data = &store.objects["mybucket"]["inline-key"].versions[0].data;
-        assert_eq!(data, &ObjectDataRef::Inline(b"hello".to_vec()));
+        assert_eq!(data, &ObjectDataRef::Inline(Bytes::from_static(b"hello")));
     }
 }

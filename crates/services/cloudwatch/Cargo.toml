@@ -21,3 +21,4 @@ uuid.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
 bytes.workspace = true
+serde_urlencoded.workspace = true

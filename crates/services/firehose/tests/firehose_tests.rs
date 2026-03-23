@@ -13,11 +13,12 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -193,4 +194,24 @@ async fn test_duplicate_stream_fails() {
     assert_eq!(resp.status_code, 400);
     let b = body(&resp);
     assert!(b["__type"].as_str().unwrap().contains("ResourceInUse"));
+}
+
+#[tokio::test]
+async fn test_describe_missing_stream_matches_localstack_shape() {
+    let p = FirehoseProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeDeliveryStream",
+            json!({ "DeliveryStreamName": "missing-stream" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    assert_eq!(resp.content_type, "application/json");
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
+    assert_eq!(
+        b["message"],
+        "Firehose missing-stream under account 000000000000 not found."
+    );
 }

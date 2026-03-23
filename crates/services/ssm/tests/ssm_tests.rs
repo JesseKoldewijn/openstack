@@ -12,11 +12,12 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -218,7 +219,10 @@ async fn test_delete_parameter() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body_str(&resp).contains("ParameterNotFound"));
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "ParameterNotFound");
+    assert_eq!(payload["message"], "Parameter /del not found.");
 }
 
 #[tokio::test]

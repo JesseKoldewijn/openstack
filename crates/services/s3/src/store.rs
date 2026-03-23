@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use digest::Digest as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -15,8 +17,9 @@ use uuid::Uuid;
 /// `FileRef` points to a file on disk managed by [`ObjectFileStore`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObjectDataRef {
-    /// Data stored inline in memory.
-    Inline(Vec<u8>),
+    /// Data stored inline in memory.  `Bytes` is reference-counted so
+    /// clone is O(1) — no deep copy under the DashMap lock.
+    Inline(Bytes),
     /// Data stored on disk at the given path.
     FileRef(PathBuf),
 }
@@ -46,7 +49,7 @@ impl ObjectDataRef {
 
 impl Default for ObjectDataRef {
     fn default() -> Self {
-        ObjectDataRef::Inline(Vec::new())
+        ObjectDataRef::Inline(Bytes::new())
     }
 }
 
@@ -58,6 +61,7 @@ mod serde_object_data_ref {
     use std::path::PathBuf;
 
     use base64::{Engine, engine::general_purpose::STANDARD};
+    use bytes::Bytes;
     use serde::Deserialize;
     use serde::de::{self, Deserializer};
     use serde::ser::Serializer;
@@ -88,7 +92,7 @@ mod serde_object_data_ref {
         match &value {
             serde_json::Value::String(b64) => {
                 let bytes = STANDARD.decode(b64).map_err(de::Error::custom)?;
-                Ok(ObjectDataRef::Inline(bytes))
+                Ok(ObjectDataRef::Inline(Bytes::from(bytes)))
             }
             serde_json::Value::Object(map) => {
                 if let Some(serde_json::Value::String(path)) = map.get("file_ref") {
@@ -168,7 +172,7 @@ pub struct ObjectVersion {
 impl ObjectVersion {
     /// Create a new object version from inline data.
     pub fn new(
-        data: Vec<u8>,
+        data: Bytes,
         content_type: impl Into<String>,
         metadata: HashMap<String, String>,
         versioning_enabled: bool,
@@ -229,7 +233,7 @@ impl ObjectVersion {
 }
 
 fn md5_bytes(data: &[u8]) -> [u8; 16] {
-    md5::compute(data).0
+    md5::Md5::digest(data).into()
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +359,12 @@ impl S3Store {
         self.objects.get(name).map(|m| m.is_empty()).unwrap_or(true)
     }
 
+    pub fn has_incomplete_multipart_uploads(&self, bucket: &str) -> bool {
+        self.multipart_uploads
+            .values()
+            .any(|upload| upload.bucket == bucket)
+    }
+
     // --- object helpers ----------------------------------------------------
 
     pub fn put_object(
@@ -364,7 +374,7 @@ impl S3Store {
         data: ObjectDataRef,
         content_type: impl Into<String>,
         metadata: HashMap<String, String>,
-    ) -> Option<ObjectVersion> {
+    ) -> Option<ObjectDataRef> {
         let versioning = self
             .buckets
             .get(bucket)
@@ -395,13 +405,17 @@ impl S3Store {
         let objects = self.objects.entry(bucket.to_string()).or_default();
 
         if let Some(obj) = objects.get_mut(key) {
-            let prev = obj.versions.first().cloned();
-            obj.versions.insert(0, version.clone());
-            // Keep at most 100 non-current versions to avoid unbounded growth
-            obj.versions.truncate(100);
+            let prev = obj.versions.first().map(|v| v.data.clone());
+            if version.version_id == "null" {
+                // Non-versioned bucket: overwrite current object in place.
+                obj.versions.clear();
+                obj.versions.push(version);
+            } else {
+                obj.versions.insert(0, version);
+            }
             prev
         } else {
-            objects.insert(key.to_string(), S3Object::new(key, version.clone()));
+            objects.insert(key.to_string(), S3Object::new(key, version));
             None
         }
     }
@@ -415,12 +429,17 @@ impl S3Store {
         bucket: &str,
         key: &str,
         version: ObjectVersion,
-    ) -> Option<ObjectVersion> {
+    ) -> Option<ObjectDataRef> {
         let objects = self.objects.entry(bucket.to_string()).or_default();
         if let Some(obj) = objects.get_mut(key) {
-            let prev = obj.versions.first().cloned();
-            obj.versions.insert(0, version);
-            obj.versions.truncate(100);
+            let prev = obj.versions.first().map(|v| v.data.clone());
+            if version.version_id == "null" {
+                // Non-versioned bucket: overwrite current object in place.
+                obj.versions.clear();
+                obj.versions.push(version);
+            } else {
+                obj.versions.insert(0, version);
+            }
             prev
         } else {
             objects.insert(key.to_string(), S3Object::new(key, version));
@@ -469,7 +488,7 @@ impl S3Store {
                 size: 0,
                 metadata: HashMap::new(),
                 acl: String::new(),
-                data: ObjectDataRef::Inline(Vec::new()),
+                data: ObjectDataRef::Inline(Bytes::new()),
                 delete_marker: true,
             };
             let obj = objects.entry(key.to_string()).or_insert_with(|| S3Object {
@@ -602,8 +621,8 @@ impl S3Store {
         let mut combined = Vec::new();
         let mut sorted_parts: Vec<u32> = parts.iter().map(|(n, _)| *n).collect();
         sorted_parts.sort_unstable();
-        for part_num in sorted_parts {
-            if let Some(part) = upload.parts.get(&part_num)
+        for part_num in &sorted_parts {
+            if let Some(part) = upload.parts.get(part_num)
                 && let ObjectDataRef::Inline(bytes) = &part.data
             {
                 combined.extend_from_slice(bytes);
@@ -619,47 +638,87 @@ impl S3Store {
             .unwrap_or(false);
 
         let version = ObjectVersion::new(
-            combined,
+            Bytes::from(combined),
             upload.content_type.clone(),
             upload.metadata.clone(),
             versioning,
         );
 
+        let multipart_etag = {
+            let mut concat = Vec::with_capacity(sorted_parts.len() * 16);
+            let mut count = 0usize;
+            for part_num in &sorted_parts {
+                if let Some(part) = upload.parts.get(part_num)
+                    && let Ok(bytes) = hex::decode(part.etag.trim_matches('"'))
+                    && bytes.len() == 16
+                {
+                    concat.extend_from_slice(&bytes);
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                Some(format!("\"{}-{}\"", hex::encode(md5_bytes(&concat)), count))
+            } else {
+                None
+            }
+        };
+
+        let mut version = version;
+        if let Some(etag) = multipart_etag {
+            version.etag = etag;
+        }
+
         let objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
-            obj.versions.insert(0, version.clone());
+            if version.version_id == "null" {
+                obj.versions.clear();
+                obj.versions.push(version);
+            } else {
+                obj.versions.insert(0, version);
+            }
+            obj.versions.first().cloned()
         } else {
             objects.insert(
                 upload.key.clone(),
-                S3Object::new(upload.key.clone(), version.clone()),
+                S3Object::new(upload.key.clone(), version),
             );
+            objects
+                .get(&upload.key)
+                .and_then(|obj| obj.versions.first().cloned())
         }
-
-        Some(version)
     }
 
     /// Complete a multipart upload with a pre-assembled `ObjectVersion`.
     ///
     /// Used when parts are file-backed and the caller has already
     /// concatenated them on disk.
+    ///
+    /// Returns the previous current version when an existing key is
+    /// overwritten; otherwise returns `None`.
     pub fn complete_multipart_upload_with_version(
         &mut self,
         upload_id: &str,
         version: ObjectVersion,
-    ) -> Option<ObjectVersion> {
+    ) -> Option<ObjectDataRef> {
         let upload = self.multipart_uploads.remove(upload_id)?;
 
         let objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
-            obj.versions.insert(0, version.clone());
+            let prev = obj.versions.first().map(|v| v.data.clone());
+            if version.version_id == "null" {
+                obj.versions.clear();
+                obj.versions.push(version);
+            } else {
+                obj.versions.insert(0, version);
+            }
+            prev
         } else {
             objects.insert(
                 upload.key.clone(),
-                S3Object::new(upload.key.clone(), version.clone()),
+                S3Object::new(upload.key.clone(), version),
             );
+            None
         }
-
-        Some(version)
     }
 
     /// Get the `MultipartUpload` metadata for a given upload_id.

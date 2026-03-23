@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -44,7 +45,7 @@ fn xml_wrap(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -59,7 +60,7 @@ fn xml_no_result(action: &str, request_id: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -74,7 +75,7 @@ fn sns_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
         body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -95,7 +96,7 @@ fn escape_xml(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn parse_params(ctx: &RequestContext) -> HashMap<String, String> {
-    let body_str = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    let body_str = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
     let mut params: HashMap<String, String> = body_str
         .split('&')
         .filter_map(|kv| {
@@ -213,11 +214,8 @@ fn handle_delete_topic(store: &mut SnsStore, params: &HashMap<String, String>) -
         Some(a) => a.clone(),
         None => return sns_error("InvalidParameter", "TopicArn is required", 400),
     };
-    if store.delete_topic(&arn) {
-        xml_no_result("DeleteTopic", &new_request_id())
-    } else {
-        sns_error("NotFound", "Topic not found", 404)
-    }
+    let _ = store.delete_topic(&arn);
+    xml_no_result("DeleteTopic", &new_request_id())
 }
 
 fn handle_list_topics(store: &SnsStore, params: &HashMap<String, String>) -> DispatchResponse {
@@ -245,7 +243,7 @@ fn handle_get_topic_attributes(
     };
     let topic = match store.get_topic(&arn) {
         Some(t) => t,
-        None => return sns_error("NotFound", "Topic not found", 404),
+        None => return sns_error("NotFound", "Topic does not exist", 404),
     };
 
     let sub_count = store.list_subscriptions_by_topic(&arn).len();
@@ -656,25 +654,78 @@ impl ServiceProvider for SnsProvider {
 
         debug!(service = "sns", action = %action, "SNS dispatch");
 
-        let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-
         let response = match action.as_str() {
-            "CreateTopic" => handle_create_topic(&mut store, ctx, &params),
-            "DeleteTopic" => handle_delete_topic(&mut store, &params),
-            "ListTopics" => handle_list_topics(&store, &params),
-            "GetTopicAttributes" => handle_get_topic_attributes(&store, &params),
-            "SetTopicAttributes" => handle_set_topic_attributes(&mut store, &params),
-            "Subscribe" => handle_subscribe(&mut store, ctx, &params),
-            "Unsubscribe" => handle_unsubscribe(&mut store, &params),
-            "ListSubscriptions" => handle_list_subscriptions(&store, &params),
-            "ListSubscriptionsByTopic" => handle_list_subscriptions_by_topic(&store, &params),
-            "GetSubscriptionAttributes" => handle_get_subscription_attributes(&store, &params),
-            "SetSubscriptionAttributes" => handle_set_subscription_attributes(&mut store, &params),
-            "Publish" => handle_publish(&mut store, &params),
-            "PublishBatch" => handle_publish_batch(&mut store, &params),
-            _ => {
-                warn!(service = "sns", action = %action, "SNS action not implemented");
-                return Err(DispatchError::NotImplemented(action));
+            // Read-only ops — acquire shared (read) lock
+            "ListTopics" => {
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(xml_wrap(
+                        "ListTopics",
+                        &new_request_id(),
+                        "<Topics></Topics>",
+                    ));
+                };
+                handle_list_topics(&store, &params)
+            }
+            "GetTopicAttributes" => {
+                if !params.contains_key("TopicArn") {
+                    return Ok(sns_error("InvalidParameter", "TopicArn is required", 400));
+                }
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(sns_error("NotFound", "Topic does not exist", 404));
+                };
+                handle_get_topic_attributes(&store, &params)
+            }
+            "ListSubscriptions" => {
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(xml_wrap(
+                        "ListSubscriptions",
+                        &new_request_id(),
+                        "<Subscriptions></Subscriptions>",
+                    ));
+                };
+                handle_list_subscriptions(&store, &params)
+            }
+            "ListSubscriptionsByTopic" => {
+                if !params.contains_key("TopicArn") {
+                    return Ok(sns_error("InvalidParameter", "TopicArn is required", 400));
+                }
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(sns_error("NotFound", "Topic not found", 404));
+                };
+                handle_list_subscriptions_by_topic(&store, &params)
+            }
+            "GetSubscriptionAttributes" => {
+                if !params.contains_key("SubscriptionArn") {
+                    return Ok(sns_error(
+                        "InvalidParameter",
+                        "SubscriptionArn is required",
+                        400,
+                    ));
+                }
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(sns_error("NotFound", "Subscription not found", 404));
+                };
+                handle_get_subscription_attributes(&store, &params)
+            }
+            // Write ops — acquire exclusive (write) lock
+            other => {
+                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                match other {
+                    "CreateTopic" => handle_create_topic(&mut store, ctx, &params),
+                    "DeleteTopic" => handle_delete_topic(&mut store, &params),
+                    "SetTopicAttributes" => handle_set_topic_attributes(&mut store, &params),
+                    "Subscribe" => handle_subscribe(&mut store, ctx, &params),
+                    "Unsubscribe" => handle_unsubscribe(&mut store, &params),
+                    "SetSubscriptionAttributes" => {
+                        handle_set_subscription_attributes(&mut store, &params)
+                    }
+                    "Publish" => handle_publish(&mut store, &params),
+                    "PublishBatch" => handle_publish_batch(&mut store, &params),
+                    _ => {
+                        warn!(service = "sns", action = %other, "SNS action not implemented");
+                        return Err(DispatchError::NotImplemented(other.to_string()));
+                    }
+                }
             }
         };
 

@@ -1,8 +1,37 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+
+static MESSAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn message_uuid_like(id: u64) -> String {
+    let mut out = String::with_capacity(36);
+    let _ = write!(
+        &mut out,
+        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+        (id >> 32) as u32,
+        (id >> 16) as u16,
+        id as u16 & 0x0fff,
+        ((id >> 12) as u16) & 0x0fff,
+        id & 0x0000_ffff_ffff_ffff,
+    );
+    out
+}
+
+fn next_message_id() -> String {
+    let id = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    message_uuid_like(id)
+}
+
+fn next_receipt_handle() -> String {
+    let id = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut out = String::with_capacity(21);
+    let _ = write!(&mut out, "rh-{id:016x}");
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Message attribute value
@@ -42,6 +71,13 @@ pub struct SqsMessage {
     pub sequence_number: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SendMessageResult {
+    pub message_id: String,
+    pub md5_of_body: String,
+    pub sequence_number: u64,
+}
+
 impl SqsMessage {
     pub fn new(
         body: impl Into<String>,
@@ -53,15 +89,16 @@ impl SqsMessage {
     ) -> Self {
         let body = body.into();
         let md5 = md5_hex(body.as_bytes());
-        let message_id = Uuid::new_v4().to_string();
-        let receipt_handle = Uuid::new_v4().to_string();
+        let message_id = next_message_id();
+        let receipt_handle = next_receipt_handle();
+        let sent_at = Utc::now();
         let visible_after = if delay_seconds > 0 {
-            Some(Utc::now() + chrono::Duration::seconds(delay_seconds as i64))
+            Some(sent_at + chrono::Duration::seconds(delay_seconds as i64))
         } else {
             None
         };
 
-        let mut attributes = HashMap::new();
+        let mut attributes = HashMap::with_capacity(3);
         attributes.insert(
             "ApproximateFirstReceiveTimestamp".to_string(),
             "0".to_string(),
@@ -69,7 +106,7 @@ impl SqsMessage {
         attributes.insert("ApproximateReceiveCount".to_string(), "0".to_string());
         attributes.insert(
             "SentTimestamp".to_string(),
-            Utc::now().timestamp_millis().to_string(),
+            sent_at.timestamp_millis().to_string(),
         );
 
         Self {
@@ -79,7 +116,7 @@ impl SqsMessage {
             md5_of_body: md5,
             attributes,
             message_attributes,
-            sent_at: Utc::now(),
+            sent_at,
             visible_after,
             receive_count: 0,
             delay_seconds,
@@ -90,23 +127,35 @@ impl SqsMessage {
     }
 
     pub fn is_visible(&self) -> bool {
-        match self.visible_after {
+        let now = Utc::now();
+        self.is_visible_at(&now)
+    }
+
+    pub fn is_visible_at(&self, now: &DateTime<Utc>) -> bool {
+        match &self.visible_after {
             None => true,
-            Some(t) => Utc::now() >= t,
+            Some(t) => now >= t,
         }
     }
 
     /// Make a new receipt handle for this receive attempt and set visibility timeout.
-    pub fn begin_receive(&mut self, visibility_timeout_secs: u32) {
-        self.receipt_handle = Uuid::new_v4().to_string();
+    pub fn begin_receive(&mut self, visibility_timeout_secs: u32, now: &DateTime<Utc>) {
+        let next = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.receipt_handle.clear();
+        let _ = write!(&mut self.receipt_handle, "rh-{next:016x}");
         self.receive_count += 1;
-        self.attributes.insert(
-            "ApproximateReceiveCount".to_string(),
-            self.receive_count.to_string(),
-        );
+        if let Some(v) = self.attributes.get_mut("ApproximateReceiveCount") {
+            v.clear();
+            let _ = write!(v, "{}", self.receive_count);
+        } else {
+            self.attributes.insert(
+                "ApproximateReceiveCount".to_string(),
+                self.receive_count.to_string(),
+            );
+        }
         if visibility_timeout_secs > 0 {
             self.visible_after =
-                Some(Utc::now() + chrono::Duration::seconds(visibility_timeout_secs as i64));
+                Some(*now + chrono::Duration::seconds(visibility_timeout_secs as i64));
         } else {
             self.visible_after = None;
         }
@@ -195,7 +244,7 @@ impl SqsQueue {
         message_attributes: HashMap<String, MessageAttributeValue>,
         message_group_id: Option<String>,
         dedup_id: Option<String>,
-    ) -> Option<SqsMessage> {
+    ) -> Option<SendMessageResult> {
         let delay = delay_override.unwrap_or(self.delay_seconds);
 
         // FIFO deduplication
@@ -221,8 +270,13 @@ impl SqsQueue {
             self.dedup_ids.insert(did, msg.message_id.clone());
         }
 
-        self.messages.push_back(msg.clone());
-        Some(msg)
+        let result = SendMessageResult {
+            message_id: msg.message_id.clone(),
+            md5_of_body: msg.md5_of_body.clone(),
+            sequence_number: msg.sequence_number,
+        };
+        self.messages.push_back(msg);
+        Some(result)
     }
 
     /// Receive up to `max_number` visible messages, applying visibility timeout.
@@ -230,17 +284,33 @@ impl SqsQueue {
         &mut self,
         max_number: usize,
         visibility_timeout: Option<u32>,
-    ) -> Vec<SqsMessage> {
-        let vt = visibility_timeout.unwrap_or(self.visibility_timeout);
-        let mut received = Vec::new();
+    ) -> Vec<usize> {
+        if max_number == 0 || self.messages.is_empty() {
+            return Vec::new();
+        }
 
-        for msg in self.messages.iter_mut() {
+        let vt = visibility_timeout.unwrap_or(self.visibility_timeout);
+        let now = Utc::now();
+
+        if max_number == 1 {
+            for (idx, msg) in self.messages.iter_mut().enumerate() {
+                if msg.is_visible_at(&now) {
+                    msg.begin_receive(vt, &now);
+                    return vec![idx];
+                }
+            }
+            return Vec::new();
+        }
+
+        let mut received = Vec::with_capacity(max_number);
+
+        for (idx, msg) in self.messages.iter_mut().enumerate() {
             if received.len() >= max_number {
                 break;
             }
-            if msg.is_visible() {
-                msg.begin_receive(vt);
-                received.push(msg.clone());
+            if msg.is_visible_at(&now) {
+                msg.begin_receive(vt, &now);
+                received.push(idx);
             }
         }
         received
@@ -248,9 +318,16 @@ impl SqsQueue {
 
     /// Delete a message by receipt handle. Returns true if found.
     pub fn delete_message(&mut self, receipt_handle: &str) -> bool {
-        let before = self.messages.len();
-        self.messages.retain(|m| m.receipt_handle != receipt_handle);
-        self.messages.len() < before
+        if let Some(idx) = self
+            .messages
+            .iter()
+            .position(|m| m.receipt_handle == receipt_handle)
+        {
+            self.messages.remove(idx);
+            true
+        } else {
+            false
+        }
     }
 
     /// Change visibility timeout for a message by receipt handle.
@@ -276,11 +353,19 @@ impl SqsQueue {
 
     /// Approximate number of visible messages.
     pub fn approximate_number_of_messages(&self) -> usize {
-        self.messages.iter().filter(|m| m.is_visible()).count()
+        let now = Utc::now();
+        self.messages
+            .iter()
+            .filter(|m| m.is_visible_at(&now))
+            .count()
     }
 
     pub fn approximate_number_of_messages_not_visible(&self) -> usize {
-        self.messages.iter().filter(|m| !m.is_visible()).count()
+        let now = Utc::now();
+        self.messages
+            .iter()
+            .filter(|m| !m.is_visible_at(&now))
+            .count()
     }
 
     /// Check DLQ redrive: move messages that exceed max receive count.
@@ -417,8 +502,7 @@ pub fn apply_queue_attributes(q: &mut SqsQueue, attrs: &HashMap<String, String>)
 }
 
 pub fn md5_hex(data: &[u8]) -> String {
-    use sha2::Digest;
-    // Use SHA-256 truncated to 16 bytes as a stand-in for MD5 (no md-5 crate in workspace)
-    let digest = sha2::Sha256::digest(data);
-    hex::encode(&digest[..16])
+    use md5::Digest;
+    let digest = md5::Md5::digest(data);
+    hex::encode(digest)
 }

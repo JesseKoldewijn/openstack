@@ -15,13 +15,11 @@ env:
   RUST_BACKTRACE: 1
   PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
   PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
-  PARITY_BENCHMARK_RUNTIME_MODE: symmetric-docker
-  PARITY_BENCHMARK_EXECUTION_ORDER: alternating
-  PARITY_BENCHMARK_LANE_MODE: harness-influenced
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
+  PARITY_MOTO_IMAGE: motoserver/moto:5.1.22
   PARITY_DOCKER_NETWORK_MODE: bridge
-  AWS_CLI_PATH: /home/runner/.local/bin/aws
+  OHA_VERSION: 1.14.0
 
 permissions:
   contents: read
@@ -46,7 +44,7 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   clippy:
@@ -71,7 +69,7 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   test:
@@ -103,8 +101,8 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
-            echo "| OS | \\`${{ matrix.os }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
+            echo "| OS | \`${{ matrix.os }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   studio-ui-gates:
@@ -171,7 +169,7 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   prepare-openstack-runtime-image:
@@ -229,7 +227,7 @@ jobs:
             echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
-            echo "| Result | \\`${{ job.status }}\\` |"
+            echo "| Result | \`${{ job.status }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   studio-coverage:
@@ -279,30 +277,6 @@ jobs:
         with:
           shared-key: ci-parity-core
           key: parity-core-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
-        run: |
-          set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
-          fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-          aws --version
       - name: Load deterministic OpenStack runtime image
         if: env.ACT != 'true'
         uses: actions/download-artifact@v4
@@ -339,8 +313,6 @@ jobs:
       - name: Preflight parity environment
         run: |
           set -euo pipefail
-          command -v aws
-          aws --version
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity core profile
@@ -385,9 +357,9 @@ jobs:
           retention-days: 7
 
   parity-all-services-full:
-    name: Parity (all-services-smoke full)
+    name: Parity (all-services-smoke)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: github.event_name == 'pull_request'
     needs: [prepare-openstack-runtime-image]
     env:
       PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
@@ -399,30 +371,6 @@ jobs:
         with:
           shared-key: ci-parity-all-services-full
           key: parity-all-services-full-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
-        run: |
-          set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
-          fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-          aws --version
       - name: Load deterministic OpenStack runtime image
         if: env.ACT != 'true'
         uses: actions/download-artifact@v4
@@ -459,15 +407,13 @@ jobs:
       - name: Preflight parity environment
         run: |
           set -euo pipefail
-          command -v aws
-          aws --version
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run parity all-services smoke full profile
+      - name: Run parity all-services smoke profile
         run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
       - name: Validate parity lifecycle latest report exists
         run: test -f target/parity-reports/all-services-smoke-latest.json
-      - name: Add parity full table to workflow summary
+      - name: Add parity all-services table to workflow summary
         if: always()
         run: |
           python3 - <<'PY'
@@ -482,7 +428,7 @@ jobs:
               report = json.load(handle)
           summary = report.get("summary", {})
           lines = [
-              "## Parity All Services (Full)",
+              "## Parity All Services",
               "",
               "| Metric | Value |",
               "|---|---:|",
@@ -501,45 +447,16 @@ jobs:
           path: target/parity-reports/*.json
           retention-days: 7
 
-  parity-all-services-fast:
-    name: Parity (all-services-smoke fast)
+  benchmark:
+    name: Benchmark (default profile)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref != 'main'
+    if: github.event_name == 'pull_request'
     needs: [prepare-openstack-runtime-image]
     env:
       PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
       PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-parity-all-services-fast
-          key: parity-all-services-fast-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
-        run: |
-          set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
-          fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-          aws --version
       - name: Load deterministic OpenStack runtime image
         if: env.ACT != 'true'
         uses: actions/download-artifact@v4
@@ -551,397 +468,62 @@ jobs:
         run: |
           set -euo pipefail
           docker load -i /tmp/openstack-runtime-image.tar
-      - name: Validate runtime image provenance
-        run: |
-          set -euo pipefail
-          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
-            echo "PARITY_OPENSTACK_IMAGE is not set"
-            exit 1
-          fi
-          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
-          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
-          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
-          echo "Actual image id:   ${actual_id}"
-          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
-            echo "Runtime image provenance mismatch"
-            exit 1
-          fi
-          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
-          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
-            echo "Runtime image smoke check failed (--version)"
-            echo "version_out=${version_out:-<empty>}"
-            exit 1
-          fi
-      - name: Preflight parity environment
-        run: |
-          set -euo pipefail
-          command -v aws
-          aws --version
-          docker --version
-          docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run parity all-services smoke fast profile
-        run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke-fast
-      - name: Validate parity lifecycle latest report exists
-        run: test -f target/parity-reports/all-services-smoke-fast-latest.json
-      - name: Add parity fast table to workflow summary
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import glob
-          import json
-          import os
-
-          files = sorted(glob.glob("target/parity-reports/all-services-smoke-fast-*.json"), key=os.path.getmtime)
-          if not files:
-              raise SystemExit(0)
-          with open(files[-1], "r", encoding="utf-8") as handle:
-              report = json.load(handle)
-          summary = report.get("summary", {})
-          lines = [
-              "## Parity All Services (Fast)",
-              "",
-              "| Metric | Value |",
-              "|---|---:|",
-              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
-              f"| Passed | {summary.get('passed', 0)} |",
-              f"| Failed | {summary.get('failed', 0)} |",
-          ]
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
-              out.write("\n".join(lines) + "\n")
-          PY
-      - name: Upload parity fast report artifacts
-        if: always() && env.ACT != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: parity-all-services-fast-report
-          path: target/parity-reports/*.json
-          retention-days: 7
-
-  benchmark-smoke-full:
-    name: Benchmark (all-services-smoke full)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    needs: [prepare-openstack-runtime-image]
-    env:
-      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
-      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-benchmark-smoke-full
-          key: benchmark-smoke-full-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
-        run: |
-          set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
-          fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-          aws --version
-      - name: Load deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
-          path: /tmp
-      - name: Import deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        run: |
-          set -euo pipefail
-          docker load -i /tmp/openstack-runtime-image.tar
-      - name: Validate runtime image provenance
-        run: |
-          set -euo pipefail
-          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
-            echo "PARITY_OPENSTACK_IMAGE is not set"
-            exit 1
-          fi
-          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
-          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
-          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
-          echo "Actual image id:   ${actual_id}"
-          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
-            echo "Runtime image provenance mismatch"
-            exit 1
-          fi
-          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
-          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
-            echo "Runtime image smoke check failed (--version)"
-            echo "version_out=${version_out:-<empty>}"
-            exit 1
-          fi
       - name: Preflight benchmark environment
         run: |
           set -euo pipefail
-          command -v aws
-          aws --version
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark fairness medium core profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
-      - name: Validate benchmark latest report exists
-        run: test -f target/benchmark-reports/fair-medium-core-latest.json
-      - name: Run benchmark fairness medium core isolated direct-http profile
-        env:
-          PARITY_BENCHMARK_LANE_MODE: low-overhead
-          PARITY_BENCHMARK_EXECUTION_DRIVER: direct-http
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
-      - name: Enforce memory budget (main core lane)
+          docker pull "$PARITY_MOTO_IMAGE"
+      - name: Install oha
         run: |
-          python3 - <<'PY'
-          import glob, json, os, sys
-          files = sorted(glob.glob("target/benchmark-reports/fair-medium-core-*.json"), key=os.path.getmtime)
-          if not files:
-              print("No benchmark report found for fair-medium-core")
-              sys.exit(1)
-          report = json.load(open(files[-1], encoding="utf-8"))
-          mem = report.get("memory_summary") or {}
-          rss_ratio = mem.get("rss_ratio_openstack_over_localstack")
-          if rss_ratio is None:
-              print("Memory summary missing rss ratio")
-              sys.exit(1)
-          print(f"main core lane rss ratio os/ls = {rss_ratio:.3f}")
-          if rss_ratio > 0.20:
-              print("OpenStack RSS exceeds memory budget ratio 0.20")
-              sys.exit(1)
-          PY
-      - name: Enforce benchmark regression gate (main lane)
-        if: env.ACT != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
+          set -euo pipefail
+          curl -sSfL "https://github.com/hatoo/oha/releases/download/v${OHA_VERSION}/oha-linux-amd64" -o /usr/local/bin/oha
+          chmod +x /usr/local/bin/oha
+          oha --version
+      - name: Run benchmark (default profile)
         run: |
-          python3 scripts/benchmark_regression_gate.py \
-            --lane fair-medium-core \
-            --current-glob "target/benchmark-reports/fair-medium-core-*.json" \
-            --repo "${{ github.repository }}" \
-            --workflow-file "ci.yml" \
-            --artifact-name "benchmark-smoke-full-report" \
-            --run-id "${{ github.run_id }}" \
-            --strict-missing-baseline \
-            --p95-limit 8 \
-            --p99-limit 12 \
-            --throughput-limit 8 \
-            --warning-mode \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-json "target/benchmark-reports/benchmark-gate-fair-medium-core-${{ github.run_id }}.json" \
-            --output-markdown "benchmark_gate_full_summary.md"
-      - name: Add benchmark full table to workflow summary
+          ./tests/bench/bench_services.sh \
+            --profile default \
+            --openstack-image "$PARITY_OPENSTACK_IMAGE" \
+            --output benchmark-report.json
+      - name: Run benchmark gate
+        continue-on-error: true
+        run: |
+          ./tests/bench/bench_gate.sh \
+            --report benchmark-report.json \
+            --p95-max 10 \
+            --memory-max 100 \
+            --op-p95-max "s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=250,s3/get_object_10mb=250,s3/put_object_50mb=1000,s3/get_object_50mb=1000,s3/put_object_100mb=2000,s3/get_object_100mb=2000,kinesis/describe_stream=8" \
+            --output benchmark-gate.json
+      - name: Benchmark report
+        if: always()
+        uses: ./.github/actions/benchmark-report
+        with:
+          gate-json: benchmark-gate.json
+          post-pr-comment: ${{ github.event_name == 'pull_request' }}
+      - name: Enforce benchmark gate verdict
         if: always()
         run: |
-          python3 scripts/benchmark_report_tables.py \
-            --current-glob "target/benchmark-reports/fair-medium-core-*.json" \
-            --title "Benchmark Fairness (Medium Core)" \
-            --repo "${{ github.repository }}" \
-            --workflow-file "ci.yml" \
-            --artifact-name "benchmark-smoke-full-report" \
-            --run-id "${{ github.run_id }}" \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-path "benchmark_full_summary.md"
-      - name: Add consolidated benchmark summary to workflow summary
-        if: always()
-        run: |
-          python3 scripts/benchmark_report_consolidated.py \
-            --report-dir "target/benchmark-reports" \
-            --include-gate \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-path "benchmark_consolidated_summary.md"
-      - name: Add benchmark progress dashboard to workflow summary
-        if: always()
-        run: |
-          python3 scripts/benchmark_progress_dashboard.py \
-            --report-dir "target/benchmark-reports" \
-            --parity-dir "target/parity-reports" \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-path "benchmark_progress_dashboard.md"
-      - name: Upload benchmark full report artifacts
+          set -euo pipefail
+          if [ ! -f benchmark-gate.json ]; then
+            echo "benchmark-gate.json missing"
+            exit 1
+          fi
+          verdict="$(jq -r '.verdict // "FAIL"' benchmark-gate.json)"
+          echo "Benchmark gate verdict: ${verdict}"
+          if [ "${verdict}" != "PASS" ]; then
+            echo "Benchmark gate failed"
+            exit 1
+          fi
+      - name: Upload benchmark report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-smoke-full-report
-          path: target/benchmark-reports/*.json
-          retention-days: 7
-
-  benchmark-smoke-fast:
-    name: Benchmark (all-services-smoke fast)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref != 'main'
-    needs: [prepare-openstack-runtime-image]
-    env:
-      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
-      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-benchmark-smoke-fast
-          key: benchmark-smoke-fast-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
-        run: |
-          set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
-          fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-          aws --version
-      - name: Load deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
-          path: /tmp
-      - name: Import deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        run: |
-          set -euo pipefail
-          docker load -i /tmp/openstack-runtime-image.tar
-      - name: Validate runtime image provenance
-        run: |
-          set -euo pipefail
-          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
-            echo "PARITY_OPENSTACK_IMAGE is not set"
-            exit 1
-          fi
-          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
-          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
-          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
-          echo "Actual image id:   ${actual_id}"
-          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
-            echo "Runtime image provenance mismatch"
-            exit 1
-          fi
-          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
-          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
-            echo "Runtime image smoke check failed (--version)"
-            echo "version_out=${version_out:-<empty>}"
-            exit 1
-          fi
-      - name: Preflight benchmark environment
-        run: |
-          set -euo pipefail
-          command -v aws
-          aws --version
-          docker --version
-          docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark fairness low core profile
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low-core
-      - name: Validate benchmark latest report exists
-        run: test -f target/benchmark-reports/fair-low-core-latest.json
-      - name: Run benchmark fairness low core isolated direct-http profile
-        env:
-          PARITY_BENCHMARK_LANE_MODE: low-overhead
-          PARITY_BENCHMARK_EXECUTION_DRIVER: direct-http
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-low-core
-      - name: Enforce memory budget (non-main core lane)
-        run: |
-          python3 - <<'PY'
-          import glob, json, os, sys
-          files = sorted(glob.glob("target/benchmark-reports/fair-low-core-*.json"), key=os.path.getmtime)
-          if not files:
-              print("No benchmark report found for fair-low-core")
-              sys.exit(1)
-          report = json.load(open(files[-1], encoding="utf-8"))
-          mem = report.get("memory_summary") or {}
-          rss_ratio = mem.get("rss_ratio_openstack_over_localstack")
-          if rss_ratio is None:
-              print("Memory summary missing rss ratio")
-              sys.exit(1)
-          print(f"non-main core lane rss ratio os/ls = {rss_ratio:.3f}")
-          if rss_ratio > 0.20:
-              print("OpenStack RSS exceeds memory budget ratio 0.20")
-              sys.exit(1)
-          PY
-      - name: Enforce benchmark regression gate (non-main lane)
-        if: env.ACT != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/benchmark_regression_gate.py \
-            --lane fair-low-core \
-            --current-glob "target/benchmark-reports/fair-low-core-*.json" \
-            --repo "${{ github.repository }}" \
-            --workflow-file "ci.yml" \
-            --artifact-name "benchmark-smoke-fast-report" \
-            --run-id "${{ github.run_id }}" \
-            --strict-missing-baseline \
-            --p95-limit 8 \
-            --p99-limit 12 \
-            --throughput-limit 8 \
-            --warning-mode \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-json "target/benchmark-reports/benchmark-gate-fair-low-core-${{ github.run_id }}.json" \
-            --output-markdown "benchmark_gate_fast_summary.md"
-      - name: Add benchmark fast table to workflow summary
-        if: always()
-        run: |
-          python3 scripts/benchmark_report_tables.py \
-            --current-glob "target/benchmark-reports/fair-low-core-*.json" \
-            --title "Benchmark Fairness (Low Core)" \
-            --repo "${{ github.repository }}" \
-            --workflow-file "ci.yml" \
-            --artifact-name "benchmark-smoke-fast-report" \
-            --run-id "${{ github.run_id }}" \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-path "benchmark_fast_summary.md"
-      - name: Add consolidated benchmark summary to workflow summary
-        if: always()
-        run: |
-          python3 scripts/benchmark_report_consolidated.py \
-            --report-dir "target/benchmark-reports" \
-            --include-gate \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-path "benchmark_consolidated_summary.md"
-      - name: Add benchmark progress dashboard to workflow summary
-        if: always()
-        run: |
-          python3 scripts/benchmark_progress_dashboard.py \
-            --report-dir "target/benchmark-reports" \
-            --parity-dir "target/parity-reports" \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-path "benchmark_progress_dashboard.md"
-      - name: Upload benchmark fast report artifacts
-        if: always() && env.ACT != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-smoke-fast-report
-          path: target/benchmark-reports/*.json
+          name: benchmark-report
+          path: |
+            benchmark-report.json
+            benchmark-gate.json
+            benchmark_gate_summary.md
           retention-days: 7
 
   parity-all-services-push:
@@ -960,30 +542,6 @@ jobs:
         with:
           shared-key: ci-parity-all-services-push
           key: parity-all-services-push-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
-        run: |
-          set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
-          fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-          aws --version
       - name: Load deterministic OpenStack runtime image
         if: env.ACT != 'true'
         uses: actions/download-artifact@v4
@@ -1018,8 +576,6 @@ jobs:
       - name: Preflight parity environment
         run: |
           set -euo pipefail
-          command -v aws
-          aws --version
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity all-services smoke profile
@@ -1031,122 +587,6 @@ jobs:
           name: parity-all-services-push-report
           path: target/parity-reports/*.json
           retention-days: 7
-
-  benchmark-smoke-push:
-    name: Benchmark (all-services-smoke push)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    continue-on-error: true
-    needs: [prepare-openstack-runtime-image]
-    env:
-      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
-      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-benchmark-smoke-push
-          key: benchmark-smoke-push-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
-        run: |
-          set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
-          fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-          aws --version
-      - name: Load deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
-          path: /tmp
-      - name: Import deterministic OpenStack runtime image
-        if: env.ACT != 'true'
-        run: |
-          set -euo pipefail
-          docker load -i /tmp/openstack-runtime-image.tar
-      - name: Validate runtime image provenance
-        run: |
-          set -euo pipefail
-          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
-            echo "PARITY_OPENSTACK_IMAGE is not set"
-            exit 1
-          fi
-          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
-          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
-          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
-          echo "Actual image id:   ${actual_id}"
-          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
-            echo "Runtime image provenance mismatch"
-            exit 1
-          fi
-          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
-      - name: Preflight benchmark environment
-        run: |
-          set -euo pipefail
-          command -v aws
-          aws --version
-          docker --version
-          docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run benchmark fairness medium core profile
-        env:
-          PARITY_BENCHMARK_EXECUTION_DRIVER: direct-http
-        run: cargo run -p openstack-integration-tests --bin benchmark_runner -- --profile fair-medium-core
-      - name: Add benchmark push summary
-        if: always()
-        run: |
-          python3 scripts/benchmark_report_tables.py \
-            --current-glob "target/benchmark-reports/fair-medium-core-*.json" \
-            --title "Benchmark Fairness (Push Medium Core)" \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-path "benchmark_push_summary.md"
-          python3 scripts/benchmark_report_consolidated.py \
-            --report-dir "target/benchmark-reports" \
-            --summary-path "$GITHUB_STEP_SUMMARY" \
-            --output-path "benchmark_push_consolidated_summary.md"
-      - name: Upload benchmark push report artifacts
-        if: always() && env.ACT != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-smoke-push-report
-          path: target/benchmark-reports/*.json
-          retention-days: 7
-
-  benchmark-gate-main:
-    name: Benchmark Gate (main lane)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    needs: [benchmark-smoke-full]
-    steps:
-      - name: Main benchmark gate passed
-        run: echo "Benchmark gate for main lane passed."
-
-  benchmark-gate-non-main:
-    name: Benchmark Gate (non-main lane)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref != 'main'
-    needs: [benchmark-smoke-fast]
-    steps:
-      - name: Non-main benchmark gate passed
-        run: echo "Benchmark gate for non-main lane passed."
 
   required-checks-main:
     name: Required checks (main target)
@@ -1165,8 +605,7 @@ jobs:
         studio-performance-budget,
         parity-core,
         parity-all-services-full,
-        benchmark-smoke-full,
-        benchmark-gate-main
+        benchmark
       ]
     steps:
       - name: All required checks passed
@@ -1188,9 +627,8 @@ jobs:
         studio-ui-gates,
         studio-performance-budget,
         parity-core,
-        parity-all-services-fast,
-        benchmark-smoke-fast,
-        benchmark-gate-non-main
+        parity-all-services-full,
+        benchmark
       ]
     steps:
       - name: All required checks passed
@@ -1209,11 +647,7 @@ jobs:
         validate-harness-coverage,
         parity-core,
         parity-all-services-full,
-        parity-all-services-fast,
-        benchmark-smoke-full,
-        benchmark-smoke-fast,
-        benchmark-gate-main,
-        benchmark-gate-non-main
+        benchmark
       ]
     steps:
       - uses: actions/checkout@v4
@@ -1224,40 +658,10 @@ jobs:
           merge-multiple: true
           path: artifacts/parity
       - name: Download benchmark artifacts
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: benchmark-*-report
-          merge-multiple: true
-          path: artifacts/benchmark
-      - name: Build benchmark full comparison markdown
-        if: always()
-        run: |
-          python3 scripts/benchmark_report_tables.py \
-            --current-glob "artifacts/benchmark/fair-medium-core-*.json" \
-            --title "Benchmark Fairness (Medium Core)" \
-            --repo "${{ github.repository }}" \
-            --workflow-file "ci.yml" \
-            --artifact-name "benchmark-smoke-full-report" \
-            --run-id "${{ github.run_id }}" \
-            --output-path "benchmark_full_comment.md"
-      - name: Build benchmark fast comparison markdown
-        if: always()
-        run: |
-          python3 scripts/benchmark_report_tables.py \
-            --current-glob "artifacts/benchmark/fair-low-core-*.json" \
-            --title "Benchmark Fairness (Low Core)" \
-            --repo "${{ github.repository }}" \
-            --workflow-file "ci.yml" \
-            --artifact-name "benchmark-smoke-fast-report" \
-            --run-id "${{ github.run_id }}" \
-            --output-path "benchmark_fast_comment.md"
-      - name: Build consolidated benchmark markdown
-        if: always()
-        run: |
-          python3 scripts/benchmark_report_consolidated.py \
-            --report-dir "artifacts/benchmark" \
-            --include-gate \
-            --output-path "benchmark_consolidated_comment.md"
+          name: benchmark-report
       - name: Build PR markdown summary
         id: build_comment
         run: |
@@ -1287,31 +691,35 @@ jobs:
 
           parity_reports = sorted(glob.glob("artifacts/parity/*.json"), key=os.path.getmtime)
           if parity_reports:
-              lines.extend(["### Parity", "", "| Profile | Scenarios | Passed | Failed | Accepted |", "|---|---:|---:|---:|---:|"])
+              latest_by_profile = {}
               for path in parity_reports:
                   with open(path, "r", encoding="utf-8") as handle:
                       parity = json.load(handle)
+                  profile = parity.get("profile", "n/a")
+                  latest_by_profile[profile] = parity
+
+              preferred_order = ["core", "all-services-smoke"]
+              ordered_profiles = [p for p in preferred_order if p in latest_by_profile]
+              ordered_profiles.extend(
+                  sorted(p for p in latest_by_profile if p not in preferred_order)
+              )
+
+              lines.extend(["### Parity", "", "| Profile | Scenarios | Passed | Failed | Accepted |", "|---|---:|---:|---:|---:|"])
+              for profile in ordered_profiles:
+                  parity = latest_by_profile[profile]
                   ps = parity.get("summary", {})
                   lines.append(
-                      f"| `{parity.get('profile', 'n/a')}` | {ps.get('total_scenarios', 0)} | {ps.get('passed', 0)} | {ps.get('failed', 0)} | {ps.get('accepted_differences', 0)} |"
+                      f"| `{profile}` | {ps.get('total_scenarios', 0)} | {ps.get('passed', 0)} | {ps.get('failed', 0)} | {ps.get('accepted_differences', 0)} |"
                   )
               lines.append("")
 
-          full_benchmark_md = Path("benchmark_full_comment.md")
-          fast_benchmark_md = Path("benchmark_fast_comment.md")
-          consolidated_benchmark_md = Path("benchmark_consolidated_comment.md")
-          if full_benchmark_md.exists() or fast_benchmark_md.exists() or consolidated_benchmark_md.exists():
+          # Include benchmark gate markdown summary if available
+          gate_md = Path("benchmark_gate_summary.md")
+          if gate_md.exists():
               lines.append("### Benchmark")
               lines.append("")
-              if consolidated_benchmark_md.exists():
-                  lines.append(consolidated_benchmark_md.read_text(encoding="utf-8").strip())
-                  lines.append("")
-              if full_benchmark_md.exists():
-                  lines.append(full_benchmark_md.read_text(encoding="utf-8").strip())
-                  lines.append("")
-              if fast_benchmark_md.exists():
-                  lines.append(fast_benchmark_md.read_text(encoding="utf-8").strip())
-                  lines.append("")
+              lines.append(gate_md.read_text(encoding="utf-8").strip())
+              lines.append("")
 
           content = "\n".join(lines).strip() + "\n"
           Path("pr_results_comment.md").write_text(content, encoding="utf-8")

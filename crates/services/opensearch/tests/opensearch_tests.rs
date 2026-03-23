@@ -12,11 +12,12 @@ fn make_ctx(operation: &str, body: Value, path: &str, method: &str) -> RequestCo
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -129,14 +130,11 @@ async fn test_describe_domain_not_found() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 409);
-    let b = body_json(&resp);
-    assert!(
-        b["code"]
-            .as_str()
-            .unwrap()
-            .contains("ResourceNotFoundException")
-    );
+    assert_eq!(resp.status_code, 404);
+    assert_eq!(resp.content_type, "application/json");
+    let body = body_json(&resp);
+    assert_eq!(body["code"], "ResourceNotFoundException");
+    assert_eq!(body["message"], "Domain not found: nonexistent");
 }
 
 #[tokio::test]

@@ -6,14 +6,12 @@ The parity harness compares behavior between openstack and LocalStack for the sa
 
 - `core`: required CI profile intended for stable, high-signal compatibility coverage
 - `extended`: non-required profile for broader coverage and iterative expansion
-- `all-services-smoke`: full 24-service parity lane used for PRs targeting `main`
-- `all-services-smoke-fast`: budget lane used for non-`main` PR targets (including `develop`)
+- `all-services-smoke`: full 24-service parity lane used for all PR targets
 
 ## Run Locally
 
 Requirements:
 
-- `aws` CLI available
 - Docker available (unless `PARITY_LOCALSTACK_ENDPOINT` is provided)
 
 Run core profile:
@@ -34,12 +32,6 @@ Run full all-services smoke profile:
 cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
 ```
 
-Run fast all-services smoke profile:
-
-```bash
-cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke-fast
-```
-
 Optional overrides:
 
 - `PARITY_OPENSTACK_ENDPOINT=http://127.0.0.1:4566`
@@ -50,15 +42,16 @@ Optional overrides:
 
 Reports are written to `target/parity-reports/*.json` plus per-profile latest snapshots (`<profile>-latest.json`).
 
-Parity reports now include persistence mode metadata (`openstack_persistence_mode`, `localstack_persistence_mode`, `persistence_mode_equivalent`) and persistence failure-class rollups under `summary.persistence_failure_classes`.
+Parity reports now include persistence mode metadata (`openstack_persistence_mode`, `localstack_persistence_mode`, `persistence_mode_equivalent`), persistence failure-class rollups under `summary.persistence_failure_classes`, and per-scenario native coverage indicators (`native_coverage_status`, `follow_up_required`) so README-listed services that still need native HTTP follow-up remain visible.
 
 ## Triage Workflow
 
 1. Run parity profile and inspect report mismatch entries.
 2. Classify mismatch:
-   - regression in openstack
-   - upstream LocalStack behavior change
-   - acceptable difference
+    - regression in openstack
+    - upstream LocalStack behavior change
+    - acceptable difference
+    - native HTTP follow-up required
 3. For acceptable differences, add an explicit entry in `tests/parity/known_differences.json` with:
    - `id`, `service`, `scenario_id`, `step_id`, `path`
    - `rationale`, `owner`, `reviewer`

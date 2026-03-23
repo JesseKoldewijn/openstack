@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 use openstack_sts::StsProvider;
 
@@ -16,11 +15,12 @@ fn make_ctx(operation: &str, params: &[(&str, &str)]) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::new(),
-        headers: HashMap::new(),
+        raw_body: None,
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: qp,
+        request_id: String::new(),
         spooled_body: None,
     }
 }

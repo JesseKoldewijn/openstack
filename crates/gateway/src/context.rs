@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Mutex;
 
+use axum::http::HeaderMap;
 use bytes::Bytes;
 use openstack_service_framework::SpooledBody;
 
@@ -20,10 +22,13 @@ pub struct RequestContext {
     pub protocol: openstack_aws_protocol::AwsProtocol,
     /// Parsed request parameters as a unified JSON value
     pub params: serde_json::Value,
-    /// Raw request body bytes
-    pub raw_body: Bytes,
-    /// Request headers (keys lowercased)
-    pub headers: HashMap<String, String>,
+    /// Raw request body bytes.
+    ///
+    /// `None` for S3 PutObject / UploadPart (body lives in `spooled_body`).
+    /// `Some(bytes)` for all other requests.
+    pub raw_body: Option<Bytes>,
+    /// Request headers
+    pub headers: HeaderMap,
     /// URL path
     pub path: String,
     /// HTTP method
@@ -37,8 +42,9 @@ pub struct RequestContext {
 }
 
 impl RequestContext {
+    /// Look up a request header by name (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(&name.to_lowercase()).map(|s| s.as_str())
+        self.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
     /// Convert to the service-framework `RequestContext`, consuming self
@@ -55,7 +61,8 @@ impl RequestContext {
             path: self.path,
             method: self.method,
             query_params: self.query_params,
-            spooled_body: self.spooled_body,
+            request_id: self.request_id,
+            spooled_body: self.spooled_body.map(Mutex::new),
         }
     }
 }

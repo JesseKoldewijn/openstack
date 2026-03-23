@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use openstack_iam::IamProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 use serde_json::json;
@@ -18,11 +17,12 @@ fn make_ctx(operation: &str, params: &[(&str, &str)]) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: json!({}),
-        raw_body: Bytes::new(),
-        headers: HashMap::new(),
+        raw_body: None,
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: qp,
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -51,6 +51,16 @@ async fn test_create_and_get_user() {
         .unwrap();
     assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
     assert!(body_str(&resp).contains("alice"));
+
+    let created = body_str(
+        &p.dispatch(&make_ctx("CreateUser", &[("UserName", "id-check")]))
+            .await
+            .unwrap(),
+    );
+    let id_start = created.find("<UserId>").unwrap() + "<UserId>".len();
+    let id_end = created.find("</UserId>").unwrap();
+    let user_id = &created[id_start..id_end];
+    assert!(user_id.starts_with("AIDA"));
 }
 
 #[tokio::test]
@@ -296,6 +306,25 @@ async fn test_create_group_and_add_user() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+}
+
+#[tokio::test]
+async fn test_add_user_to_group_missing_user_returns_no_such_entity() {
+    let p = IamProvider::new();
+    p.dispatch(&make_ctx("CreateGroup", &[("GroupName", "devs")]))
+        .await
+        .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "AddUserToGroup",
+            &[("GroupName", "devs"), ("UserName", "missing-user")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404, "{}", body_str(&resp));
+    assert!(body_str(&resp).contains("NoSuchEntity"));
+    assert!(body_str(&resp).contains("User missing-user not found"));
 }
 
 #[tokio::test]

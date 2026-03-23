@@ -16,11 +16,12 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -154,6 +155,32 @@ async fn test_delete_table() {
             .unwrap()
             .contains("ResourceNotFoundException")
     );
+    assert_eq!(resp2.content_type, "application/json");
+}
+
+#[tokio::test]
+async fn test_transact_get_items_no_store_keeps_response_alignment() {
+    let provider = DynamoDbProvider::new();
+    let resp = provider
+        .dispatch(&make_ctx(
+            "TransactGetItems",
+            json!({
+                "TransactItems": [
+                    { "Get": { "TableName": "T1", "Key": { "pk": { "S": "k1" } } } },
+                    { "Get": { "TableName": "T2", "Key": { "pk": { "S": "k2" } } } }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body(&resp);
+    let responses = b["Responses"]
+        .as_array()
+        .expect("Responses should be array");
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0], json!({}));
+    assert_eq!(responses[1], json!({}));
 }
 
 #[tokio::test]
@@ -1190,6 +1217,10 @@ async fn test_operations_on_missing_table_return_404() {
                 .unwrap_or("")
                 .contains("ResourceNotFoundException"),
             "op={op}, body={b}"
+        );
+        assert_eq!(
+            resp.content_type, "application/json",
+            "expected JSON error content type for {op}"
         );
     }
 }

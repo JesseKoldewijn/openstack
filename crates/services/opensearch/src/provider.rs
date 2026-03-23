@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -38,7 +39,17 @@ fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
+        headers: Vec::new(),
+    }
+}
+
+fn json_ok_text_plain(body: Value) -> DispatchResponse {
+    DispatchResponse {
+        status_code: 200,
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        // LocalStack returns text/plain for ListDomainNames while the payload is JSON.
+        content_type: Cow::Borrowed("text/plain; charset=utf-8"),
         headers: Vec::new(),
     }
 }
@@ -53,7 +64,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/json".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -173,8 +184,8 @@ impl ServiceProvider for OpenSearchProvider {
                     }))),
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Domain {domain_name} not found"),
-                        409,
+                        &format!("Domain not found: {domain_name}"),
+                        404,
                     )),
                 }
             }
@@ -184,7 +195,13 @@ impl ServiceProvider for OpenSearchProvider {
             // ----------------------------------------------------------------
             "DescribeDomain" => {
                 let domain_name = ctx.path.split('/').next_back().unwrap_or("").to_string();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
+                        404,
+                    ));
+                };
                 match store.domains.get(&domain_name) {
                     Some(d) => Ok(json_ok(json!({
                         "DomainStatus": {
@@ -203,23 +220,39 @@ impl ServiceProvider for OpenSearchProvider {
                     }))),
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Domain {domain_name} not found"),
-                        409,
+                        &format!("Domain not found: {domain_name}"),
+                        404,
                     )),
                 }
             }
 
             // ----------------------------------------------------------------
-            // ListDomainNames  GET /2021-01-01/opensearch/domain
+            // ListDomainNames  GET /2021-01-01/domain
             // ----------------------------------------------------------------
             "ListDomainNames" => {
-                let store = self.store.get_or_create(account_id, region);
-                let domains: Vec<Value> = store
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok_text_plain(json!({ "DomainNames": [] })));
+                };
+                let mut domain_names = store
                     .domains
                     .values()
-                    .map(|d| json!({ "DomainName": d.domain_name }))
-                    .collect();
-                Ok(json_ok(json!({ "DomainNames": domains })))
+                    .map(|domain| {
+                        json!({
+                            "DomainName": domain.domain_name,
+                            "EngineType": "OpenSearch",
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                domain_names.sort_by(|left, right| {
+                    left["DomainName"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .cmp(right["DomainName"].as_str().unwrap_or_default())
+                });
+
+                Ok(json_ok_text_plain(json!({
+                    "DomainNames": domain_names,
+                })))
             }
 
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),

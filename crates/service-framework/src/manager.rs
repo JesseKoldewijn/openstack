@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -55,12 +56,16 @@ impl ServicePluginManager {
 
     /// Dispatch a request to the appropriate service provider.
     pub async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
-        let service = ctx.service.to_lowercase();
+        let service_key: Cow<'_, str> = if ctx.service.bytes().all(|b| !b.is_ascii_uppercase()) {
+            Cow::Borrowed(ctx.service.as_str())
+        } else {
+            Cow::Owned(ctx.service.to_ascii_lowercase())
+        };
 
         let container = self
             .containers
-            .get(&service)
-            .ok_or_else(|| DispatchError::ServiceNotFound(service.clone()))?
+            .get(service_key.as_ref())
+            .ok_or_else(|| DispatchError::ServiceNotFound(ctx.service.clone()))?
             .clone();
 
         // Ensure the service is running (lazy start)

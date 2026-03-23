@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{Value, json};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::store::{CfnStack, CloudFormationStore, StackResource, StackStatus};
@@ -39,7 +40,7 @@ fn xml_ok(body: String) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -57,7 +58,7 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
   </Error>
 </ErrorResponse>"#
         ))),
-        content_type: "text/xml".to_string(),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -67,6 +68,11 @@ fn str_param<'a>(ctx: &'a RequestContext, key: &str) -> Option<&'a str> {
         .get(key)
         .map(|s| s.as_str())
         .or_else(|| ctx.request_body.get(key).and_then(|v| v.as_str()))
+}
+
+fn parse_template_body(template_body: &str) -> Result<Value, DispatchResponse> {
+    serde_json::from_str(template_body)
+        .map_err(|_| xml_error("ValidationError", "Template body is not valid JSON", 400))
 }
 
 /// Resolve CloudFormation intrinsic functions within a template value.
@@ -269,7 +275,25 @@ impl ServiceProvider for CloudFormationProvider {
                     None => return Ok(xml_error("ValidationError", "StackName is required", 400)),
                 };
                 let template_body = str_param(ctx, "TemplateBody").unwrap_or("{}");
-                let template: Value = serde_json::from_str(template_body).unwrap_or(json!({}));
+                let template: Value = match parse_template_body(template_body) {
+                    Ok(v) => v,
+                    Err(resp) => return Ok(resp),
+                };
+
+                let has_resources = template
+                    .get("Resources")
+                    .and_then(|value| value.as_object())
+                    .map(|resources| !resources.is_empty())
+                    .unwrap_or(false);
+                if !has_resources {
+                    return Ok(xml_error(
+                        "ValidationError",
+                        &format!(
+                            "Unable to create stack \"{stack_name}\": No updates are to be performed."
+                        ),
+                        400,
+                    ));
+                }
 
                 // Parse parameters
                 let mut parameters: HashMap<String, String> = HashMap::new();
@@ -389,7 +413,10 @@ impl ServiceProvider for CloudFormationProvider {
                     None => return Ok(xml_error("ValidationError", "StackName is required", 400)),
                 };
                 let template_body = str_param(ctx, "TemplateBody").unwrap_or("{}");
-                let template: Value = serde_json::from_str(template_body).unwrap_or(json!({}));
+                let template: Value = match parse_template_body(template_body) {
+                    Ok(v) => v,
+                    Err(resp) => return Ok(resp),
+                };
 
                 let mut store = self.store.get_or_create(account_id, region);
                 match store.stacks.get_mut(&stack_name) {
@@ -441,7 +468,25 @@ impl ServiceProvider for CloudFormationProvider {
             // ----------------------------------------------------------------
             "DescribeStacks" => {
                 let stack_name = str_param(ctx, "StackName");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    if let Some(name) = stack_name {
+                        return Ok(xml_error(
+                            "ValidationError",
+                            &format!("Stack with id {name} does not exist"),
+                            400,
+                        ));
+                    }
+                    return Ok(xml_ok(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<DescribeStacksResponse xmlns="https://cloudformation.amazonaws.com/doc/2010-05-15/">
+  <DescribeStacksResult>
+    <Stacks></Stacks>
+  </DescribeStacksResult>
+</DescribeStacksResponse>"#
+                            .to_string(),
+                    ));
+                };
+                let missing_name = stack_name;
 
                 let stacks_xml: String = store
                     .stacks
@@ -449,6 +494,15 @@ impl ServiceProvider for CloudFormationProvider {
                     .filter(|s| stack_name.map(|n| n == s.stack_name).unwrap_or(true))
                     .map(stack_to_xml)
                     .collect();
+
+                if missing_name.is_some() && stacks_xml.is_empty() {
+                    let missing_name = missing_name.unwrap_or("");
+                    return Ok(xml_error(
+                        "ValidationError",
+                        &format!("Stack with id {missing_name} does not exist"),
+                        400,
+                    ));
+                }
 
                 Ok(xml_ok(format!(
                     r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -464,7 +518,17 @@ impl ServiceProvider for CloudFormationProvider {
             // ListStacks
             // ----------------------------------------------------------------
             "ListStacks" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_ok(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListStacksResponse xmlns="https://cloudformation.amazonaws.com/doc/2010-05-15/">
+  <ListStacksResult>
+    <StackSummaries></StackSummaries>
+  </ListStacksResult>
+</ListStacksResponse>"#
+                            .to_string(),
+                    ));
+                };
                 let summaries: String = store
                     .stacks
                     .values()
@@ -502,7 +566,13 @@ impl ServiceProvider for CloudFormationProvider {
                     Some(n) => n.to_string(),
                     None => return Ok(xml_error("ValidationError", "StackName is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_error(
+                        "ValidationError",
+                        &format!("Stack [{stack_name}] does not exist"),
+                        400,
+                    ));
+                };
                 let resources_xml = match store.stacks.get(&stack_name) {
                     Some(stack) => stack
                         .resources
@@ -547,7 +617,13 @@ impl ServiceProvider for CloudFormationProvider {
                     Some(n) => n.to_string(),
                     None => return Ok(xml_error("ValidationError", "StackName is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_error(
+                        "ValidationError",
+                        &format!("Stack [{stack_name}] does not exist"),
+                        400,
+                    ));
+                };
                 match store.stacks.get(&stack_name) {
                     Some(stack) => {
                         let template_str =

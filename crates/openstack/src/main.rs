@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info, warn};
 
+// Use jemalloc on non-MSVC targets.  jemalloc returns freed memory pages to
+// the OS much more aggressively than glibc malloc, keeping RSS low after
+// large allocations (e.g. processing 100 MB S3 objects).
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const DAEMON_CHILD_ENV: &str = "OPENSTACK_DAEMON_CHILD";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

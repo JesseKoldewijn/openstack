@@ -1,0 +1,72 @@
+name: Benchmark Report
+description: >
+  Renders a benchmark-gate.json report to markdown, appends it to the
+  GitHub Actions step summary, and optionally posts/updates a PR comment.
+
+inputs:
+  gate-json:
+    description: Path to the benchmark-gate.json produced by bench_gate.sh
+    required: true
+  post-pr-comment:
+    description: Whether to post or update a PR comment with the report
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Render markdown report
+      shell: bash
+      env:
+        GATE_JSON: ${{ inputs.gate-json }}
+      run: |
+        set -euo pipefail
+        if [[ ! -f "$GATE_JSON" ]]; then
+          echo "WARNING: gate JSON not found at $GATE_JSON — skipping report" >&2
+          exit 0
+        fi
+        "$GITHUB_ACTION_PATH/render.sh" "$GATE_JSON" > /tmp/benchmark-report.md
+        echo "[benchmark-report] Markdown rendered to /tmp/benchmark-report.md" >&2
+
+    - name: Add to step summary
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ -f /tmp/benchmark-report.md ]]; then
+          cat /tmp/benchmark-report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "[benchmark-report] Appended to step summary" >&2
+        fi
+
+    - name: Post or update PR comment
+      if: inputs.post-pr-comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if [[ ! -f /tmp/benchmark-report.md ]]; then
+          echo "WARNING: no rendered report found — skipping PR comment" >&2
+          exit 0
+        fi
+
+        MARKER="<!-- benchmark-gate-report -->"
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        REPO="${{ github.repository }}"
+
+        # Find an existing comment from this action (identified by the HTML marker)
+        EXISTING_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+          --jq "[.[] | select(.body | startswith(\"${MARKER}\"))] | first | .id // empty" 2>/dev/null || true)
+
+        BODY="$(cat /tmp/benchmark-report.md)"
+
+        if [[ -n "$EXISTING_ID" ]]; then
+          echo "[benchmark-report] Updating existing PR comment #${EXISTING_ID}" >&2
+          gh api "repos/${REPO}/issues/comments/${EXISTING_ID}" \
+            -X PATCH \
+            -f body="$BODY"
+        else
+          echo "[benchmark-report] Creating new PR comment on #${PR_NUMBER}" >&2
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body "$BODY"
+        fi

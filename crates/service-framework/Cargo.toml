@@ -18,12 +18,16 @@ dashmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bytes.workspace = true
+http.workspace = true
 tempfile.workspace = true
 futures-core.workspace = true
 pin-project-lite.workspace = true
+digest.workspace = true
 
 [dev-dependencies]
 openstack-sqs.workspace = true
 openstack-dynamodb.workspace = true
 openstack-s3.workspace = true
 openstack-gateway.workspace = true
+md-5.workspace = true
+hex.workspace = true

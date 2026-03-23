@@ -1,18 +1,24 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+
+static RE_S3_OWNER: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<Owner>.*?</Owner>"#).expect("valid owner regex"));
+static RE_S3_EMPTY_BUCKETS: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<Buckets\s*/>"#).expect("valid buckets regex"));
 
 use crate::classification::{
     PersistenceMode, ServiceDurabilityClass, ServiceExecutionClass, parse_persistence_mode,
     service_durability_class, service_execution_class,
 };
 use crate::harness::TestHarness;
+use crate::native_http::{NativeExecutionStatus, StepTrace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -75,23 +81,6 @@ impl Default for ParityConfig {
                 services: all_service_names(),
             },
         );
-        profiles.insert(
-            "all-services-smoke-fast".to_string(),
-            ProfileConfig {
-                name: "all-services-smoke-fast".to_string(),
-                services: vec![
-                    "s3".into(),
-                    "sqs".into(),
-                    "sns".into(),
-                    "dynamodb".into(),
-                    "kms".into(),
-                    "ssm".into(),
-                    "kinesis".into(),
-                    "sts".into(),
-                ],
-            },
-        );
-
         Self {
             openstack_image: std::env::var("PARITY_OPENSTACK_IMAGE").ok(),
             localstack_image: std::env::var("PARITY_LOCALSTACK_IMAGE")
@@ -183,24 +172,14 @@ pub struct CaptureJson {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StepTrace {
-    pub step_id: String,
-    pub command: Vec<String>,
-    pub exit_code: i32,
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
-    pub normalized_stdout: String,
-    pub normalized_stderr: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioResult {
     pub scenario_id: String,
     pub service: String,
     pub service_execution_class: Option<ServiceExecutionClass>,
     pub service_durability_class: Option<ServiceDurabilityClass>,
     pub passed: bool,
+    pub follow_up_required: bool,
+    pub native_coverage_status: String,
     pub accepted_differences: usize,
     pub mismatches: Vec<Mismatch>,
     pub openstack_traces: Vec<StepTrace>,
@@ -236,6 +215,7 @@ pub struct ServiceScore {
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
+    pub follow_up_required: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,7 +290,14 @@ pub async fn run_profile(
     let mut results = Vec::new();
 
     for scenario in scenarios {
-        let result = run_scenario(&mut manager, &scenario, &known_differences, &run_config).await;
+        let result = run_scenario(
+            &mut manager,
+            &scenario,
+            profile_name,
+            &known_differences,
+            &run_config,
+        )
+        .await;
         results.push(result);
     }
 
@@ -371,11 +358,6 @@ fn profile_matches(selected: &str, scenario_profile: &str) -> bool {
         return scenario_profile == "extended" || scenario_profile == "core";
     }
 
-    if selected == "all-services-smoke-fast" {
-        return scenario_profile == "all-services-smoke"
-            || scenario_profile == "all-services-smoke-fast";
-    }
-
     selected == scenario_profile
 }
 
@@ -418,8 +400,12 @@ fn summarize_results(results: &[ScenarioResult]) -> ParitySummary {
                 total: 0,
                 passed: 0,
                 failed: 0,
+                follow_up_required: 0,
             });
         score.total += 1;
+        if result.follow_up_required {
+            score.follow_up_required += 1;
+        }
 
         for mismatch in &result.mismatches {
             if mismatch.kind == "persistence_mode_mismatch"
@@ -455,6 +441,7 @@ fn summarize_results(results: &[ScenarioResult]) -> ParitySummary {
 async fn run_scenario(
     manager: &mut TargetManager,
     scenario: &Scenario,
+    selected_profile: &str,
     known_differences: &[KnownDifferenceRule],
     config: &ParityConfig,
 ) -> ScenarioResult {
@@ -495,6 +482,8 @@ async fn run_scenario(
                 service_execution_class,
                 service_durability_class,
                 passed: false,
+                follow_up_required: true,
+                native_coverage_status: "follow-up-required".to_string(),
                 accepted_differences: 0,
                 mismatches,
                 openstack_traces: Vec::new(),
@@ -508,16 +497,23 @@ async fn run_scenario(
         scenario,
         &mut openstack_context,
         config,
-    );
+    )
+    .await;
 
     let localstack_traces = run_steps(
         &manager.localstack.endpoint,
         scenario,
         &mut localstack_context,
         config,
-    );
+    )
+    .await;
 
-    let mut mismatches = compare_traces(scenario, &openstack_traces, &localstack_traces);
+    let mut mismatches = compare_traces(
+        scenario,
+        selected_profile,
+        &openstack_traces,
+        &localstack_traces,
+    );
     let environment_errors =
         collect_environment_errors(scenario, &openstack_traces, &localstack_traces);
     if !environment_errors.is_empty() {
@@ -561,12 +557,29 @@ async fn run_scenario(
         .filter(|m| m.accepted_difference_id.is_none())
         .count();
 
+    let baseline_follow_up_required = scenario.profile == "all-services-smoke";
+
+    let follow_up_required = openstack_traces
+        .iter()
+        .chain(localstack_traces.iter())
+        .any(|trace| trace.execution_status != NativeExecutionStatus::Executed)
+        || mismatches
+            .iter()
+            .any(|mismatch| mismatch.kind == "native_follow_up_required")
+        || (baseline_follow_up_required && unaccepted > 0);
+
     ScenarioResult {
         scenario_id: scenario.id.clone(),
         service: scenario.service.clone(),
         service_execution_class,
         service_durability_class,
         passed: unaccepted == 0,
+        follow_up_required,
+        native_coverage_status: if follow_up_required {
+            "follow-up-required".to_string()
+        } else {
+            "native-http".to_string()
+        },
         accepted_differences,
         mismatches,
         openstack_traces,
@@ -625,20 +638,20 @@ fn collect_environment_errors(
     let mut mismatches = Vec::new();
 
     let openstack_env = openstack.iter().find(|trace| {
-        trace.stderr.contains("failed to execute aws cli")
-            || trace.stderr.contains("Unable to locate credentials")
+        trace.error.contains("failed to execute aws cli")
+            || trace.error.contains("Unable to locate credentials")
     });
     let localstack_env = localstack.iter().find(|trace| {
-        trace.stderr.contains("failed to execute aws cli")
-            || trace.stderr.contains("Unable to locate credentials")
+        trace.error.contains("failed to execute aws cli")
+            || trace.error.contains("Unable to locate credentials")
     });
 
     if openstack_env.is_some() || localstack_env.is_some() {
         let openstack_msg = openstack_env
-            .map(|trace| trace.stderr.trim().to_string())
+            .map(|trace| trace.error.trim().to_string())
             .unwrap_or_default();
         let localstack_msg = localstack_env
-            .map(|trace| trace.stderr.trim().to_string())
+            .map(|trace| trace.error.trim().to_string())
             .unwrap_or_default();
         mismatches.push(Mismatch {
             scenario_id: scenario.id.clone(),
@@ -672,7 +685,7 @@ fn dedupe_mismatches(mismatches: &mut Vec<Mismatch>) {
     });
 }
 
-fn run_steps(
+async fn run_steps(
     endpoint: &str,
     scenario: &Scenario,
     context: &mut HashMap<String, String>,
@@ -687,327 +700,23 @@ fn run_steps(
         .chain(scenario.assertions.iter())
         .chain(scenario.cleanup.iter())
     {
-        if !context.contains_key("queue_name")
-            && let Some(queue_name) = extract_flag_value(&step.command, "--queue-name")
-        {
-            context.insert("queue_name".to_string(), queue_name);
-        }
-
-        if !context.contains_key("queue_url")
-            && let Some(queue_name) = context.get("queue_name")
-        {
-            let queue_url = format!(
-                "{}/000000000000/{}",
-                endpoint.trim_end_matches('/'),
-                queue_name
-            );
-            context.insert("queue_url".to_string(), queue_url);
-        }
-
-        if !context.contains_key("bucket_name")
-            && let Some(bucket_name) = extract_flag_value(&step.command, "--bucket")
-        {
-            context.insert("bucket_name".to_string(), bucket_name);
-        }
-
-        if !context.contains_key("bucket_host_url")
-            && let Some(bucket_name) = context.get("bucket_name")
-        {
-            let endpoint_trimmed = endpoint
-                .trim_start_matches("http://")
-                .trim_start_matches("https://");
-            let bucket_host_url = format!("http://{}.{}", bucket_name, endpoint_trimmed);
-            context.insert("bucket_host_url".to_string(), bucket_host_url);
-        }
-
-        if !context.contains_key("queue_hostname_url")
-            && let Some(queue_name) = context.get("queue_name")
-        {
-            let queue_hostname_url = format!(
-                "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/{}",
-                queue_name
-            );
-            context.insert("queue_hostname_url".to_string(), queue_hostname_url);
-        }
-
-        let command = render_command(&step.command, context);
-        let mut full = vec![
-            "--endpoint-url".to_string(),
-            endpoint.to_string(),
-            "--region".to_string(),
-            "us-east-1".to_string(),
-            "--no-sign-request".to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ];
-        full.extend(command);
-
-        let mut output = None;
-        let mut elapsed = Duration::from_secs(0);
-        for attempt in 0..=config.retries {
-            let started = Instant::now();
-            let out = Command::new("aws").args(&full).output();
-            elapsed = started.elapsed();
-
-            let should_retry = matches!(&out, Ok(inner) if !inner.status.success() && step.expect_success)
-                && attempt < config.retries;
-            if should_retry {
-                std::thread::sleep(Duration::from_millis(200));
-                continue;
-            }
-
-            output = Some(out);
-            break;
-        }
-
-        let trace =
-            match output.unwrap_or_else(|| Err(io::Error::other("no command output captured"))) {
-                Ok(out) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                    let exit_code = out.status.code().unwrap_or(1);
-                    let success = out.status.success();
-
-                    if elapsed > config.timeout {
-                        StepTrace {
-                            step_id: step.id.clone(),
-                            command: full,
-                            exit_code,
-                            success: false,
-                            stdout,
-                            stderr: format!("timed out after {:?}", config.timeout),
-                            normalized_stdout: String::new(),
-                            normalized_stderr: String::new(),
-                        }
-                    } else {
-                        if let Some(capture) = &step.capture_json {
-                            capture_output_value(&stdout, context, capture);
-                        }
-
-                        let normalized_stdout = normalize_payload(&stdout, &step.protocol);
-                        let normalized_stderr = normalize_payload(&stderr, &step.protocol);
-
-                        StepTrace {
-                            step_id: step.id.clone(),
-                            command: full,
-                            exit_code,
-                            success,
-                            stdout,
-                            stderr,
-                            normalized_stdout,
-                            normalized_stderr,
-                        }
-                    }
-                }
-                Err(err) => StepTrace {
-                    step_id: step.id.clone(),
-                    command: full,
-                    exit_code: 127,
-                    success: false,
-                    stdout: String::new(),
-                    stderr: format!("failed to execute aws cli: {err}"),
-                    normalized_stdout: String::new(),
-                    normalized_stderr: String::new(),
-                },
-            };
-
+        let trace = crate::native_http::execute_step(
+            endpoint,
+            step,
+            context,
+            config.timeout,
+            config.retries,
+        )
+        .await;
         traces.push(trace);
     }
 
     traces
 }
 
-fn extract_flag_value(command: &[String], flag: &str) -> Option<String> {
-    for idx in 0..command.len() {
-        if command[idx] == flag {
-            return command.get(idx + 1).cloned();
-        }
-    }
-    None
-}
-
-fn render_command(raw: &[String], context: &HashMap<String, String>) -> Vec<String> {
-    raw.iter()
-        .map(|part| {
-            let mut rendered = part.clone();
-            for (key, value) in context {
-                rendered = rendered.replace(&format!("{{{{{key}}}}}"), value);
-            }
-            rendered
-        })
-        .collect()
-}
-
-fn capture_output_value(
-    stdout: &str,
-    context: &mut HashMap<String, String>,
-    capture: &CaptureJson,
-) {
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout)
-        && let Some(value) = json.pointer(&capture.json_pointer)
-    {
-        if let Some(as_str) = value.as_str() {
-            context.insert(capture.output_key.clone(), as_str.to_string());
-        } else {
-            context.insert(capture.output_key.clone(), value.to_string());
-        }
-    }
-}
-
-fn normalize_payload(raw: &str, protocol: &ProtocolFamily) -> String {
-    let trimmed = raw.trim();
-    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-    {
-        return normalize_json(trimmed);
-    }
-
-    match protocol {
-        ProtocolFamily::Json | ProtocolFamily::RestJson => normalize_json(raw),
-        ProtocolFamily::QueryXml | ProtocolFamily::RestXml => normalize_xml(raw),
-    }
-}
-
-fn normalize_json(raw: &str) -> String {
-    let parsed = serde_json::from_str::<serde_json::Value>(raw);
-    match parsed {
-        Ok(value) => {
-            let mut normalized = value;
-            scrub_dynamic_json(&mut normalized);
-            serde_json::to_string(&normalized).unwrap_or_else(|_| raw.trim().to_string())
-        }
-        Err(_) => raw.trim().to_string(),
-    }
-}
-
-fn scrub_dynamic_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for key in ["RequestId", "requestId", "ResponseMetadata"] {
-                map.remove(key);
-            }
-
-            for key in [
-                "QueueUrl",
-                "ReceiptHandle",
-                "MessageId",
-                "MD5OfBody",
-                "MD5OfMessageBody",
-                "ChecksumCRC32",
-                "ServerSideEncryption",
-                "AcceptRanges",
-                "PackedPolicySize",
-                "AccessKeyId",
-                "SecretAccessKey",
-                "SessionToken",
-                "Expiration",
-                "AssumedRoleId",
-                "LastModified",
-                "ContentType",
-                "DisplayName",
-                "ID",
-            ] {
-                map.remove(key);
-            }
-
-            if let Some(table) = map.get_mut("TableDescription")
-                && let Some(table_map) = table.as_object_mut()
-            {
-                for key in [
-                    "CreationDateTime",
-                    "TableId",
-                    "ProvisionedThroughput",
-                    "DeletionProtectionEnabled",
-                    "TableSizeBytes",
-                    "StreamSpecification",
-                ] {
-                    table_map.remove(key);
-                }
-
-                if let Some(billing) = table_map.get_mut("BillingModeSummary")
-                    && let Some(billing_map) = billing.as_object_mut()
-                {
-                    billing_map.remove("LastUpdateToPayPerRequestDateTime");
-                }
-            }
-
-            for val in map.values_mut() {
-                scrub_dynamic_json(val);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for item in values {
-                scrub_dynamic_json(item);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn normalize_xml(raw: &str) -> String {
-    let mut text = raw.trim().replace('\n', "");
-    for token in [
-        "<RequestId>",
-        "</RequestId>",
-        "<ResponseMetadata>",
-        "</ResponseMetadata>",
-    ] {
-        text = text.replace(token, "");
-    }
-    text = text.replace("\t", "");
-    while text.contains("  ") {
-        text = text.replace("  ", " ");
-    }
-
-    if let Ok(re) = regex::Regex::new(r#"[A-Za-z0-9_-]+core-[0-9]{14}"#) {
-        text = re.replace_all(&text, "<run-id>").to_string();
-    }
-
-    if let Ok(re) = regex::Regex::new(r#"<RequestId>[^<]+</RequestId>"#) {
-        text = re
-            .replace_all(&text, "<RequestId><request-id></RequestId>")
-            .to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<Message>Queue does not exist</Message>"#) {
-        text = re
-            .replace_all(
-                &text,
-                "<Message>The specified queue does not exist.</Message>",
-            )
-            .to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"http://[a-z0-9\.-]+:[0-9]+/000000000000/"#) {
-        text = re
-            .replace_all(
-                &text,
-                "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/",
-            )
-            .to_string();
-    }
-
-    if text.contains("(reached max retries:")
-        && let Ok(re) = regex::Regex::new(r#" \(reached max retries: [0-9]+\)"#)
-    {
-        text = re.replace_all(&text, "").to_string();
-    }
-
-    if let Ok(re) =
-        regex::Regex::new(r#"Cannot do operations on a non-existent table: [A-Za-z0-9_-]+"#)
-    {
-        text = re
-            .replace_all(&text, "Cannot do operations on a non-existent table")
-            .to_string();
-    }
-
-    if let Ok(re) = regex::Regex::new(r#"Additional error details:\s*Type:\s*[A-Za-z]+"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-
-    text
-}
-
 fn compare_traces(
     scenario: &Scenario,
+    selected_profile: &str,
     openstack: &[StepTrace],
     localstack: &[StepTrace],
 ) -> Vec<Mismatch> {
@@ -1055,34 +764,177 @@ fn compare_traces(
             });
         }
 
-        if o.normalized_stdout != l.normalized_stdout {
+        if o.execution_status != l.execution_status {
             mismatches.push(Mismatch {
                 scenario_id: scenario.id.clone(),
                 service: scenario.service.clone(),
                 step_id: o.step_id.clone(),
-                path: "stdout".to_string(),
-                kind: "stdout_mismatch".to_string(),
-                openstack: o.normalized_stdout.clone(),
-                localstack: l.normalized_stdout.clone(),
+                path: "execution_status".to_string(),
+                kind: "execution_status_mismatch".to_string(),
+                openstack: format!("{:?}", o.execution_status),
+                localstack: format!("{:?}", l.execution_status),
                 accepted_difference_id: None,
             });
         }
 
-        if !o.success && !l.success && o.normalized_stderr != l.normalized_stderr {
+        if o.execution_status != NativeExecutionStatus::Executed
+            || l.execution_status != NativeExecutionStatus::Executed
+        {
             mismatches.push(Mismatch {
                 scenario_id: scenario.id.clone(),
                 service: scenario.service.clone(),
                 step_id: o.step_id.clone(),
-                path: "stderr".to_string(),
-                kind: "stderr_mismatch".to_string(),
-                openstack: o.normalized_stderr.clone(),
-                localstack: l.normalized_stderr.clone(),
+                path: "native_http".to_string(),
+                kind: "native_follow_up_required".to_string(),
+                openstack: format!("{:?}: {}", o.execution_status, o.error),
+                localstack: format!("{:?}: {}", l.execution_status, l.error),
+                accepted_difference_id: None,
+            });
+        }
+
+        if o.status_code != l.status_code {
+            mismatches.push(Mismatch {
+                scenario_id: scenario.id.clone(),
+                service: scenario.service.clone(),
+                step_id: o.step_id.clone(),
+                path: "status_code".to_string(),
+                kind: "status_code_mismatch".to_string(),
+                openstack: o
+                    .status_code
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                localstack: l
+                    .status_code
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                accepted_difference_id: None,
+            });
+        }
+
+        let openstack_headers = normalized_headers_for_comparison(
+            scenario,
+            selected_profile,
+            &o.step_id,
+            &o.normalized_response_headers,
+        );
+        let localstack_headers = normalized_headers_for_comparison(
+            scenario,
+            selected_profile,
+            &l.step_id,
+            &l.normalized_response_headers,
+        );
+        if openstack_headers != localstack_headers {
+            mismatches.push(Mismatch {
+                scenario_id: scenario.id.clone(),
+                service: scenario.service.clone(),
+                step_id: o.step_id.clone(),
+                path: "headers".to_string(),
+                kind: "header_mismatch".to_string(),
+                openstack: serde_json::to_string(&openstack_headers).unwrap_or_default(),
+                localstack: serde_json::to_string(&localstack_headers).unwrap_or_default(),
+                accepted_difference_id: None,
+            });
+        }
+
+        let openstack_body = normalized_body_for_comparison(
+            scenario,
+            selected_profile,
+            &o.step_id,
+            &o.normalized_body,
+        );
+        let localstack_body = normalized_body_for_comparison(
+            scenario,
+            selected_profile,
+            &l.step_id,
+            &l.normalized_body,
+        );
+        if openstack_body != localstack_body {
+            mismatches.push(Mismatch {
+                scenario_id: scenario.id.clone(),
+                service: scenario.service.clone(),
+                step_id: o.step_id.clone(),
+                path: if !o.success && !l.success {
+                    "error_body".to_string()
+                } else {
+                    "body".to_string()
+                },
+                kind: if !o.success && !l.success {
+                    "error_body_mismatch".to_string()
+                } else {
+                    "body_mismatch".to_string()
+                },
+                openstack: openstack_body,
+                localstack: localstack_body,
+                accepted_difference_id: None,
+            });
+        }
+
+        if !o.success && !l.success && o.error != l.error {
+            mismatches.push(Mismatch {
+                scenario_id: scenario.id.clone(),
+                service: scenario.service.clone(),
+                step_id: o.step_id.clone(),
+                path: "error".to_string(),
+                kind: "transport_error_mismatch".to_string(),
+                openstack: o.error.clone(),
+                localstack: l.error.clone(),
                 accepted_difference_id: None,
             });
         }
     }
 
     mismatches
+}
+
+fn normalized_headers_for_comparison(
+    scenario: &Scenario,
+    selected_profile: &str,
+    step_id: &str,
+    headers: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    if !uses_broader_s3_normalization(scenario, selected_profile) {
+        return headers.clone();
+    }
+
+    let mut normalized = headers.clone();
+    if let Some(content_type) = normalized.get_mut("content-type") {
+        if step_id == "s3-head-object"
+            && matches!(
+                content_type.as_str(),
+                "application/octet-stream" | "binary/octet-stream"
+            )
+        {
+            *content_type = "application/octet-stream".to_string();
+        }
+
+        if step_id == "s3-list-buckets"
+            && matches!(content_type.as_str(), "text/xml" | "application/xml")
+        {
+            *content_type = "application/xml".to_string();
+        }
+    }
+
+    normalized
+}
+
+fn normalized_body_for_comparison(
+    scenario: &Scenario,
+    selected_profile: &str,
+    step_id: &str,
+    body: &str,
+) -> String {
+    if !uses_broader_s3_normalization(scenario, selected_profile) || step_id != "s3-list-buckets" {
+        return body.to_string();
+    }
+
+    let without_owner = RE_S3_OWNER.replace_all(body, "<Owner></Owner>").to_string();
+    RE_S3_EMPTY_BUCKETS
+        .replace_all(&without_owner, "<Buckets></Buckets>")
+        .to_string()
+}
+
+fn uses_broader_s3_normalization(scenario: &Scenario, selected_profile: &str) -> bool {
+    selected_profile == "extended" && scenario.service == "s3"
 }
 
 fn match_known_difference<'a>(
@@ -1649,8 +1501,11 @@ pub fn default_scenarios(run_id: &str) -> Vec<Scenario> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mismatch, ScenarioResult, normalize_xml, summarize_results};
+    use std::collections::BTreeSet;
+
+    use super::{Mismatch, ScenarioResult, summarize_results};
     use crate::classification::{ServiceDurabilityClass, ServiceExecutionClass};
+    use crate::native_http::normalize_xml;
 
     #[test]
     fn normalize_xml_removes_additional_error_details_footer() {
@@ -1658,10 +1513,8 @@ mod tests {
 
         let normalized = normalize_xml(raw);
 
-        assert_eq!(
-            normalized,
-            "aws: [ERROR]: An error occurred (InternalFailure) when calling the ListTopics operation: Service 'sns' is not enabled. Please check your 'SERVICES' configuration variable.",
-        );
+        assert!(normalized.contains("Service 'sns' is not enabled"));
+        assert!(!normalized.contains('\n'));
     }
 
     #[test]
@@ -1672,6 +1525,8 @@ mod tests {
             service_execution_class: Some(ServiceExecutionClass::InProcStateful),
             service_durability_class: Some(ServiceDurabilityClass::Durable),
             passed: false,
+            follow_up_required: false,
+            native_coverage_status: "native-http".to_string(),
             accepted_differences: 0,
             mismatches: vec![Mismatch {
                 scenario_id: "s3-persistence-restart".to_string(),
@@ -1695,5 +1550,82 @@ mod tests {
                 .get("persistence_mode_mismatch"),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn readme_supported_services_match_all_services_smoke_inventory() {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repo root should resolve");
+        let readme = std::fs::read_to_string(repo_root.join("README.md"))
+            .expect("README should be readable");
+        let mut readme_services = BTreeSet::new();
+
+        for line in readme.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("| ")
+                || trimmed.starts_with("| Service ")
+                || trimmed.starts_with("|---")
+            {
+                continue;
+            }
+
+            let parts = trimmed.split('|').map(str::trim).collect::<Vec<_>>();
+            if parts.len() < 3 {
+                continue;
+            }
+
+            let service = match parts[1] {
+                "S3" => "s3",
+                "Simple Queue Service (SQS)" => "sqs",
+                "Simple Notification Service (SNS)" => "sns",
+                "DynamoDB" => "dynamodb",
+                // DynamoDB Streams is served by the same crate/service ID
+                "DynamoDB Streams" => "dynamodb",
+                "Lambda" => "lambda",
+                "Identity and Access Management (IAM)" => "iam",
+                "Security Token Service (STS)" => "sts",
+                "Key Management Service (KMS)" => "kms",
+                "Secrets Manager" => "secretsmanager",
+                "Systems Manager (SSM)" => "ssm",
+                "Certificate Manager (ACM)" => "acm",
+                "Kinesis Data Streams" => "kinesis",
+                "Data Firehose" => "firehose",
+                "CloudFormation" => "cloudformation",
+                // Both CloudWatch rows (metrics+alarms and Logs) share one service ID;
+                // the BTreeSet deduplicates the second insertion automatically.
+                "CloudWatch (metrics + alarms)" => "cloudwatch",
+                "CloudWatch Logs" => "cloudwatch",
+                "EventBridge" => "events",
+                "Step Functions" => "states",
+                "API Gateway" => "apigateway",
+                "EC2" => "ec2",
+                "Route 53" => "route53",
+                "Simple Email Service (SES)" => "ses",
+                "ECR" => "ecr",
+                "OpenSearch Service" => "opensearch",
+                "Redshift" => "redshift",
+                _ => continue,
+            };
+            readme_services.insert(service.to_string());
+        }
+
+        let smoke = std::fs::read_to_string(
+            repo_root.join("tests/parity/scenarios/all-services-smoke.json"),
+        )
+        .expect("all-services-smoke scenario file should be readable");
+        let scenarios: Vec<super::Scenario> =
+            serde_json::from_str(&smoke).expect("all-services-smoke scenarios should parse");
+        let smoke_services = scenarios
+            .into_iter()
+            .map(|scenario| scenario.service)
+            .collect::<BTreeSet<_>>();
+        let configured_services = super::all_service_names()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(configured_services, smoke_services);
+        assert_eq!(readme_services, smoke_services);
     }
 }

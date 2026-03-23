@@ -28,11 +28,12 @@ fn make_ctx(
         region: region.to_string(),
         account_id: account_id.to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::new(),
-        headers: HashMap::new(),
+        raw_body: None,
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params,
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -50,11 +51,12 @@ fn make_ctx_json(
         region: region.to_string(),
         account_id: account_id.to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -88,11 +90,12 @@ async fn test_sqs_multi_account_isolation() {
         region: "us-east-1".to_string(),
         account_id: "111111111111".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::from(raw_a.to_vec()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(raw_a.to_vec())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let create_a = provider.dispatch(&ctx_a).await.unwrap();
@@ -106,11 +109,12 @@ async fn test_sqs_multi_account_isolation() {
         region: "us-east-1".to_string(),
         account_id: "222222222222".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::from(raw_b.to_vec()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(raw_b.to_vec())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let create_b = provider.dispatch(&ctx_b).await.unwrap();
@@ -124,11 +128,12 @@ async fn test_sqs_multi_account_isolation() {
         region: "us-east-1".to_string(),
         account_id: "111111111111".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::from(list_raw_a.to_vec()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(list_raw_a.to_vec())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let list_a = provider.dispatch(&list_ctx_a).await.unwrap();
@@ -150,11 +155,12 @@ async fn test_sqs_multi_account_isolation() {
         region: "us-east-1".to_string(),
         account_id: "222222222222".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::from(list_raw_b.to_vec()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(list_raw_b.to_vec())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let list_b = provider.dispatch(&list_ctx_b).await.unwrap();
@@ -273,11 +279,12 @@ async fn test_s3_multi_account_isolation() {
         region: "us-east-1".to_string(),
         account_id: "111111111111".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::new(),
-        headers: HashMap::new(),
+        raw_body: None,
+        headers: Default::default(),
         path: "/account-a-bucket".to_string(),
         method: "PUT".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let create_a = provider.dispatch(&ctx_a).await.unwrap();
@@ -290,11 +297,12 @@ async fn test_s3_multi_account_isolation() {
         region: "us-east-1".to_string(),
         account_id: "222222222222".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::new(),
-        headers: HashMap::new(),
+        raw_body: None,
+        headers: Default::default(),
         path: "/account-b-bucket".to_string(),
         method: "PUT".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let create_b = provider.dispatch(&ctx_b).await.unwrap();
@@ -307,11 +315,12 @@ async fn test_s3_multi_account_isolation() {
         region: "us-east-1".to_string(),
         account_id: "111111111111".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::new(),
-        headers: HashMap::new(),
+        raw_body: None,
+        headers: Default::default(),
         path: "/".to_string(),
         method: "GET".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     };
     let list_a = provider.dispatch(&list_ctx_a).await.unwrap();

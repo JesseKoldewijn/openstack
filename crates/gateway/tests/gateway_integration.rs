@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod gateway_tests {
     use axum::body::Body;
+    use axum::body::to_bytes;
     use axum::http::{HeaderMap, HeaderValue, Method};
     use axum::http::{Request, StatusCode};
     use openstack_config::{
@@ -260,7 +261,39 @@ mod gateway_tests {
             .body(Body::from(""))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn aws_route_disabled_service_returns_501_internal_failure() {
+        let mut config = test_config();
+        config.services = ServicesConfig::only(["s3"]);
+
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/sns/aws4_request, SignedHeaders=host, Signature=deadbeef",
+            )
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("Version=2010-03-31&Action=ListTopics"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "text/xml");
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("<Code>InternalFailure</Code>"));
+        assert!(body.contains(
+            "Service 'sns' is not enabled. Please check your 'SERVICES' configuration variable."
+        ));
     }
 
     #[tokio::test]
@@ -288,6 +321,6 @@ mod gateway_tests {
             .body(Body::from(""))
             .unwrap();
         let aws_resp = app.oneshot(aws_req).await.unwrap();
-        assert_eq!(aws_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(aws_resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 }

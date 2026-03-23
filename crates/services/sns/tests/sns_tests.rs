@@ -15,11 +15,12 @@ fn make_ctx(body: &[u8]) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::Value::Null,
-        raw_body: Bytes::from(body.to_vec()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(body.to_vec())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
         spooled_body: None,
     }
 }
@@ -127,6 +128,20 @@ async fn test_delete_topic() {
 }
 
 #[tokio::test]
+async fn test_delete_topic_is_idempotent_when_missing() {
+    let provider = SnsProvider::new();
+    let topic_arn = "arn:aws:sns:us-east-1:000000000000:missing-topic";
+    let body = form_body(&[
+        ("Action", "DeleteTopic"),
+        ("TopicArn", topic_arn),
+        ("Version", "2010-03-31"),
+    ]);
+    let resp = provider.dispatch(&make_ctx(&body)).await.unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    assert!(body_str(&resp).contains("DeleteTopicResponse"));
+}
+
+#[tokio::test]
 async fn test_list_topics() {
     let provider = SnsProvider::new();
     create_topic(&provider, "topic-alpha").await;
@@ -152,6 +167,23 @@ async fn test_get_topic_attributes() {
     assert!(xml.contains("TopicArn"));
     assert!(xml.contains("Owner"));
     assert!(xml.contains("SubscriptionsConfirmed"));
+}
+
+#[tokio::test]
+async fn test_get_topic_attributes_missing_topic_matches_localstack_message() {
+    let provider = SnsProvider::new();
+    let body = form_body(&[
+        ("Action", "GetTopicAttributes"),
+        (
+            "TopicArn",
+            "arn:aws:sns:us-east-1:000000000000:missing-topic",
+        ),
+    ]);
+    let resp = provider.dispatch(&make_ctx(&body)).await.unwrap();
+    assert_eq!(resp.status_code, 404);
+    let xml = body_str(&resp);
+    assert!(xml.contains("<Code>NotFound</Code>"));
+    assert!(xml.contains("<Message>Topic does not exist</Message>"));
 }
 
 #[tokio::test]

@@ -1,72 +1,124 @@
-## MODIFIED Requirements
+## Purpose
+TBD
 
-### Requirement: Baseline availability SHALL be mandatory for required lanes
-Required benchmark lanes MUST have a resolvable previous successful baseline; otherwise the benchmark gate SHALL fail, with explicit diagnostics describing baseline lookup attempts and remediation guidance.
+## Requirements
 
-#### Scenario: Missing baseline fails required lane
-- **WHEN** a required lane cannot resolve a previous successful baseline report
-- **THEN** the benchmark gate SHALL fail with remediation guidance describing how to seed or recover a baseline
+### Requirement: Benchmark gate SHALL evaluate within-run comparisons only
+The benchmark gate SHALL determine pass/fail by comparing openstack metrics against LocalStack metrics from the same benchmark run. The gate SHALL NOT require, fetch, or reference any prior baseline runs. Gate criteria evaluate raw per-operation metrics without weighted averages.
 
-#### Scenario: Baseline lookup diagnostics are emitted
-- **WHEN** baseline discovery is attempted
-- **THEN** benchmark-gate output SHALL include machine-readable diagnostics indicating lookup source, workflow/artifact identifiers, and failure reason when unresolved
+#### Scenario: Gate evaluates per-operation latency ratios
+- **WHEN** the gate evaluates a benchmark report
+- **THEN** the gate SHALL compare each operation's openstack p95 latency against the same operation's LocalStack p95 latency and fail if the ratio exceeds the configured threshold (default: 1.5x)
+
+#### Scenario: Gate evaluates memory budget
+- **WHEN** the gate evaluates memory metrics
+- **THEN** the gate SHALL fail if the openstack-to-LocalStack RSS ratio exceeds the configured budget (default: 0.20)
+
+#### Scenario: Gate evaluates error rates
+- **WHEN** the gate evaluates operation results
+- **THEN** the gate SHALL fail if any openstack operation has a non-zero error count
+
+#### Scenario: Gate does not require prior baselines
+- **WHEN** the gate is invoked
+- **THEN** the gate SHALL NOT attempt to download or reference previous benchmark run artifacts from GitHub Actions or any other source
 
 ### Requirement: Required lane result quality SHALL be validated before threshold checks
-The benchmark gate SHALL validate that required lane results contain usable performance data before evaluating regression thresholds and SHALL surface deterministic diagnostics for data-quality failures.
+The benchmark gate SHALL validate that the benchmark report contains usable data before evaluating thresholds.
 
-#### Scenario: Missing performance scenarios fails required lane
-- **WHEN** a required lane report contains zero performance scenarios
-- **THEN** the benchmark gate SHALL fail with a data-quality error message
+#### Scenario: Empty results fail the gate
+- **WHEN** a benchmark report contains zero operation results
+- **THEN** the gate SHALL fail with a data-quality error message
 
-#### Scenario: All performance scenarios skipped fails required lane
-- **WHEN** a required lane report marks all performance scenarios as skipped
-- **THEN** the benchmark gate SHALL fail with skip-reason context
+#### Scenario: All operations skipped fails the gate
+- **WHEN** a benchmark report marks all operations as skipped
+- **THEN** the gate SHALL fail with skip-reason context
 
-#### Scenario: Missing required service write/read coverage fails required lane
-- **WHEN** a required lane report lacks valid write or read realistic coverage for any required service
-- **THEN** the benchmark gate SHALL fail with machine-readable diagnostics that identify affected services and missing roles
+### Requirement: Benchmark gate SHALL produce raw metric summaries
+The gate SHALL produce markdown summaries showing raw per-operation metrics without weighted averages or cross-service aggregation.
 
-#### Scenario: Data-quality failure diagnostics are machine-readable
-- **WHEN** a data-quality validation fails
-- **THEN** benchmark-gate output SHALL include machine-readable diagnostic fields describing the violated quality condition
+#### Scenario: Summary shows per-operation metrics
+- **WHEN** the gate produces its markdown output
+- **THEN** the summary SHALL include a table of raw per-operation metrics for both targets with pass/fail status per operation
+
+#### Scenario: Summary shows no weighted averages
+- **WHEN** the gate produces its summary
+- **THEN** the summary SHALL NOT include weighted averages, aggregate ratios, or cross-service combined metrics
+
+#### Scenario: Summary shows overall verdict
+- **WHEN** the gate completes
+- **THEN** the summary SHALL include an overall PASS or FAIL verdict
 
 ### Requirement: Required CI lanes SHALL enforce benchmark regression thresholds
-The CI system SHALL fail required benchmark lanes when measured performance regresses beyond configured thresholds versus the previous successful baseline for the same lane, and SHALL document auth/token prerequisites needed for baseline discovery.
+The CI system SHALL fail required benchmark lanes when measured performance regresses beyond configured thresholds versus comparison targets, evaluating openstack p95 latency ratios against each active comparison target (LocalStack and moto when present). Either ratio exceeding the threshold SHALL trigger a failure. The system SHALL document auth/token prerequisites needed for baseline discovery.
 
-#### Scenario: Required lane fails on p95 latency regression breach
-- **WHEN** the current lane p95 ratio regresses by more than the configured threshold relative to baseline
-- **THEN** the benchmark gate SHALL fail the CI job with a message that includes current value, baseline value, threshold, and lane name
+#### Scenario: Required lane fails on p95 latency regression breach against LocalStack
+- **WHEN** the current lane `os_p95 / ls_p95` ratio exceeds the configured `--p95-threshold`
+- **THEN** the benchmark gate SHALL fail the CI job with a message that includes current ratio, threshold, and lane name
+
+#### Scenario: Required lane fails on p95 latency regression breach against moto
+- **WHEN** moto is an active target and the current lane `os_p95 / moto_p95` ratio exceeds the configured `--p95-threshold`
+- **THEN** the benchmark gate SHALL fail the CI job with a message that includes current ratio, threshold, and lane name
 
 #### Scenario: Required lane fails on p99 latency regression breach
-- **WHEN** the current lane p99 ratio regresses by more than the configured threshold relative to baseline
-- **THEN** the benchmark gate SHALL fail the CI job with a message that includes current value, baseline value, threshold, and lane name
+- **WHEN** the current lane p99 ratio regresses by more than the configured threshold relative to any active comparison target
+- **THEN** the benchmark gate SHALL fail the CI job with a message that includes current value, threshold, and lane name
 
 #### Scenario: Required lane fails on throughput regression breach
-- **WHEN** the current lane throughput ratio regresses below the configured threshold relative to baseline
-- **THEN** the benchmark gate SHALL fail the CI job with a message that includes current value, baseline value, threshold, and lane name
+- **WHEN** the current lane throughput ratio regresses below the configured threshold relative to any active comparison target
+- **THEN** the benchmark gate SHALL fail the CI job with a message that includes current value, threshold, and lane name
 
 #### Scenario: Missing GitHub token prerequisite is explicit
 - **WHEN** baseline discovery requires GitHub API access through CLI
 - **THEN** workflow and gate diagnostics SHALL explicitly require `GH_TOKEN` (or equivalent) and provide remediation guidance when missing
 
-### Requirement: Non-required lanes SHALL remain diagnostic
-Non-required lanes SHALL publish benchmark reports and summaries but SHALL NOT block required CI checks in this change.
-
-#### Scenario: High lane reports but does not block PR required checks
-- **WHEN** `fair-high` benchmarks run in scheduled or optional CI
-- **THEN** result summaries SHALL be published and required PR checks SHALL remain unaffected
-
-#### Scenario: Extreme lane reports skip reasons without required-check failure
-- **WHEN** `fair-extreme` benchmarks skip heavy scenarios due to environment constraints
-- **THEN** skip reasons SHALL be included in reporting and SHALL NOT fail required PR checks
+#### Scenario: Gate skips moto ratio when moto is not active
+- **WHEN** moto is not included in the active target set
+- **THEN** the gate SHALL evaluate openstack only against LocalStack and SHALL NOT fail due to missing moto data
 
 ### Requirement: Consolidated benchmark summary SHALL be produced for CI readability
-CI reporting SHALL produce one consolidated benchmark summary artifact that includes lane-level metrics and gate verdicts for the run.
+CI reporting SHALL produce one consolidated benchmark summary artifact that includes lane-level metrics, gate verdicts, and per-target comparison columns for the run.
 
 #### Scenario: Consolidated summary includes all available fairness lanes
 - **WHEN** benchmark lanes complete in a workflow run
-- **THEN** CI SHALL emit a single markdown summary containing each available fairness lane (`fair-low`, `fair-medium`, `fair-high`, `fair-extreme`) with key metrics
+- **THEN** CI SHALL emit a single markdown summary containing each available fairness lane with key metrics
 
 #### Scenario: Consolidated summary includes gate verdicts
 - **WHEN** required lane gate evaluation completes
 - **THEN** the consolidated summary SHALL include pass/fail verdicts and threshold context for each required lane
+
+#### Scenario: Markdown summary table includes per-target columns
+- **WHEN** the gate generates a markdown summary table
+- **THEN** the table SHALL include columns for OS p50, OS p95, OS p99, LS p95, Moto p95 (when active), OS/LS ratio, OS/Moto ratio (when active), OS RPS, LS RPS, Moto RPS (when active), and Status for each operation
+
+#### Scenario: Markdown summary includes memory row for each active target
+- **WHEN** the gate generates a markdown summary
+- **THEN** the summary SHALL include memory usage (loaded RSS) for openstack and each active comparison target
+
+#### Scenario: Consolidated summary includes explicit diagnostic-lane status
+- **WHEN** non-required lanes are skipped, partially configured, or intentionally non-blocking
+- **THEN** the consolidated summary SHALL include explicit status text describing whether the lane executed, skipped by policy, or failed due to scenario configuration
+
+### Requirement: CI artifact download resilience
+The CI PR comment job SHALL handle missing benchmark artifacts gracefully without failing the entire comment workflow.
+
+#### Scenario: Missing benchmark artifact does not block PR comment
+- **WHEN** the benchmark artifact download step in the PR comment job fails because the artifact was not uploaded (due to a skipped or failed benchmark job)
+- **THEN** the download step SHALL use `continue-on-error: true` so the PR comment job continues and the downstream script handles missing files
+
+### Requirement: Semgrep workflow removal
+The Semgrep CI workflow SHALL be removed since CodeRabbit now provides equivalent analysis.
+
+#### Scenario: Semgrep workflow file is deleted
+- **WHEN** the change is applied
+- **THEN** `.github/workflows/semgrep.yml` SHALL NOT exist in the repository
+
+### Requirement: CI workflow moto integration
+CI benchmark workflows SHALL include moto image management alongside the existing LocalStack and openstack image handling.
+
+#### Scenario: CI benchmark jobs pull moto image in preflight
+- **WHEN** a CI benchmark job starts
+- **THEN** the workflow SHALL pull the moto Docker image as part of the preflight/setup steps
+
+#### Scenario: CI benchmark jobs define moto image as environment variable
+- **WHEN** the CI benchmark workflow is configured
+- **THEN** the workflow SHALL define the moto Docker image reference as an environment variable for consistency across steps

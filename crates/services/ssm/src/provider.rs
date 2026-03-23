@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -37,7 +38,7 @@ fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -52,7 +53,7 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -145,11 +146,17 @@ impl ServiceProvider for SsmProvider {
                     Some(n) => n,
                     None => return Ok(json_error("ValidationException", "Name is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ParameterNotFound",
+                        &format!("Parameter {name} not found."),
+                        400,
+                    ));
+                };
                 match store.parameters.get(&name) {
                     None => Ok(json_error(
                         "ParameterNotFound",
-                        &format!("Parameter {name} not found"),
+                        &format!("Parameter {name} not found."),
                         400,
                     )),
                     Some(p) => Ok(json_ok(json!({ "Parameter": param_to_json(p) }))),
@@ -163,7 +170,16 @@ impl ServiceProvider for SsmProvider {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let invalid_parameters: Vec<Value> = names
+                        .iter()
+                        .filter_map(|n| n.as_str().map(|s| json!(s)))
+                        .collect();
+                    return Ok(json_ok(json!({
+                        "Parameters": [],
+                        "InvalidParameters": invalid_parameters,
+                    })));
+                };
                 let mut parameters = Vec::new();
                 let mut invalid_parameters = Vec::new();
                 for n in &names {
@@ -190,7 +206,9 @@ impl ServiceProvider for SsmProvider {
                     .get("Recursive")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Parameters": [] })));
+                };
                 let params: Vec<Value> = store
                     .parameters
                     .values()
@@ -250,7 +268,9 @@ impl ServiceProvider for SsmProvider {
             }
 
             "DescribeParameters" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Parameters": [] })));
+                };
                 let params: Vec<Value> = store
                     .parameters
                     .values()

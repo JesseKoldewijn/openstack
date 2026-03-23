@@ -180,6 +180,20 @@ mod service_framework_tests {
     }
 
     #[tokio::test]
+    async fn manager_dispatches_to_registered_provider_with_mixed_case_service() {
+        let manager = ServicePluginManager::new(test_config());
+        manager.register("echo", EchoProvider::new("echo"));
+
+        let ctx = test_ctx("EcHo", "TestOperation");
+        let resp = manager.dispatch(&ctx).await.expect("dispatch ok");
+        assert_eq!(resp.status_code, 200);
+        let body: serde_json::Value =
+            serde_json::from_slice(resp.body.as_bytes()).expect("valid json");
+        assert_eq!(body["echo"], "ok");
+        assert_eq!(body["operation"], "TestOperation");
+    }
+
+    #[tokio::test]
     async fn manager_returns_not_found_for_unknown_service() {
         let manager = ServicePluginManager::new(test_config());
         let ctx = test_ctx("nonexistent", "Foo");
