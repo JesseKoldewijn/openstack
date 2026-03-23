@@ -93,7 +93,13 @@ impl ObjectFileStore {
             .join(Self::key_hash(key))
     }
 
-    fn object_dir_legacy(&self, account_id: &str, region: &str, bucket: &str, key: &str) -> PathBuf {
+    fn object_dir_legacy(
+        &self,
+        account_id: &str,
+        region: &str,
+        bucket: &str,
+        key: &str,
+    ) -> PathBuf {
         self.base_dir
             .join(account_id)
             .join(region)
@@ -766,7 +772,9 @@ mod tests {
         let legacy_dir = store.object_dir_legacy("acct1", "us-east-1", "bkt", "legacy-key");
         tokio::fs::create_dir_all(&legacy_dir).await.unwrap();
         let legacy_path = legacy_dir.join("v1");
-        tokio::fs::write(&legacy_path, b"legacy-data").await.unwrap();
+        tokio::fs::write(&legacy_path, b"legacy-data")
+            .await
+            .unwrap();
 
         let mut file = store
             .read_object("acct1", "us-east-1", "bkt", "legacy-key", "v1")
