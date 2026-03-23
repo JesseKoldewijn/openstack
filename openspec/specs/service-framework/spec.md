@@ -1,4 +1,21 @@
-## ADDED Requirements
+## MODIFIED Requirements
+
+### Requirement: Service lifecycle management
+Each service provider has lifecycle states: `Available`, `Starting`, `Running`, `Stopping`, `Stopped`, `Error`. Must satisfy startup and concurrency budgets under full-service benchmark profiles.
+
+The `RequestContext` type SHALL provide access to request body data through a `SpooledBody` handle (via `spooled_body` field) in addition to the existing `raw_body: Bytes` field. Services that need streaming access to the request body SHALL use `spooled_body`. For backward compatibility, `raw_body` SHALL continue to be populated for non-streaming dispatch paths.
+
+- **Scenario: Service starts on first request** - Lazy start: transitions `Available` -> `Starting` -> `Running` on first request (unless `EAGER_SERVICE_LOADING`).
+- **Scenario: Eager service loading** - `EAGER_SERVICE_LOADING=1` starts all services during startup.
+- **Scenario: Service start failure** - Failed `start()` -> `Error` state, 503 on subsequent requests.
+- **Scenario: Startup budget is enforced** - Startup metrics evaluated against configured budgets.
+- **Scenario: RequestContext provides spooled body** - When a request is dispatched to a service provider, the `RequestContext` includes a `spooled_body` field containing the request body as a `SpooledBody` handle, allowing the provider to read it via `AsyncRead` without full memory buffering.
+
+### Requirement: Thread-safe service access
+Synchronized loading (no double-init), concurrent request handling. Must satisfy throughput and contention budgets.
+
+- **Scenario: Concurrent requests during startup** - Only one initialization; second request waits.
+- **Scenario: Concurrency contention budget is observable** - Framework exposes contention metrics for gate decisions.
 
 ### Requirement: Service provider trait
 Each AWS service SHALL be implemented as a Rust struct that implements a generated provider trait. The trait SHALL define one async method per AWS API operation, accepting a `RequestContext` and typed input, returning a typed output or service-specific error.
@@ -10,21 +27,6 @@ Each AWS service SHALL be implemented as a Rust struct that implements a generat
 #### Scenario: Unimplemented operation
 - **WHEN** a provider trait method is called that uses the default implementation
 - **THEN** it SHALL return a `NotImplemented` error with the operation name
-
-### Requirement: Service lifecycle management
-Each service provider SHALL have a lifecycle with states: `Available`, `Starting`, `Running`, `Stopping`, `Stopped`, `Error`. The framework SHALL manage transitions and expose the current state.
-
-#### Scenario: Service starts on first request
-- **WHEN** a request targets a service that is in `Available` state and `EAGER_SERVICE_LOADING` is not set
-- **THEN** the framework SHALL transition the service to `Starting`, invoke its `start()` method, then transition to `Running` before dispatching the request
-
-#### Scenario: Eager service loading
-- **WHEN** `EAGER_SERVICE_LOADING=1` is set
-- **THEN** all configured services SHALL be started during server startup, before accepting requests
-
-#### Scenario: Service start failure
-- **WHEN** a service's `start()` method returns an error
-- **THEN** the service SHALL transition to `Error` state and subsequent requests SHALL return `503 Service Unavailable`
 
 ### Requirement: Lazy service loading
 Services SHALL be loaded on first request by default (lazy loading). The `SERVICES` environment variable SHALL control which services are available. If `SERVICES` is set, only listed services SHALL be loadable.
@@ -58,10 +60,3 @@ The framework SHALL provide a `ServiceSkeleton` that maps AWS operation names to
 #### Scenario: Provider returns error
 - **WHEN** a provider method returns `Err(SqsError::QueueAlreadyExists(...))`
 - **THEN** the skeleton SHALL serialize it as a `QueueAlreadyExists` AWS error response with the correct HTTP status code
-
-### Requirement: Thread-safe service access
-Service providers SHALL be safely accessible from multiple concurrent requests. The framework SHALL ensure that service loading is synchronized (preventing double-initialization) while request handling runs concurrently.
-
-#### Scenario: Concurrent requests during service startup
-- **WHEN** two requests arrive simultaneously for a service that hasn't been loaded yet
-- **THEN** only one initialization SHALL occur; the second request SHALL wait for initialization to complete before being dispatched

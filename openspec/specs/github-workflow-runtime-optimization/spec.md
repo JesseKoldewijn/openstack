@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Workflow runtime baseline and reporting
-The system SHALL capture and publish baseline and ongoing workflow performance metrics for pull request and main-branch CI workflows, including total duration and per-job duration distributions for CI, Docker, and cross-compile workflows.
+The system SHALL capture and publish baseline and ongoing workflow performance metrics for all pull request and main-branch CI workflows, including total duration and per-job duration distributions.
 
 #### Scenario: Baseline captured before optimization
 - **WHEN** a workflow optimization initiative starts
@@ -34,7 +34,7 @@ The system SHALL implement a deterministic cache and artifact reuse strategy to 
 - **THEN** downstream jobs consume the published artifact instead of recomputing the same outputs
 
 ### Requirement: Controlled matrix parallelism
-The system SHALL support matrix-based parallel execution with configurable bounds to prevent runner saturation and excessive queue contention across CI and cross-compile workflows.
+The system SHALL support matrix-based parallel execution with configurable bounds to prevent runner saturation and excessive queue contention.
 
 #### Scenario: Matrix jobs respect parallelism limits
 - **WHEN** a workflow defines a matrix for multiple environments or feature sets
@@ -45,7 +45,7 @@ The system SHALL support matrix-based parallel execution with configurable bound
 - **THEN** the matrix configuration and resulting required checks remain stable and predictable
 
 ### Requirement: Selective execution with safety fallback
-The system SHALL skip non-impacted optional jobs based on change scope and SHALL always retain a conservative fallback path that runs critical validation for CI, Docker, and cross-compile workflows.
+The system SHALL skip non-impacted optional jobs based on change scope and SHALL always retain a conservative fallback path that runs critical validation.
 
 #### Scenario: Non-impacted optional jobs are skipped
 - **WHEN** changed files do not match the scope of an optional workflow job

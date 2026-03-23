@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
@@ -41,8 +42,8 @@ impl Default for DynamoDbProvider {
 fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        content_type: "application/x-amz-json-1.0".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.0"),
         headers: Vec::new(),
     }
 }
@@ -50,14 +51,14 @@ fn json_ok(body: Value) -> DispatchResponse {
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(
+        body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "__type": code,
                 "message": message,
             }))
             .unwrap(),
-        ),
-        content_type: "application/x-amz-json-1.0".to_string(),
+        )),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -528,10 +529,11 @@ impl ServiceProvider for DynamoDbProvider {
     }
 
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        let op_start = std::time::Instant::now();
         let op = ctx.operation.as_str();
         let body = &ctx.request_body;
 
-        match op {
+        let response = match op {
             // ---------------------------------------------------------------
             // Table operations
             // ---------------------------------------------------------------
@@ -610,7 +612,13 @@ impl ServiceProvider for DynamoDbProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Cannot do operations on a non-existent table",
+                        400,
+                    ));
+                };
                 match store.get_table(&name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -622,7 +630,9 @@ impl ServiceProvider for DynamoDbProvider {
             }
 
             "ListTables" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_ok(json!({ "TableNames": [] })));
+                };
                 let limit = body.get("Limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
                 let exclusive_start = body.get("ExclusiveStartTableName").and_then(|v| v.as_str());
 
@@ -807,7 +817,13 @@ impl ServiceProvider for DynamoDbProvider {
                 let projection = body.get("ProjectionExpression").and_then(|v| v.as_str());
                 let attr_names = parse_expr_names(body.get("ExpressionAttributeNames"));
 
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Cannot do operations on a non-existent table",
+                        400,
+                    ));
+                };
                 let table = match store.get_table(&name) {
                     None => {
                         return Ok(json_error(
@@ -1005,7 +1021,13 @@ impl ServiceProvider for DynamoDbProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("ALL_ATTRIBUTES");
 
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Cannot do operations on a non-existent table",
+                        400,
+                    ));
+                };
                 let table = match store.get_table(&name) {
                     None => {
                         return Ok(json_error(
@@ -1119,7 +1141,13 @@ impl ServiceProvider for DynamoDbProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("ALL_ATTRIBUTES");
 
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Cannot do operations on a non-existent table",
+                        400,
+                    ));
+                };
                 let table = match store.get_table(&name) {
                     None => {
                         return Ok(json_error(
@@ -1178,7 +1206,13 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Cannot do operations on a non-existent table",
+                        400,
+                    ));
+                };
                 let mut responses: serde_json::Map<String, Value> = serde_json::Map::new();
                 let unprocessed: serde_json::Map<String, Value> = serde_json::Map::new();
 
@@ -1297,7 +1331,11 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_ok(json!({
+                        "Responses": vec![json!({}); transact_items.len()]
+                    })));
+                };
                 let mut responses = Vec::new();
 
                 for ti in &transact_items {
@@ -1458,7 +1496,13 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Stream not found",
+                        400,
+                    ));
+                };
                 // Find the table with this stream ARN
                 let table = store
                     .tables
@@ -1491,7 +1535,9 @@ impl ServiceProvider for DynamoDbProvider {
 
             "ListStreams" => {
                 let table_name_filter = body.get("TableName").and_then(|v| v.as_str());
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_ok(json!({ "Streams": [] })));
+                };
                 let streams: Vec<Value> = store
                     .tables
                     .values()
@@ -1530,7 +1576,13 @@ impl ServiceProvider for DynamoDbProvider {
                     .unwrap_or("TRIM_HORIZON");
                 let sequence_number = body.get("SequenceNumber").and_then(|v| v.as_str());
 
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Stream not found",
+                        400,
+                    ));
+                };
                 let table = store
                     .tables
                     .values()
@@ -1585,7 +1637,13 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Stream not found",
+                        400,
+                    ));
+                };
                 let table = store
                     .tables
                     .values()
@@ -1662,6 +1720,17 @@ impl ServiceProvider for DynamoDbProvider {
                     501,
                 ))
             }
+        };
+
+        if response.is_ok() {
+            tracing::debug!(
+                service = "dynamodb",
+                operation = %op,
+                op_latency_us = op_start.elapsed().as_micros(),
+                "DynamoDB operation complete"
+            );
         }
+
+        response
     }
 }

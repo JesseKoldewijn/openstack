@@ -6,12 +6,12 @@ The parity harness compares behavior between openstack and LocalStack for the sa
 
 - `core`: required CI profile intended for stable, high-signal compatibility coverage
 - `extended`: non-required profile for broader coverage and iterative expansion
+- `all-services-smoke`: full 24-service parity lane used for all PR targets
 
 ## Run Locally
 
 Requirements:
 
-- `aws` CLI available
 - Docker available (unless `PARITY_LOCALSTACK_ENDPOINT` is provided)
 
 Run core profile:
@@ -26,21 +26,32 @@ Run extended profile:
 cargo run -p openstack-integration-tests --bin parity_runner -- extended
 ```
 
+Run full all-services smoke profile:
+
+```bash
+cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
+```
+
 Optional overrides:
 
 - `PARITY_OPENSTACK_ENDPOINT=http://127.0.0.1:4566`
 - `PARITY_LOCALSTACK_ENDPOINT=http://127.0.0.1:4666`
 - `PARITY_LOCALSTACK_IMAGE=localstack/localstack:3.7.2`
+- `PARITY_OPENSTACK_PERSISTENCE_MODE=durable|non-durable`
+- `PARITY_LOCALSTACK_PERSISTENCE_MODE=durable|non-durable`
 
-Reports are written to `target/parity-reports/*.json`.
+Reports are written to `target/parity-reports/*.json` plus per-profile latest snapshots (`<profile>-latest.json`).
+
+Parity reports now include persistence mode metadata (`openstack_persistence_mode`, `localstack_persistence_mode`, `persistence_mode_equivalent`), persistence failure-class rollups under `summary.persistence_failure_classes`, and per-scenario native coverage indicators (`native_coverage_status`, `follow_up_required`) so README-listed services that still need native HTTP follow-up remain visible.
 
 ## Triage Workflow
 
 1. Run parity profile and inspect report mismatch entries.
 2. Classify mismatch:
-   - regression in openstack
-   - upstream LocalStack behavior change
-   - acceptable difference
+    - regression in openstack
+    - upstream LocalStack behavior change
+    - acceptable difference
+    - native HTTP follow-up required
 3. For acceptable differences, add an explicit entry in `tests/parity/known_differences.json` with:
    - `id`, `service`, `scenario_id`, `step_id`, `path`
    - `rationale`, `owner`, `reviewer`
@@ -54,5 +65,6 @@ Malformed or expired known-difference entries fail parity runs by design.
 - Base built-in scenarios are defined in `crates/tests/integration/src/parity.rs`.
 - Optional profile-specific scenarios can be added in `tests/parity/scenarios/<profile>.json`.
 - External scenarios support placeholders: `{{run_id}}`, `{{bucket}}`, `{{queue}}`, `{{table}}`.
+- External scenarios may set `requires_restart: true` to include persistence lifecycle validation.
 - If an external scenario reuses a built-in `id`, it replaces the built-in scenario to avoid duplicate execution.
 - `extended` includes all `core` scenarios plus any `profile: "extended"` scenarios.

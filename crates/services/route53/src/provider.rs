@@ -1,10 +1,12 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
@@ -39,8 +41,8 @@ const ROUTE53_NS: &str = "https://route53.amazonaws.com/doc/2013-04-01/";
 fn xml_ok(body: String) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(body.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -48,8 +50,8 @@ fn xml_ok(body: String) -> DispatchResponse {
 fn xml_created(body: String, location: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 201,
-        body: Bytes::from(body.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: vec![("Location".to_string(), location.to_string())],
     }
 }
@@ -59,13 +61,15 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     let body = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ErrorResponse xmlns=\"{ROUTE53_NS}\">\
-<Error><Code>{code}</Code><Message>{message}</Message></Error>\
-</ErrorResponse>"
+<Error><Code>{}</Code><Message>{}</Message></Error>\
+</ErrorResponse>",
+        xml_escape(code),
+        xml_escape(message)
     );
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(body.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -148,7 +152,7 @@ impl ServiceProvider for Route53Provider {
             // CreateHostedZone  POST /2013-04-01/hostedzone
             // ----------------------------------------------------------------
             "CreateHostedZone" => {
-                let raw = String::from_utf8_lossy(&ctx.raw_body);
+                let raw = String::from_utf8_lossy(ctx.raw_body_bytes());
                 let name_raw = xml_text(&raw, "Name").unwrap_or_default();
                 // Normalize: ensure trailing dot
                 let name = if name_raw.ends_with('.') {
@@ -175,12 +179,14 @@ impl ServiceProvider for Route53Provider {
 <CreateHostedZoneResponse xmlns=\"{ROUTE53_NS}\">\
 <HostedZone>\
 <Id>/hostedzone/{zone_id}</Id>\
-<Name>{name}</Name>\
-<Config><Comment>{comment}</Comment><PrivateZone>false</PrivateZone></Config>\
+<Name>{}</Name>\
+<Config><Comment>{}</Comment><PrivateZone>false</PrivateZone></Config>\
 <ResourceRecordSetCount>2</ResourceRecordSetCount>\
 </HostedZone>\
 <ChangeInfo><Id>/{rid}</Id><Status>INSYNC</Status></ChangeInfo>\
-</CreateHostedZoneResponse>"
+</CreateHostedZoneResponse>",
+                    xml_escape(&name),
+                    xml_escape(&comment)
                 );
                 Ok(xml_created(
                     body,
@@ -211,7 +217,17 @@ impl ServiceProvider for Route53Provider {
             // ListHostedZones  GET /2013-04-01/hostedzone
             // ----------------------------------------------------------------
             "ListHostedZones" => {
-                let store = self.store.get_or_create(account_id, ROUTE53_REGION);
+                let Some(store) = self.store.get(account_id, ROUTE53_REGION) else {
+                    let body = format!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ListHostedZonesResponse xmlns=\"{ROUTE53_NS}\">\
+<HostedZones></HostedZones>\
+<IsTruncated>false</IsTruncated>\
+<MaxItems>100</MaxItems>\
+</ListHostedZonesResponse>"
+                    );
+                    return Ok(xml_ok(body));
+                };
                 let zones_xml: String = store
                     .zones
                     .values()
@@ -223,7 +239,11 @@ impl ServiceProvider for Route53Provider {
 <Config><Comment>{}</Comment><PrivateZone>{}</PrivateZone></Config>\
 <ResourceRecordSetCount>{}</ResourceRecordSetCount>\
 </HostedZone>",
-                            z.id, z.name, z.comment, z.private_zone, z.record_count
+                            z.id,
+                            xml_escape(&z.name),
+                            xml_escape(&z.comment),
+                            z.private_zone,
+                            z.record_count
                         )
                     })
                     .collect();
@@ -254,7 +274,7 @@ impl ServiceProvider for Route53Provider {
                     .unwrap_or("")
                     .to_string();
 
-                let raw = String::from_utf8_lossy(&ctx.raw_body);
+                let raw = String::from_utf8_lossy(ctx.raw_body_bytes());
                 let changes = parse_rrsets(&raw);
 
                 let mut store = self.store.get_or_create(account_id, ROUTE53_REGION);
@@ -298,7 +318,20 @@ impl ServiceProvider for Route53Provider {
                     .unwrap_or("")
                     .to_string();
 
-                let store = self.store.get_or_create(account_id, ROUTE53_REGION);
+                let Some(store) = self.store.get(account_id, ROUTE53_REGION) else {
+                    return Ok(xml_error(
+                        "NoSuchHostedZone",
+                        &format!("No hosted zone found with ID: {zone_id}"),
+                        404,
+                    ));
+                };
+                if !store.zones.contains_key(&zone_id) {
+                    return Ok(xml_error(
+                        "NoSuchHostedZone",
+                        &format!("No hosted zone found with ID: {zone_id}"),
+                        404,
+                    ));
+                }
                 let rrsets_xml: String = store
                     .records
                     .iter()
@@ -307,15 +340,22 @@ impl ServiceProvider for Route53Provider {
                         let values_xml: String = rrset
                             .values
                             .iter()
-                            .map(|v| format!("<ResourceRecord><Value>{v}</Value></ResourceRecord>"))
+                            .map(|v| {
+                                format!(
+                                    "<ResourceRecord><Value>{}</Value></ResourceRecord>",
+                                    xml_escape(v)
+                                )
+                            })
                             .collect();
                         format!(
                             "<ResourceRecordSet>\
-<Name>{name}</Name>\
-<Type>{rtype}</Type>\
+<Name>{}</Name>\
+<Type>{}</Type>\
 <TTL>{}</TTL>\
 <ResourceRecords>{values_xml}</ResourceRecords>\
 </ResourceRecordSet>",
+                            xml_escape(name),
+                            xml_escape(rtype),
                             rrset.ttl
                         )
                     })

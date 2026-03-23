@@ -1,0 +1,9 @@
+# Project-level act configuration
+# Mirrors the GitHub Actions ubuntu-latest runner constraints:
+#   CPU:  2 cores
+#   RAM:  7 GB
+#   Disk: 14 GB  (enforced via pre-flight check in bench scripts;
+#                 --storage-opt size=14g requires xfs/devicemapper and is
+#                 not portable on ext4/overlayfs used by WSL2 Docker)
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+--container-options --memory=7g --cpus=2

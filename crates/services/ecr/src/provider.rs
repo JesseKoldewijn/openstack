@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
@@ -37,8 +38,8 @@ impl Default for EcrProvider {
 fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -46,14 +47,31 @@ fn json_ok(body: Value) -> DispatchResponse {
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(
+        body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "__type": code,
                 "message": message,
             }))
             .unwrap(),
-        ),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        )),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
+        headers: Vec::new(),
+    }
+}
+
+fn localstack_unsupported_error(service: &str) -> DispatchResponse {
+    DispatchResponse {
+        status_code: 501,
+        body: ResponseBody::Buffered(Bytes::from(
+            serde_json::to_vec(&json!({
+                "__type": "InternalFailure",
+                "message": format!(
+                    "API for service '{service}' not yet implemented or pro feature - please check https://docs.localstack.cloud/references/coverage/ for further information"
+                ),
+            }))
+            .unwrap(),
+        )),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -172,7 +190,9 @@ impl ServiceProvider for EcrProvider {
             // DescribeRepositories
             // ----------------------------------------------------------------
             "DescribeRepositories" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "repositories": [] })));
+                };
                 let repos: Vec<Value> = store
                     .repositories
                     .values()
@@ -254,7 +274,9 @@ impl ServiceProvider for EcrProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "images": [], "failures": [] })));
+                };
                 let image_ids = ctx
                     .request_body
                     .get("imageIds")
@@ -290,6 +312,11 @@ impl ServiceProvider for EcrProvider {
             }
 
             // ----------------------------------------------------------------
+            // DescribeImages
+            // ----------------------------------------------------------------
+            "DescribeImages" => Ok(localstack_unsupported_error("ecr")),
+
+            // ----------------------------------------------------------------
             // ListImages
             // ----------------------------------------------------------------
             "ListImages" => {
@@ -303,7 +330,9 @@ impl ServiceProvider for EcrProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "imageIds": [] })));
+                };
                 let image_ids: Vec<Value> = store
                     .images
                     .values()

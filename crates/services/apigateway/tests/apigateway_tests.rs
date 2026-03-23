@@ -12,16 +12,18 @@ fn make_ctx(operation: &str, body: Value, path: &str, method: &str) -> RequestCo
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
+        spooled_body: None,
     }
 }
 
 fn body(resp: &DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("valid JSON")
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +124,22 @@ async fn test_get_rest_api_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 404);
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "NotFoundException");
+    assert_eq!(payload["message"], "Invalid Rest API Id specified");
+    assert_eq!(resp.content_type, "application/json");
+}
+
+#[tokio::test]
+async fn test_get_rest_api_trailing_slash_is_not_treated_as_empty_id() {
+    let p = ApiGatewayProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("GetRestApi", json!({}), "/restapis/", "GET"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let payload = body(&resp);
+    assert_eq!(payload["items"], json!([]));
 }
 
 #[tokio::test]
@@ -191,6 +209,35 @@ async fn test_create_resource() {
     let b = body(&resp);
     assert_eq!(b["pathPart"], "users");
     assert_eq!(b["path"], "/users");
+}
+
+#[tokio::test]
+async fn test_create_resource_missing_parent_id_returns_not_found() {
+    let p = ApiGatewayProvider::new();
+    let create = p
+        .dispatch(&make_ctx(
+            "CreateRestApi",
+            json!({ "name": "api" }),
+            "/restapis",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    let api_id = body(&create)["id"].as_str().unwrap().to_string();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "CreateResource",
+            json!({ "pathPart": "users" }),
+            &format!("/restapis/{api_id}/resources/does-not-exist"),
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "NotFoundException");
+    assert_eq!(payload["message"], "Invalid Resource identifier specified");
 }
 
 #[tokio::test]

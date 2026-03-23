@@ -1,0 +1,15 @@
+{
+  "protocol": "rest_json",
+  "operation": {
+    "method": "POST",
+    "path": "/",
+    "body": "{\"name\":\"resource-a\"}"
+  },
+  "response": {
+    "status": 200,
+    "body": "{\"id\":\"resource-a\",\"status\":\"created\"}"
+  },
+  "captures": {
+    "resource_id": "id"
+  }
+}

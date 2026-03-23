@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
@@ -37,8 +38,8 @@ impl Default for AcmProvider {
 fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -46,14 +47,14 @@ fn json_ok(body: Value) -> DispatchResponse {
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(
+        body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "__type": code,
                 "message": message,
             }))
             .unwrap(),
-        ),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        )),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -146,11 +147,17 @@ impl ServiceProvider for AcmProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Certificate with arn {arn} not found in account {account_id}"),
+                        400,
+                    ));
+                };
                 match store.certificates.get(&arn) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Certificate {arn} not found"),
+                        &format!("Certificate with arn {arn} not found in account {account_id}"),
                         400,
                     )),
                     Some(c) => Ok(json_ok(json!({ "Certificate": cert_detail(c) }))),
@@ -158,7 +165,9 @@ impl ServiceProvider for AcmProvider {
             }
 
             "ListCertificates" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "CertificateSummaryList": [] })));
+                };
                 let certs: Vec<Value> = store
                     .certificates
                     .values()
@@ -244,7 +253,13 @@ impl ServiceProvider for AcmProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Certificate {arn} not found"),
+                        400,
+                    ));
+                };
                 match store.certificates.get(&arn) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",

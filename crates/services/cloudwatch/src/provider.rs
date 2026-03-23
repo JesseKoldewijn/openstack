@@ -1,11 +1,15 @@
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -37,8 +41,8 @@ impl Default for CloudWatchProvider {
 fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -46,16 +50,106 @@ fn json_ok(body: Value) -> DispatchResponse {
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(
+        body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "__type": code,
                 "message": message,
             }))
             .unwrap(),
-        ),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        )),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
+}
+
+fn is_query_protocol_request(ctx: &RequestContext) -> bool {
+    ctx.headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|value| value.starts_with("application/x-www-form-urlencoded"))
+        .unwrap_or(false)
+        || ctx.query_params.contains_key("Action")
+        || ctx.raw_body_bytes().starts_with(b"Action=")
+}
+
+fn query_ok(action: &str, inner: &str) -> DispatchResponse {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><{action}Response xmlns=\"http://monitoring.amazonaws.com/doc/2010-08-01/\">{inner}<ResponseMetadata><RequestId>{}</RequestId></ResponseMetadata></{action}Response>",
+        Uuid::new_v4()
+    );
+    DispatchResponse {
+        status_code: 200,
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
+        headers: Vec::new(),
+    }
+}
+
+fn query_metric_data(ctx: &RequestContext) -> Vec<Value> {
+    fn coerce_value(raw: &str) -> Value {
+        if let Ok(v) = raw.parse::<i64>() {
+            return Value::Number(v.into());
+        }
+        if let Ok(v) = raw.parse::<f64>()
+            && let Some(n) = serde_json::Number::from_f64(v)
+        {
+            return Value::Number(n);
+        }
+        Value::String(raw.to_string())
+    }
+
+    // Query API requests primarily carry MetricData.member.* in the
+    // x-www-form-urlencoded body. Fall back to query params for compatibility.
+    let mut form_params: HashMap<String, String> = HashMap::new();
+    if let Ok(parsed) =
+        serde_urlencoded::from_bytes::<HashMap<String, String>>(ctx.raw_body_bytes())
+    {
+        form_params = parsed;
+    }
+    if form_params.is_empty() {
+        form_params = ctx.query_params.clone();
+    }
+
+    let mut members: BTreeMap<usize, serde_json::Map<String, Value>> = BTreeMap::new();
+    for (key, value) in &form_params {
+        if let Some(rest) = key.strip_prefix("MetricData.member.") {
+            let mut parts = rest.splitn(2, '.');
+            let Some(index) = parts.next().and_then(|s| s.parse::<usize>().ok()) else {
+                continue;
+            };
+            let Some(field) = parts.next() else {
+                continue;
+            };
+
+            let entry = members.entry(index).or_default();
+            if let Some(dim_rest) = field.strip_prefix("Dimensions.member.") {
+                let mut dim_parts = dim_rest.splitn(2, '.');
+                let Some(dim_index) = dim_parts.next().and_then(|s| s.parse::<usize>().ok()) else {
+                    continue;
+                };
+                let Some(dim_field) = dim_parts.next() else {
+                    continue;
+                };
+
+                let dims = entry
+                    .entry("Dimensions".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                let Some(dims_arr) = dims.as_array_mut() else {
+                    continue;
+                };
+                while dims_arr.len() < dim_index {
+                    dims_arr.push(Value::Object(serde_json::Map::new()));
+                }
+
+                if let Some(Value::Object(dim_obj)) = dims_arr.get_mut(dim_index - 1) {
+                    dim_obj.insert(dim_field.to_string(), Value::String(value.clone()));
+                }
+            } else {
+                entry.insert(field.to_string(), coerce_value(value));
+            }
+        }
+    }
+    members.into_values().map(Value::Object).collect()
 }
 
 fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
@@ -93,13 +187,20 @@ impl ServiceProvider for CloudWatchProvider {
                     None => return Ok(json_error("ValidationError", "Namespace is required", 400)),
                 };
                 let mut store = self.store.get_or_create(account_id, region);
-                if let Some(data) = ctx
+                let metric_data = if let Some(data) = ctx
                     .request_body
                     .get("MetricData")
                     .and_then(|v| v.as_array())
                 {
+                    data.to_vec()
+                } else if is_query_protocol_request(ctx) {
+                    query_metric_data(ctx)
+                } else {
+                    Vec::new()
+                };
+                if !metric_data.is_empty() {
                     let now = Utc::now();
-                    for datum in data {
+                    for datum in &metric_data {
                         let metric_name = datum
                             .get("MetricName")
                             .and_then(|v| v.as_str())
@@ -134,7 +235,11 @@ impl ServiceProvider for CloudWatchProvider {
                         });
                     }
                 }
-                Ok(json_ok(json!({})))
+                if is_query_protocol_request(ctx) {
+                    Ok(query_ok("PutMetricData", ""))
+                } else {
+                    Ok(json_ok(json!({})))
+                }
             }
 
             // ----------------------------------------------------------------
@@ -143,7 +248,16 @@ impl ServiceProvider for CloudWatchProvider {
             "ListMetrics" => {
                 let namespace_filter = str_param(ctx, "Namespace");
                 let metric_name_filter = str_param(ctx, "MetricName");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    if is_query_protocol_request(ctx) {
+                        return Ok(query_ok(
+                            "ListMetrics",
+                            "<ListMetricsResult><Metrics></Metrics></ListMetricsResult>",
+                        ));
+                    } else {
+                        return Ok(json_ok(json!({ "Metrics": [] })));
+                    }
+                };
 
                 let mut seen = std::collections::HashSet::new();
                 let metrics: Vec<Value> = store
@@ -170,7 +284,58 @@ impl ServiceProvider for CloudWatchProvider {
                     })
                     .collect();
 
-                Ok(json_ok(json!({ "Metrics": metrics })))
+                if is_query_protocol_request(ctx) {
+                    let metrics_xml = metrics
+                        .iter()
+                        .map(|metric| {
+                            let namespace = metric
+                                .get("Namespace")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let metric_name = metric
+                                .get("MetricName")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let dimensions_xml = metric
+                                .get("Dimensions")
+                                .and_then(|v| v.as_array())
+                                .map(|dims| {
+                                    dims.iter()
+                                        .map(|dim| {
+                                            let name = dim
+                                                .get("Name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let value = dim
+                                                .get("Value")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            format!(
+                                                "<member><Name>{}</Name><Value>{}</Value></member>",
+                                                xml_escape(name),
+                                                xml_escape(value)
+                                            )
+                                        })
+                                        .collect::<String>()
+                                })
+                                .unwrap_or_default();
+                            format!(
+                                "<member><Namespace>{}</Namespace><MetricName>{}</MetricName><Dimensions>{}</Dimensions></member>",
+                                xml_escape(namespace),
+                                xml_escape(metric_name),
+                                dimensions_xml
+                            )
+                        })
+                        .collect::<String>();
+                    Ok(query_ok(
+                        "ListMetrics",
+                        &format!(
+                            "<ListMetricsResult><Metrics>{metrics_xml}</Metrics></ListMetricsResult>"
+                        ),
+                    ))
+                } else {
+                    Ok(json_ok(json!({ "Metrics": metrics })))
+                }
             }
 
             // ----------------------------------------------------------------
@@ -179,7 +344,18 @@ impl ServiceProvider for CloudWatchProvider {
             "GetMetricStatistics" => {
                 let namespace = str_param(ctx, "Namespace").unwrap_or_default();
                 let metric_name = str_param(ctx, "MetricName").unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    if is_query_protocol_request(ctx) {
+                        return Ok(query_ok(
+                            "GetMetricStatistics",
+                            &format!(
+                                "<GetMetricStatisticsResult><Datapoints /><Label>{}</Label></GetMetricStatisticsResult>",
+                                xml_escape(&metric_name)
+                            ),
+                        ));
+                    }
+                    return Ok(json_ok(json!({ "Datapoints": [], "Label": metric_name })));
+                };
 
                 let values: Vec<f64> = store
                     .metrics
@@ -208,10 +384,63 @@ impl ServiceProvider for CloudWatchProvider {
                     vec![]
                 };
 
-                Ok(json_ok(json!({
-                    "Label": metric_name,
-                    "Datapoints": datapoints,
-                })))
+                if is_query_protocol_request(ctx) {
+                    let datapoints_xml = datapoints
+                        .iter()
+                        .map(|datapoint| {
+                            let timestamp = datapoint
+                                .get("Timestamp")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let sample_count = datapoint
+                                .get("SampleCount")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            let sum = datapoint.get("Sum").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let average = datapoint
+                                .get("Average")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            let minimum = datapoint
+                                .get("Minimum")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            let maximum = datapoint
+                                .get("Maximum")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            let unit = datapoint.get("Unit").and_then(|v| v.as_str()).unwrap_or("None");
+                            format!(
+                                "<member><Timestamp>{}</Timestamp><SampleCount>{}</SampleCount><Sum>{}</Sum><Average>{}</Average><Minimum>{}</Minimum><Maximum>{}</Maximum><Unit>{}</Unit></member>",
+                                xml_escape(timestamp),
+                                sample_count,
+                                sum,
+                                average,
+                                minimum,
+                                maximum,
+                                xml_escape(unit)
+                            )
+                        })
+                        .collect::<String>();
+                    let datapoints_fragment = if datapoints_xml.is_empty() {
+                        "<Datapoints />".to_string()
+                    } else {
+                        format!("<Datapoints>{datapoints_xml}</Datapoints>")
+                    };
+                    Ok(query_ok(
+                        "GetMetricStatistics",
+                        &format!(
+                            "<GetMetricStatisticsResult>{}<Label>{}</Label></GetMetricStatisticsResult>",
+                            datapoints_fragment,
+                            xml_escape(&metric_name)
+                        ),
+                    ))
+                } else {
+                    Ok(json_ok(json!({
+                        "Label": metric_name,
+                        "Datapoints": datapoints,
+                    })))
+                }
             }
 
             // ----------------------------------------------------------------
@@ -301,7 +530,9 @@ impl ServiceProvider for CloudWatchProvider {
                             .collect()
                     })
                     .unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "MetricAlarms": [] })));
+                };
                 let alarms: Vec<Value> = store
                     .alarms
                     .values()
@@ -452,7 +683,9 @@ impl ServiceProvider for CloudWatchProvider {
             // ----------------------------------------------------------------
             "DescribeLogGroups" => {
                 let prefix = str_param(ctx, "logGroupNamePrefix");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "logGroups": [] })));
+                };
                 let groups: Vec<Value> = store
                     .log_groups
                     .values()
@@ -546,7 +779,9 @@ impl ServiceProvider for CloudWatchProvider {
                     }
                 };
                 let prefix = str_param(ctx, "logStreamNamePrefix");
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "logStreams": [] })));
+                };
                 let streams: Vec<Value> = store
                     .log_streams
                     .values()
@@ -663,7 +898,14 @@ impl ServiceProvider for CloudWatchProvider {
                     }
                 };
                 let key = (log_group_name, log_stream_name);
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let token = Uuid::new_v4().to_string();
+                    return Ok(json_ok(json!({
+                        "events": [],
+                        "nextForwardToken": token,
+                        "nextBackwardToken": token,
+                    })));
+                };
                 let events: Vec<Value> = store
                     .log_events
                     .get(&key)
@@ -702,7 +944,9 @@ impl ServiceProvider for CloudWatchProvider {
                     }
                 };
                 let filter_pattern = str_param(ctx, "filterPattern").unwrap_or_default();
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "events": [] })));
+                };
                 let mut filtered_events: Vec<Value> = Vec::new();
                 for ((group, stream_name), events) in &store.log_events {
                     if group != &log_group_name {

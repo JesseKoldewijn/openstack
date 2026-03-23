@@ -1,0 +1,14 @@
+{
+  "protocol": "rest_xml",
+  "operation": {
+    "method": "GET",
+    "path": "/bucket-a"
+  },
+  "response": {
+    "status": 200,
+    "body": "<ListBucketResult><Name>bucket-a</Name></ListBucketResult>"
+  },
+  "captures": {
+    "bucket": "Name"
+  }
+}

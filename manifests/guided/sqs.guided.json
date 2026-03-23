@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.2",
+  "service": "sqs",
+  "protocol": "query",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create",
+          "title": "Create queue",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateQueue&QueueName={{inputs.resource_name}}&Version=2012-11-05"
+          },
+          "captures": [{ "name": "resource_name", "source": "inputs.resource_name" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete",
+          "title": "Delete queue",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteQueue&QueueUrl={{captures.resource_name}}&Version=2012-11-05"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}

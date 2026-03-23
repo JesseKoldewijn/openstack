@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.2",
+  "service": "lambda",
+  "protocol": "rest_json",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [{"id":"create","title":"Create function","operation":{"method":"POST","path":"/2015-03-31/functions","body":"{\"FunctionName\":\"{{inputs.resource_name}}\",\"Runtime\":\"python3.11\",\"Role\":\"arn:aws:iam::000000000000:role/lambda\",\"Handler\":\"index.handler\",\"Code\":{\"ZipFile\":\"UEsDBAoAAAAAA\"}}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
+      "cleanup": [{"id":"delete","title":"Delete function","operation":{"method":"DELETE","path":"/2015-03-31/functions/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+    }
+  ]
+}

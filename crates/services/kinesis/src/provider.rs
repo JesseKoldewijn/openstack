@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -5,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
@@ -37,8 +38,8 @@ impl Default for KinesisProvider {
 fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -46,23 +47,22 @@ fn json_ok(body: Value) -> DispatchResponse {
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(
+        body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "__type": code,
                 "message": message,
             }))
             .unwrap(),
-        ),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        )),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
 
-fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
-    ctx.request_body
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(String::from)
+/// Extract a string field from the JSON request body, borrowing from the context.
+/// Returns `None` if the key is absent or is not a JSON string.
+fn str_param<'a>(ctx: &'a RequestContext, key: &str) -> Option<&'a str> {
+    ctx.request_body.get(key)?.as_str()
 }
 
 fn encode_iterator(state: &ShardIteratorState) -> String {
@@ -136,17 +136,20 @@ impl ServiceProvider for KinesisProvider {
 
                 let stream_arn =
                     format!("arn:aws:kinesis:{region}:{account_id}:stream/{stream_name}");
-                let stream =
-                    crate::store::KinesisStream::new(stream_name.clone(), stream_arn, shard_count);
+                let stream = crate::store::KinesisStream::new(
+                    stream_name.to_owned(),
+                    stream_arn,
+                    shard_count,
+                );
                 let mut store = self.store.get_or_create(account_id, region);
-                if store.streams.contains_key(&stream_name) {
+                if store.streams.contains_key(stream_name) {
                     return Ok(json_error(
                         "ResourceInUseException",
                         &format!("Stream {stream_name} already exists"),
                         400,
                     ));
                 }
-                store.streams.insert(stream_name, stream);
+                store.streams.insert(stream_name.to_owned(), stream);
                 Ok(json_ok(json!({})))
             }
 
@@ -162,7 +165,7 @@ impl ServiceProvider for KinesisProvider {
                     }
                 };
                 let mut store = self.store.get_or_create(account_id, region);
-                if store.streams.remove(&stream_name).is_none() {
+                if store.streams.remove(stream_name).is_none() {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         &format!("Stream {stream_name} not found"),
@@ -183,8 +186,14 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
-                let stream = match store.streams.get(&stream_name) {
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
+                };
+                let stream = match store.streams.get(stream_name) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
@@ -224,8 +233,14 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
-                let stream = match store.streams.get(&stream_name) {
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
+                };
+                let stream = match store.streams.get(stream_name) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
@@ -249,7 +264,12 @@ impl ServiceProvider for KinesisProvider {
             }
 
             "ListStreams" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({
+                        "StreamNames": [],
+                        "HasMoreStreams": false,
+                    })));
+                };
                 let names: Vec<&str> = store
                     .streams
                     .values()
@@ -272,8 +292,14 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
-                let stream = match store.streams.get(&stream_name) {
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
+                };
+                let stream = match store.streams.get(stream_name) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
@@ -314,10 +340,12 @@ impl ServiceProvider for KinesisProvider {
                     .and_then(|v| v.as_i64())
                     .unwrap_or(24);
                 let mut store = self.store.get_or_create(account_id, region);
-                match store.streams.get_mut(&stream_name) {
+                match store.streams.get_mut(stream_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
-                        &format!("Stream {stream_name} not found"),
+                        &format!(
+                            "Stream arn arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
+                        ),
                         400,
                     )),
                     Some(s) => {
@@ -344,7 +372,7 @@ impl ServiceProvider for KinesisProvider {
                     .and_then(|v| v.as_i64())
                     .unwrap_or(24);
                 let mut store = self.store.get_or_create(account_id, region);
-                match store.streams.get_mut(&stream_name) {
+                match store.streams.get_mut(stream_name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         &format!("Stream {stream_name} not found"),
@@ -375,12 +403,14 @@ impl ServiceProvider for KinesisProvider {
                 let data = str_param(ctx, "Data").unwrap_or_default(); // base64
 
                 let mut store = self.store.get_or_create(account_id, region);
-                let stream = match store.streams.get_mut(&stream_name) {
+                let stream = match store.streams.get_mut(stream_name) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
-                            &format!("Stream {stream_name} not found"),
+                            &format!(
+                                "Stream arn arn:aws:kinesis:{region}:{account_id}:stream/{stream_name} not found"
+                            ),
                             400,
                         ));
                     }
@@ -393,13 +423,13 @@ impl ServiceProvider for KinesisProvider {
                         400,
                     ));
                 }
-                let shard_idx = (hash_string(&partition_key) % shard_count as u64) as usize;
+                let shard_idx = (hash_string(partition_key) % shard_count as u64) as usize;
                 let shard = &mut stream.shards[shard_idx];
                 let sequence_number = shard.next_sequence_number();
                 let record = crate::store::KinesisRecord {
                     sequence_number: sequence_number.clone(),
-                    partition_key,
-                    data,
+                    partition_key: partition_key.to_owned(),
+                    data: data.to_owned(),
                     approximate_arrival_timestamp: Utc::now(),
                 };
                 let shard_id = shard.shard_id.clone();
@@ -422,8 +452,8 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let records_val = match ctx.request_body.get("Records") {
-                    Some(v) => v.clone(),
+                let records_arr = match ctx.request_body.get("Records").and_then(|v| v.as_array()) {
+                    Some(a) => a,
                     None => {
                         return Ok(json_error(
                             "ValidationException",
@@ -432,19 +462,9 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let records_arr = match records_val.as_array() {
-                    Some(a) => a.clone(),
-                    None => {
-                        return Ok(json_error(
-                            "ValidationException",
-                            "Records must be an array",
-                            400,
-                        ));
-                    }
-                };
 
                 let mut store = self.store.get_or_create(account_id, region);
-                let stream = match store.streams.get_mut(&stream_name) {
+                let stream = match store.streams.get_mut(stream_name) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
@@ -457,25 +477,20 @@ impl ServiceProvider for KinesisProvider {
                 let shard_count = stream.shards.len();
                 let mut results: Vec<Value> = Vec::new();
 
-                for rec in &records_arr {
+                for rec in records_arr {
                     let partition_key = rec
                         .get("PartitionKey")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let data = rec
-                        .get("Data")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let shard_idx = (hash_string(&partition_key) % shard_count as u64) as usize;
+                        .unwrap_or("");
+                    let data = rec.get("Data").and_then(|v| v.as_str()).unwrap_or("");
+                    let shard_idx = (hash_string(partition_key) % shard_count as u64) as usize;
                     let shard = &mut stream.shards[shard_idx];
                     let sequence_number = shard.next_sequence_number();
                     let shard_id = shard.shard_id.clone();
                     shard.records.push_back(crate::store::KinesisRecord {
                         sequence_number: sequence_number.clone(),
-                        partition_key,
-                        data,
+                        partition_key: partition_key.to_owned(),
+                        data: data.to_owned(),
                         approximate_arrival_timestamp: Utc::now(),
                     });
                     results.push(json!({
@@ -511,14 +526,20 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let iterator_type_str = str_param(ctx, "ShardIteratorType")
-                    .unwrap_or_else(|| "TRIM_HORIZON".to_string());
-                let iterator_type = ShardIteratorType::parse(&iterator_type_str);
+                let iterator_type_str =
+                    str_param(ctx, "ShardIteratorType").unwrap_or("TRIM_HORIZON");
+                let iterator_type = ShardIteratorType::parse(iterator_type_str);
                 let starting_sequence =
                     str_param(ctx, "StartingSequenceNumber").unwrap_or_default();
 
-                let store = self.store.get_or_create(account_id, region);
-                let stream = match store.streams.get(&stream_name) {
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
+                };
+                let stream = match store.streams.get(stream_name) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
@@ -557,8 +578,8 @@ impl ServiceProvider for KinesisProvider {
                 };
 
                 let state = ShardIteratorState {
-                    stream_name,
-                    shard_id,
+                    stream_name: stream_name.to_owned(),
+                    shard_id: shard_id.to_owned(),
                     next_index,
                 };
                 let token = encode_iterator(&state);
@@ -583,7 +604,7 @@ impl ServiceProvider for KinesisProvider {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(10000) as usize;
 
-                let state = match decode_iterator(&shard_iterator) {
+                let state = match decode_iterator(shard_iterator) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
@@ -594,7 +615,13 @@ impl ServiceProvider for KinesisProvider {
                     }
                 };
 
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {} not found", state.stream_name),
+                        400,
+                    ));
+                };
                 let stream = match store.streams.get(&state.stream_name) {
                     Some(s) => s,
                     None => {
@@ -616,16 +643,11 @@ impl ServiceProvider for KinesisProvider {
                     }
                 };
 
-                let available: Vec<&crate::store::KinesisRecord> = shard
+                let records_json: Vec<Value> = shard
                     .records
                     .iter()
                     .skip(state.next_index)
                     .take(limit)
-                    .collect();
-
-                let next_index = state.next_index + available.len();
-                let records_json: Vec<Value> = available
-                    .iter()
                     .map(|r| {
                         json!({
                             "SequenceNumber": r.sequence_number,
@@ -635,6 +657,8 @@ impl ServiceProvider for KinesisProvider {
                         })
                     })
                     .collect();
+
+                let next_index = state.next_index + records_json.len();
 
                 let next_state = ShardIteratorState {
                     stream_name: state.stream_name,
@@ -676,7 +700,7 @@ impl ServiceProvider for KinesisProvider {
                 };
 
                 let mut store = self.store.get_or_create(account_id, region);
-                let stream = match store.streams.get_mut(&stream_name) {
+                let stream = match store.streams.get_mut(stream_name) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
@@ -709,8 +733,8 @@ impl ServiceProvider for KinesisProvider {
                 stream.shard_id_counter += 2;
                 let mut child1 = crate::store::Shard::new(format!("shardId-{:012}", counter));
                 let mut child2 = crate::store::Shard::new(format!("shardId-{:012}", counter + 1));
-                child1.parent_shard_id = Some(shard_to_split.clone());
-                child2.parent_shard_id = Some(shard_to_split.clone());
+                child1.parent_shard_id = Some(shard_to_split.to_owned());
+                child2.parent_shard_id = Some(shard_to_split.to_owned());
                 stream.shards.push(child1);
                 stream.shards.push(child2);
                 stream.shard_count = stream.shards.iter().filter(|s| s.is_open).count();
@@ -733,7 +757,7 @@ impl ServiceProvider for KinesisProvider {
                 let adjacent_shard = str_param(ctx, "AdjacentShardToMerge").unwrap_or_default();
 
                 let mut store = self.store.get_or_create(account_id, region);
-                let stream = match store.streams.get_mut(&stream_name) {
+                let stream = match store.streams.get_mut(stream_name) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
@@ -755,8 +779,8 @@ impl ServiceProvider for KinesisProvider {
                 let counter = stream.shard_id_counter;
                 stream.shard_id_counter += 1;
                 let mut child = crate::store::Shard::new(format!("shardId-{:012}", counter));
-                child.parent_shard_id = Some(shard_to_merge.clone());
-                child.adjacent_parent_shard_id = Some(adjacent_shard.clone());
+                child.parent_shard_id = Some(shard_to_merge.to_owned());
+                child.adjacent_parent_shard_id = Some(adjacent_shard.to_owned());
                 stream.shards.push(child);
                 stream.shard_count = stream.shards.iter().filter(|s| s.is_open).count();
 

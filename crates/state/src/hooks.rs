@@ -1,3 +1,24 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StateFailureClass {
+    SaveFailure,
+    LoadFailure,
+    RecoveryInconsistency,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateFailureDiagnostic {
+    pub failure_class: StateFailureClass,
+    pub service: String,
+    pub operation: String,
+    pub path: Option<PathBuf>,
+    pub message: String,
+}
+
 /// Lifecycle hooks for state management.
 ///
 /// Services can implement this trait to be notified before/after save, load, and reset.
@@ -17,6 +38,13 @@ pub trait StateHooks: Send + Sync {
     async fn on_before_state_reset(&self) {}
     /// Called after state has been reset.
     async fn on_after_state_reset(&self) {}
+
+    /// Called when a save operation fails.
+    async fn on_state_save_error(&self, _diagnostic: &StateFailureDiagnostic) {}
+    /// Called when a load operation fails.
+    async fn on_state_load_error(&self, _diagnostic: &StateFailureDiagnostic) {}
+    /// Called when recovery consistency checks fail.
+    async fn on_state_recovery_error(&self, _diagnostic: &StateFailureDiagnostic) {}
 }
 
 /// A no-op hooks implementation — use as default.

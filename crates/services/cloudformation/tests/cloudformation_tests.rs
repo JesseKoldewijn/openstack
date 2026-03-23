@@ -12,11 +12,13 @@ fn make_ctx(operation: &str, params: HashMap<String, String>) -> RequestContext 
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: json!({}),
-        raw_body: Bytes::new(),
-        headers: HashMap::new(),
+        raw_body: None,
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: params,
+        request_id: String::new(),
+        spooled_body: None,
     }
 }
 
@@ -28,16 +30,29 @@ fn make_ctx_body(operation: &str, body: Value) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
+        spooled_body: None,
     }
 }
 
 fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
+}
+
+fn minimal_stack_template() -> Value {
+    json!({
+        "Resources": {
+            "Bucket": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {}
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +91,7 @@ async fn test_create_stack() {
 #[tokio::test]
 async fn test_create_duplicate_stack_fails() {
     let p = CloudFormationProvider::new();
-    let template = json!({ "Resources": {} });
+    let template = minimal_stack_template();
     let mut params = HashMap::new();
     params.insert("StackName".to_string(), "dup-stack".to_string());
     params.insert(
@@ -93,9 +108,39 @@ async fn test_create_duplicate_stack_fails() {
 }
 
 #[tokio::test]
+async fn test_create_stack_empty_template_returns_validation_error() {
+    let p = CloudFormationProvider::new();
+    let mut params = HashMap::new();
+    params.insert("StackName".to_string(), "missing-stack".to_string());
+    params.insert("TemplateBody".to_string(), "{}".to_string());
+
+    let resp = p.dispatch(&make_ctx("CreateStack", params)).await.unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("ValidationError"));
+    assert!(
+        body.contains("Unable to create stack \"missing-stack\": No updates are to be performed.")
+    );
+}
+
+#[tokio::test]
+async fn test_create_stack_malformed_template_returns_validation_error() {
+    let p = CloudFormationProvider::new();
+    let mut params = HashMap::new();
+    params.insert("StackName".to_string(), "bad-template-stack".to_string());
+    params.insert("TemplateBody".to_string(), "{not-json".to_string());
+
+    let resp = p.dispatch(&make_ctx("CreateStack", params)).await.unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("ValidationError"));
+    assert!(body.contains("Template body is not valid JSON"));
+}
+
+#[tokio::test]
 async fn test_describe_stacks() {
     let p = CloudFormationProvider::new();
-    let template = json!({ "Resources": {} });
+    let template = minimal_stack_template();
     let mut params = HashMap::new();
     params.insert("StackName".to_string(), "stack-desc".to_string());
     params.insert(
@@ -113,9 +158,35 @@ async fn test_describe_stacks() {
 }
 
 #[tokio::test]
+async fn test_describe_stacks_missing_named_stack_returns_validation_error() {
+    let p = CloudFormationProvider::new();
+    let template = minimal_stack_template();
+    let mut create_params = HashMap::new();
+    create_params.insert("StackName".to_string(), "existing-stack".to_string());
+    create_params.insert(
+        "TemplateBody".to_string(),
+        serde_json::to_string(&template).unwrap(),
+    );
+    p.dispatch(&make_ctx("CreateStack", create_params))
+        .await
+        .unwrap();
+
+    let mut params = HashMap::new();
+    params.insert("StackName".to_string(), "missing-stack".to_string());
+    let resp = p
+        .dispatch(&make_ctx("DescribeStacks", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("ValidationError"));
+    assert!(body.contains("Stack with id missing-stack does not exist"));
+}
+
+#[tokio::test]
 async fn test_list_stacks() {
     let p = CloudFormationProvider::new();
-    let template = json!({ "Resources": {} });
+    let template = minimal_stack_template();
     let mut params = HashMap::new();
     params.insert("StackName".to_string(), "list-stack".to_string());
     params.insert(
@@ -136,7 +207,7 @@ async fn test_list_stacks() {
 #[tokio::test]
 async fn test_delete_stack() {
     let p = CloudFormationProvider::new();
-    let template = json!({ "Resources": {} });
+    let template = minimal_stack_template();
     let mut params = HashMap::new();
     params.insert("StackName".to_string(), "del-stack".to_string());
     params.insert(
@@ -267,7 +338,7 @@ async fn test_get_template() {
 #[tokio::test]
 async fn test_update_stack() {
     let p = CloudFormationProvider::new();
-    let template = json!({ "Resources": {} });
+    let template = minimal_stack_template();
     let mut params = HashMap::new();
     params.insert("StackName".to_string(), "upd-stack".to_string());
     params.insert(

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.2",
+  "service": "events",
+  "protocol": "rest_json",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [{"id":"create","title":"Put rule","operation":{"method":"POST","path":"/","body":"{\"Name\":\"{{inputs.resource_name}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
+      "cleanup": [{"id":"delete","title":"Delete rule","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+    }
+  ]
+}

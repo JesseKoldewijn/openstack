@@ -12,20 +12,22 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
+        spooled_body: None,
     }
 }
 
 fn body(resp: &openstack_service_framework::traits::DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("response body is valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("response body is valid JSON")
 }
 
 fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 async fn create_key(p: &KmsProvider) -> String {
@@ -214,6 +216,29 @@ async fn test_describe_key_not_found() {
         .dispatch(&make_ctx("DescribeKey", json!({ "KeyId": "nonexistent" })))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 404);
-    assert!(body_str(&resp).contains("NotFoundException"));
+    assert_eq!(resp.status_code, 400);
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "NotFoundException");
+    assert_eq!(
+        payload["message"],
+        "Key 'arn:aws:kms:us-east-1:000000000000:key/nonexistent' does not exist"
+    );
+}
+
+#[tokio::test]
+async fn test_describe_key_with_full_arn_not_found_message_not_double_wrapped() {
+    let p = KmsProvider::new();
+    let key_arn = "arn:aws:kms:us-east-1:000000000000:key/nonexistent";
+    let resp = p
+        .dispatch(&make_ctx("DescribeKey", json!({ "KeyId": key_arn })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "NotFoundException");
+    assert_eq!(
+        payload["message"],
+        "Key 'arn:aws:kms:us-east-1:000000000000:key/nonexistent' does not exist"
+    );
 }

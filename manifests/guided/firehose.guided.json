@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.2",
+  "service": "firehose",
+  "protocol": "json_target",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [{"id":"create","title":"Create delivery stream","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"Firehose_20150804.CreateDeliveryStream"},"body":"{\"DeliveryStreamName\":\"{{inputs.resource_name}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
+      "cleanup": [{"id":"delete","title":"Delete delivery stream","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"Firehose_20150804.DeleteDeliveryStream"},"body":"{\"DeliveryStreamName\":\"{{captures.resource_name}}\"}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+    }
+  ]
+}

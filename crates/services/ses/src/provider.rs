@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
@@ -45,8 +46,8 @@ fn xml_resp(action: &str, rid: &str, inner: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(xml.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -60,8 +61,8 @@ fn xml_no_result(action: &str, rid: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(xml.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -75,8 +76,8 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(xml.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -144,13 +145,21 @@ impl ServiceProvider for SesProvider {
             // ListIdentities
             // ----------------------------------------------------------------
             "ListIdentities" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    let inner = "<Identities />";
+                    return Ok(xml_resp("ListIdentities", &rid, inner));
+                };
                 let members: String = store
                     .identities
                     .keys()
                     .map(|id| format!("<member>{id}</member>"))
                     .collect();
-                let inner = format!("<Identities>{members}</Identities>");
+                let identities = if members.is_empty() {
+                    "<Identities />".to_string()
+                } else {
+                    format!("<Identities>{members}</Identities>")
+                };
+                let inner = identities;
                 Ok(xml_resp("ListIdentities", &rid, &inner))
             }
 

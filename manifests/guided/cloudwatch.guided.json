@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.2",
+  "service": "cloudwatch",
+  "protocol": "json_target",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [{"id":"create","title":"Put metric","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"GraniteServiceVersion20100801.PutMetricData"},"body":"{\"Namespace\":\"openstack\",\"MetricData\":[{\"MetricName\":\"{{inputs.resource_name}}\",\"Value\":1}]}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
+      "cleanup": [{"id":"noop","title":"No-op cleanup","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"GraniteServiceVersion20100801.ListMetrics"},"body":"{}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+    }
+  ]
+}

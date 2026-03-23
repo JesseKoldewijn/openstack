@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +31,7 @@ impl Secret {
     pub fn current_version(&self) -> Option<&SecretVersion> {
         self.versions
             .iter()
-            .find(|v| v.version_stages.contains(&"AWSCURRENT".to_string()))
+            .find(|v| v.version_stages.iter().any(|s| s == "AWSCURRENT"))
     }
 }
 
@@ -38,6 +39,10 @@ impl Secret {
 pub struct SecretsManagerStore {
     /// name → Secret
     pub secrets: HashMap<String, Secret>,
+    /// arn → name
+    pub arn_index: HashMap<String, String>,
+    #[serde(skip)]
+    pub list_cache: Option<Bytes>,
 }
 
 impl SecretsManagerStore {

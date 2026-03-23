@@ -1,25 +1,18 @@
-use std::sync::Arc;
+use std::borrow::Cow;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
-use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
-use crate::store::StsStore;
-
-pub struct StsProvider {
-    store: Arc<AccountRegionBundle<StsStore>>,
-}
+pub struct StsProvider;
 
 impl StsProvider {
     pub fn new() -> Self {
-        Self {
-            store: Arc::new(AccountRegionBundle::new()),
-        }
+        Self
     }
 }
 
@@ -43,8 +36,8 @@ fn xml_resp(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(xml.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -58,8 +51,8 @@ fn sts_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(xml.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -108,8 +101,6 @@ impl ServiceProvider for StsProvider {
         let rid = req_id();
         let account_id = &ctx.account_id;
         // STS is global — pin to us-east-1
-        let _store = self.store.get_or_create(account_id, "us-east-1");
-
         match op {
             "GetCallerIdentity" => {
                 let inner = format!(

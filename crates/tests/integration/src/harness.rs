@@ -34,6 +34,8 @@ pub struct TestHarness {
     pub client: reqwest::Client,
     /// Send on this to stop the server background task.
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    /// Keep the temp directory alive for the duration of the test.
+    _temp_dir: tempfile::TempDir,
 }
 
 impl TestHarness {
@@ -62,7 +64,8 @@ impl TestHarness {
 
         let services = svc_config.unwrap_or_else(ServicesConfig::all);
 
-        let config = test_config(addr, services);
+        let temp_dir = tempfile::tempdir().expect("create temp dir for test harness");
+        let config = test_config(addr, services, temp_dir.path());
         let plugin_manager = ServicePluginManager::new(config.clone());
         register_all_services(&plugin_manager, &config);
 
@@ -89,6 +92,7 @@ impl TestHarness {
             base_url,
             client,
             shutdown_tx,
+            _temp_dir: temp_dir,
         }
     }
 
@@ -142,7 +146,7 @@ fn fake_auth(service: &str, region: &str) -> String {
     )
 }
 
-fn test_config(addr: SocketAddr, services: ServicesConfig) -> Config {
+fn test_config(addr: SocketAddr, services: ServicesConfig, data_dir: &std::path::Path) -> Config {
     Config {
         gateway_listen: vec![addr],
         persistence: false,
@@ -168,7 +172,8 @@ fn test_config(addr: SocketAddr, services: ServicesConfig) -> Config {
         bucket_marker_local: None,
         eager_service_loading: false,
         enable_config_updates: false,
-        directories: Directories::from_env(),
+        directories: Directories::from_root(data_dir),
+        body_spool_threshold_bytes: 1_048_576,
     }
 }
 
@@ -181,7 +186,10 @@ fn register_all_services(manager: &ServicePluginManager, config: &Config) {
             }
         };
     }
-    reg!("s3", openstack_s3::S3Provider::new());
+    reg!(
+        "s3",
+        openstack_s3::S3Provider::new(&config.directories.s3_objects)
+    );
     reg!("sqs", openstack_sqs::SqsProvider::new());
     reg!("sns", openstack_sns::SnsProvider::new());
     reg!("dynamodb", openstack_dynamodb::DynamoDbProvider::new());

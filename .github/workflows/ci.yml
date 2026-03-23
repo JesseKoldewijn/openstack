@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: ["main", "develop"]
   pull_request:
-    branches: ["main", "master"]
+    branches: ["**"]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,6 +13,17 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+  PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
+  PARITY_DOCKER_CPU_LIMIT: "2"
+  PARITY_DOCKER_MEMORY_LIMIT: 4g
+  PARITY_MOTO_IMAGE: motoserver/moto:5.1.22
+  PARITY_DOCKER_NETWORK_MODE: bridge
+  OHA_VERSION: 1.14.0
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   fmt:
@@ -25,6 +36,16 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Add rustfmt table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Rustfmt"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \`${{ job.status }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   clippy:
     name: Clippy
@@ -40,6 +61,16 @@ jobs:
           key: clippy-${{ hashFiles('**/Cargo.lock') }}
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Add clippy table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Clippy"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \`${{ job.status }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   test:
     name: Test (${{ matrix.os }})
@@ -61,7 +92,36 @@ jobs:
       - name: Run integration tests
         run: cargo test --workspace --tests
         env:
-          # Docker may not be available on all runners; skip Lambda tests
+          SKIP_DOCKER_TESTS: "1"
+      - name: Add tests table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Tests"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \`${{ job.status }}\` |"
+            echo "| OS | \`${{ matrix.os }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  studio-ui-gates:
+    name: Studio UI Gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-studio-ui
+          key: studio-ui-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run Studio crate tests
+        run: cargo test -p openstack-studio-ui
+      - name: Run Studio integration E2E tests
+        run: cargo test -p openstack-integration-tests --test studio_e2e_tests
+        env:
           SKIP_DOCKER_TESTS: "1"
 
   build:
@@ -76,6 +136,8 @@ jobs:
           key: build-release-${{ hashFiles('**/Cargo.lock') }}
       - name: Build release binary
         run: cargo build --release --bin openstack
+      - name: Enforce release binary size budget
+        run: ./scripts/check_release_binary_size.sh target/release/openstack 55
       - name: Upload binary artifact
         if: env.ACT != 'true'
         uses: actions/upload-artifact@v4
@@ -99,12 +161,115 @@ jobs:
           chmod +x ./artifacts/openstack
           timeout 10s ./artifacts/openstack --help > /dev/null
           timeout 10s ./artifacts/openstack --version > /dev/null
+      - name: Add build artifact table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Build Artifact"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \`${{ job.status }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  prepare-openstack-runtime-image:
+    name: Prepare OpenStack runtime image
+    runs-on: ubuntu-latest
+    outputs:
+      openstack_runtime_image_ref: ${{ steps.runtime_meta.outputs.image_ref }}
+      openstack_runtime_image_id: ${{ steps.runtime_id.outputs.image_id }}
+      openstack_runtime_image_artifact: ${{ steps.runtime_meta.outputs.image_artifact }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute deterministic runtime image reference
+        id: runtime_meta
+        run: |
+          set -euo pipefail
+          image_ref="openstack-runtime-ci:${{ github.run_id }}-${{ github.sha }}"
+          echo "image_ref=${image_ref}" >> "$GITHUB_OUTPUT"
+          echo "image_artifact=openstack-runtime-image-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+      - name: Build OpenStack runtime image once
+        run: |
+          set -euo pipefail
+          docker build --target runtime -t "${{ steps.runtime_meta.outputs.image_ref }}" .
+      - name: Capture immutable runtime image id
+        id: runtime_id
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect "${{ steps.runtime_meta.outputs.image_ref }}" --format '{{.Id}}')"
+          echo "image_id=${image_id}" >> "$GITHUB_OUTPUT"
+          echo "image_id=${image_id}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Export runtime image as artifact
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker save "${{ steps.runtime_meta.outputs.image_ref }}" -o /tmp/openstack-runtime-image.tar
+      - name: Upload runtime image artifact
+        if: env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.runtime_meta.outputs.image_artifact }}
+          path: /tmp/openstack-runtime-image.tar
+          retention-days: 2
+
+  validate-harness-coverage:
+    name: Validate Harness Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate service matrix coverage
+        run: python3 scripts/validate_harness_coverage.py
+      - name: Add coverage validation table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Harness Coverage"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \`${{ job.status }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  studio-coverage:
+    name: Studio Coverage Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Studio coverage report
+        run: python3 scripts/studio_coverage_report.py
+      - name: Enforce guided coverage gate
+        run: python3 scripts/studio_guided_coverage_gate.py
+
+  studio-manifest-validation:
+    name: Studio Manifest Validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate guided manifest schema and semantics
+        run: cargo test -p openstack-studio-ui guided_manifest::tests -- --nocapture
+
+  studio-performance-budget:
+    name: Studio Asset Budget
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Studio asset budget
+        run: bash scripts/check_studio_asset_budget.sh
 
   parity-core:
     name: Parity (core)
     runs-on: ubuntu-latest
+    needs: [prepare-openstack-runtime-image]
     env:
-      PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -112,78 +277,76 @@ jobs:
         with:
           shared-key: ci-parity-core
           key: parity-core-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
         run: |
           set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
           fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
           fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
+            echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
+            exit 1
           fi
-          aws --version
       - name: Preflight parity environment
         run: |
           set -euo pipefail
-          command -v aws
-          aws --version
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity core profile
-        run: cargo run -p openstack-integration-tests --bin parity_runner -- core
-      - name: Summarize parity core failures
-        if: always() && env.ACT != 'true'
+        run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile core
+      - name: Add parity core table to workflow summary
+        if: always()
         run: |
           python3 - <<'PY'
           import glob
           import json
           import os
-          import sys
 
-          reports = sorted(glob.glob("target/parity-reports/core-*.json"), key=os.path.getmtime)
-          if not reports:
-              print("No parity core report found.")
-              sys.exit(0)
+          files = sorted(glob.glob("target/parity-reports/core-*.json"), key=os.path.getmtime)
+          if not files:
+              print("No parity core report found")
+              raise SystemExit(0)
 
-          latest = reports[-1]
-          print(f"Parity core report: {latest}")
-          with open(latest, "r", encoding="utf-8") as f:
-              report = json.load(f)
+          with open(files[-1], "r", encoding="utf-8") as handle:
+              report = json.load(handle)
 
-          failed = [r for r in report.get("results", []) if not r.get("passed", False)]
-          if not failed:
-              print("No failed scenarios in parity core report.")
-              sys.exit(0)
-
-          print(f"Failed scenarios: {len(failed)}")
-          for scenario in failed:
-              mismatches = scenario.get("mismatches", [])
-              kinds = sorted({m.get("kind", "unknown") for m in mismatches})
-              first = mismatches[0] if mismatches else {}
-              print("---")
-              print(f"Scenario: {scenario.get('scenario_id', '<unknown>')}")
-              print(f"Service: {scenario.get('service', '<unknown>')}")
-              print(f"Mismatches: {len(mismatches)}")
-              print(f"Kinds: {', '.join(kinds) if kinds else 'none'}")
-              if first:
-                  print(
-                      "Example: "
-                      f"{first.get('step_id', '<step>')} / {first.get('path', '<path>')}"
-                  )
+          summary = report.get("summary", {})
+          lines = [
+              "## Parity Core",
+              "",
+              "| Metric | Value |",
+              "|---|---:|",
+              f"| Profile | `{report.get('profile', 'core')}` |",
+              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
+              f"| Passed | {summary.get('passed', 0)} |",
+              f"| Failed | {summary.get('failed', 0)} |",
+              f"| Accepted Differences | {summary.get('accepted_differences', 0)} |",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
           PY
       - name: Upload parity report artifacts
         if: always() && env.ACT != 'true'
@@ -193,105 +356,435 @@ jobs:
           path: target/parity-reports/*.json
           retention-days: 7
 
-  parity-extended:
-    name: Parity (extended, non-required)
+  parity-all-services-full:
+    name: Parity (all-services-smoke)
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    continue-on-error: true
+    if: github.event_name == 'pull_request'
+    needs: [prepare-openstack-runtime-image]
     env:
-      PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-parity-extended
-          key: parity-extended-${{ hashFiles('**/Cargo.lock') }}
-      - name: Ensure AWS CLI is installed
+          shared-key: ci-parity-all-services-full
+          key: parity-all-services-full-${{ hashFiles('**/Cargo.lock') }}
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
         run: |
           set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
           fi
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install awscli || pipx upgrade awscli
-            export PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
           fi
-          if ! command -v aws >/dev/null 2>&1; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            if command -v sudo >/dev/null 2>&1; then
-              sudo ./aws/install --update
-            else
-              ./aws/install --install-dir "$HOME/.local/aws-cli" --bin-dir "$HOME/.local/bin" --update
-              export PATH="$HOME/.local/bin:$PATH"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
+          version_out="$(timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version || true)"
+          if [ -z "${version_out}" ] || ! echo "${version_out}" | grep -Eq '^openstack [0-9]'; then
+            echo "Runtime image smoke check failed (--version)"
+            echo "version_out=${version_out:-<empty>}"
+            exit 1
           fi
-          aws --version
       - name: Preflight parity environment
         run: |
           set -euo pipefail
-          command -v aws
-          aws --version
           docker --version
           docker pull "$PARITY_LOCALSTACK_IMAGE"
-      - name: Run parity extended profile
-        run: cargo run -p openstack-integration-tests --bin parity_runner -- extended
-      - name: Summarize parity extended failures
-        if: always() && env.ACT != 'true'
+      - name: Run parity all-services smoke profile
+        run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
+      - name: Validate parity lifecycle latest report exists
+        run: test -f target/parity-reports/all-services-smoke-latest.json
+      - name: Add parity all-services table to workflow summary
+        if: always()
         run: |
           python3 - <<'PY'
           import glob
           import json
           import os
-          import sys
 
-          reports = sorted(glob.glob("target/parity-reports/extended-*.json"), key=os.path.getmtime)
-          if not reports:
-              print("No parity extended report found.")
-              sys.exit(0)
-
-          latest = reports[-1]
-          print(f"Parity extended report: {latest}")
-          with open(latest, "r", encoding="utf-8") as f:
-              report = json.load(f)
-
-          failed = [r for r in report.get("results", []) if not r.get("passed", False)]
-          if not failed:
-              print("No failed scenarios in parity extended report.")
-              sys.exit(0)
-
-          print(f"Failed scenarios: {len(failed)}")
-          for scenario in failed:
-              mismatches = scenario.get("mismatches", [])
-              kinds = sorted({m.get("kind", "unknown") for m in mismatches})
-              first = mismatches[0] if mismatches else {}
-              print("---")
-              print(f"Scenario: {scenario.get('scenario_id', '<unknown>')}")
-              print(f"Service: {scenario.get('service', '<unknown>')}")
-              print(f"Mismatches: {len(mismatches)}")
-              print(f"Kinds: {', '.join(kinds) if kinds else 'none'}")
-              if first:
-                  print(
-                      "Example: "
-                      f"{first.get('step_id', '<step>')} / {first.get('path', '<path>')}"
-                  )
+          files = sorted(glob.glob("target/parity-reports/all-services-smoke-*.json"), key=os.path.getmtime)
+          if not files:
+              raise SystemExit(0)
+          with open(files[-1], "r", encoding="utf-8") as handle:
+              report = json.load(handle)
+          summary = report.get("summary", {})
+          lines = [
+              "## Parity All Services",
+              "",
+              "| Metric | Value |",
+              "|---|---:|",
+              f"| Scenarios | {summary.get('total_scenarios', 0)} |",
+              f"| Passed | {summary.get('passed', 0)} |",
+              f"| Failed | {summary.get('failed', 0)} |",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
           PY
-      - name: Upload parity extended report artifacts
+      - name: Upload parity full report artifacts
         if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: parity-extended-report
+          name: parity-all-services-full-report
           path: target/parity-reports/*.json
           retention-days: 7
 
-  required-checks:
-    name: Required checks
+  benchmark:
+    name: Benchmark (default profile)
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, test, verify-build-artifact, parity-core]
+    if: github.event_name == 'pull_request'
+    needs: [prepare-openstack-runtime-image]
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Preflight benchmark environment
+        run: |
+          set -euo pipefail
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+          docker pull "$PARITY_MOTO_IMAGE"
+      - name: Install oha
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/hatoo/oha/releases/download/v${OHA_VERSION}/oha-linux-amd64" -o /usr/local/bin/oha
+          chmod +x /usr/local/bin/oha
+          oha --version
+      - name: Run benchmark (default profile)
+        run: |
+          ./tests/bench/bench_services.sh \
+            --profile default \
+            --openstack-image "$PARITY_OPENSTACK_IMAGE" \
+            --output benchmark-report.json
+      - name: Run benchmark gate
+        continue-on-error: true
+        run: |
+          ./tests/bench/bench_gate.sh \
+            --report benchmark-report.json \
+            --p95-max 10 \
+            --memory-max 100 \
+            --op-p95-max "s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=250,s3/get_object_10mb=250,s3/put_object_50mb=1000,s3/get_object_50mb=1000,s3/put_object_100mb=2000,s3/get_object_100mb=2000,kinesis/describe_stream=8" \
+            --output benchmark-gate.json
+      - name: Benchmark report
+        if: always()
+        uses: ./.github/actions/benchmark-report
+        with:
+          gate-json: benchmark-gate.json
+          post-pr-comment: ${{ github.event_name == 'pull_request' }}
+      - name: Enforce benchmark gate verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f benchmark-gate.json ]; then
+            echo "benchmark-gate.json missing"
+            exit 1
+          fi
+          verdict="$(jq -r '.verdict // "FAIL"' benchmark-gate.json)"
+          echo "Benchmark gate verdict: ${verdict}"
+          if [ "${verdict}" != "PASS" ]; then
+            echo "Benchmark gate failed"
+            exit 1
+          fi
+      - name: Upload benchmark report artifacts
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: |
+            benchmark-report.json
+            benchmark-gate.json
+            benchmark_gate_summary.md
+          retention-days: 7
+
+  parity-all-services-push:
+    name: Parity (all-services-smoke push)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    continue-on-error: true
+    needs: [prepare-openstack-runtime-image]
+    env:
+      PARITY_OPENSTACK_IMAGE: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_ref }}
+      PARITY_OPENSTACK_IMAGE_ID: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-parity-all-services-push
+          key: parity-all-services-push-${{ hashFiles('**/Cargo.lock') }}
+      - name: Load deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
+          path: /tmp
+      - name: Import deterministic OpenStack runtime image
+        if: env.ACT != 'true'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/openstack-runtime-image.tar
+      - name: Validate runtime image provenance
+        run: |
+          set -euo pipefail
+          if [ -z "${PARITY_OPENSTACK_IMAGE:-}" ]; then
+            echo "PARITY_OPENSTACK_IMAGE is not set"
+            exit 1
+          fi
+          echo "Using OpenStack runtime image: ${PARITY_OPENSTACK_IMAGE}"
+          actual_id="$(docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format '{{.Id}}')"
+          echo "Expected image id: ${PARITY_OPENSTACK_IMAGE_ID}"
+          echo "Actual image id:   ${actual_id}"
+          if [ -n "${PARITY_OPENSTACK_IMAGE_ID:-}" ] && [ "${actual_id}" != "${PARITY_OPENSTACK_IMAGE_ID}" ]; then
+            echo "Runtime image provenance mismatch"
+            exit 1
+          fi
+          docker image inspect "${PARITY_OPENSTACK_IMAGE}" --format 'repoTags={{json .RepoTags}} created={{.Created}} size={{.Size}}'
+          if ! timeout 10s docker run --rm "${PARITY_OPENSTACK_IMAGE}" --version > /dev/null; then
+            echo "Runtime image smoke check failed (--version)"
+            exit 1
+          fi
+      - name: Preflight parity environment
+        run: |
+          set -euo pipefail
+          docker --version
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+      - name: Run parity all-services smoke profile
+        run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
+      - name: Upload parity push report artifacts
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-all-services-push-report
+          path: target/parity-reports/*.json
+          retention-days: 7
+
+  required-checks-main:
+    name: Required checks (main target)
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    needs:
+      [
+        fmt,
+        clippy,
+        test,
+        verify-build-artifact,
+        validate-harness-coverage,
+        studio-coverage,
+        studio-manifest-validation,
+        studio-ui-gates,
+        studio-performance-budget,
+        parity-core,
+        parity-all-services-full,
+        benchmark
+      ]
     steps:
       - name: All required checks passed
-        run: echo "All required CI checks passed."
+        run: echo "All required checks for main passed."
+
+  required-checks-non-main:
+    name: Required checks (non-main target)
+    if: github.event_name == 'pull_request' && github.base_ref != 'main'
+    runs-on: ubuntu-latest
+    needs:
+      [
+        fmt,
+        clippy,
+        test,
+        verify-build-artifact,
+        validate-harness-coverage,
+        studio-coverage,
+        studio-manifest-validation,
+        studio-ui-gates,
+        studio-performance-budget,
+        parity-core,
+        parity-all-services-full,
+        benchmark
+      ]
+    steps:
+      - name: All required checks passed
+        run: echo "All required checks for non-main branches passed."
+
+  pr-results-comment:
+    name: PR Results Comment
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs:
+      [
+        fmt,
+        clippy,
+        test,
+        verify-build-artifact,
+        validate-harness-coverage,
+        parity-core,
+        parity-all-services-full,
+        benchmark
+      ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download parity artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: parity-*-report
+          merge-multiple: true
+          path: artifacts/parity
+      - name: Download benchmark artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-report
+      - name: Build PR markdown summary
+        id: build_comment
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+          from pathlib import Path
+
+          def latest(pattern):
+              files = sorted(glob.glob(pattern), key=os.path.getmtime)
+              return files[-1] if files else None
+
+          lines = ["<!-- openstack-ci-results -->", "## CI Results", ""]
+          lines.extend([
+              "### Checks",
+              "",
+              "| Check | Result |",
+              "|---|---|",
+              f"| Rustfmt | `{os.environ.get('FMT_RESULT', 'unknown')}` |",
+              f"| Clippy | `{os.environ.get('CLIPPY_RESULT', 'unknown')}` |",
+              f"| Tests | `{os.environ.get('TEST_RESULT', 'unknown')}` |",
+              f"| Build Artifact | `{os.environ.get('BUILD_RESULT', 'unknown')}` |",
+              f"| Coverage Validation | `{os.environ.get('COVERAGE_RESULT', 'unknown')}` |",
+              "",
+          ])
+
+          parity_reports = sorted(glob.glob("artifacts/parity/*.json"), key=os.path.getmtime)
+          if parity_reports:
+              latest_by_profile = {}
+              for path in parity_reports:
+                  with open(path, "r", encoding="utf-8") as handle:
+                      parity = json.load(handle)
+                  profile = parity.get("profile", "n/a")
+                  latest_by_profile[profile] = parity
+
+              preferred_order = ["core", "all-services-smoke"]
+              ordered_profiles = [p for p in preferred_order if p in latest_by_profile]
+              ordered_profiles.extend(
+                  sorted(p for p in latest_by_profile if p not in preferred_order)
+              )
+
+              lines.extend(["### Parity", "", "| Profile | Scenarios | Passed | Failed | Accepted |", "|---|---:|---:|---:|---:|"])
+              for profile in ordered_profiles:
+                  parity = latest_by_profile[profile]
+                  ps = parity.get("summary", {})
+                  lines.append(
+                      f"| `{profile}` | {ps.get('total_scenarios', 0)} | {ps.get('passed', 0)} | {ps.get('failed', 0)} | {ps.get('accepted_differences', 0)} |"
+                  )
+              lines.append("")
+
+          # Include benchmark gate markdown summary if available
+          gate_md = Path("benchmark_gate_summary.md")
+          if gate_md.exists():
+              lines.append("### Benchmark")
+              lines.append("")
+              lines.append(gate_md.read_text(encoding="utf-8").strip())
+              lines.append("")
+
+          content = "\n".join(lines).strip() + "\n"
+          Path("pr_results_comment.md").write_text(content, encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write(content + "\n")
+          PY
+        env:
+          FMT_RESULT: ${{ needs.fmt.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.verify-build-artifact.result }}
+          COVERAGE_RESULT: ${{ needs.validate-harness-coverage.result }}
+      - name: Upsert PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          marker = "<!-- openstack-ci-results -->"
+          body = Path("pr_results_comment.md").read_text(encoding="utf-8")
+
+          existing_raw = subprocess.check_output(
+              [
+                  "gh",
+                  "api",
+                  f"repos/{os.environ['REPO']}/issues/{os.environ['PR_NUMBER']}/comments",
+                  "--paginate",
+              ],
+              text=True,
+          )
+          comments = json.loads(existing_raw)
+          match = None
+          for comment in comments:
+              if marker in comment.get("body", ""):
+                  match = comment
+                  break
+
+          if match:
+              subprocess.check_call(
+                  [
+                      "gh",
+                      "api",
+                      f"repos/{os.environ['REPO']}/issues/comments/{match['id']}",
+                      "--method",
+                      "PATCH",
+                      "-f",
+                      f"body={body}",
+                  ]
+              )
+          else:
+              subprocess.check_call(
+                  [
+                      "gh",
+                      "api",
+                      f"repos/{os.environ['REPO']}/issues/{os.environ['PR_NUMBER']}/comments",
+                      "--method",
+                      "POST",
+                      "-f",
+                      f"body={body}",
+                  ]
+              )
+          PY

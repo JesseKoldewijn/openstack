@@ -12,21 +12,23 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
+        spooled_body: None,
     }
 }
 
 fn body(resp: &DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("valid JSON")
 }
 
 #[allow(dead_code)]
 fn body_str(resp: &DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +202,7 @@ async fn test_remove_targets() {
 }
 
 #[tokio::test]
-async fn test_put_events() {
+async fn test_put_events_returns_service_disabled_error() {
     let p = EventBridgeProvider::new();
     let resp = p
         .dispatch(&make_ctx(
@@ -217,11 +219,14 @@ async fn test_put_events() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 200);
+    assert_eq!(resp.status_code, 501);
+    assert_eq!(resp.content_type, "application/json");
     let b = body(&resp);
-    assert_eq!(b["FailedEntryCount"], 0);
-    assert_eq!(b["Entries"].as_array().unwrap().len(), 1);
-    assert!(b["Entries"][0]["EventId"].as_str().is_some());
+    assert_eq!(b["__type"], "InternalFailure");
+    assert_eq!(
+        b["message"],
+        "Service 'events' is not enabled. Please check your 'SERVICES' configuration variable."
+    );
 }
 
 #[tokio::test]

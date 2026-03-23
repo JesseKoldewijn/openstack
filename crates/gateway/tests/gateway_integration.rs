@@ -2,15 +2,21 @@
 
 #[cfg(test)]
 mod gateway_tests {
+    use axum::body::Body;
+    use axum::body::to_bytes;
     use axum::http::{HeaderMap, HeaderValue, Method};
+    use axum::http::{Request, StatusCode};
     use openstack_config::{
         Config, CorsConfig, Directories, LogLevel, ServicesConfig, SnapshotLoadStrategy,
         SnapshotSaveStrategy,
     };
+    use openstack_gateway::Gateway;
     use openstack_gateway::cors::CorsHandler;
     use openstack_gateway::sigv4::{
         DEFAULT_ACCOUNT_ID, access_key_to_account_id, is_valid_region, parse_sigv4_auth,
     };
+    use openstack_service_framework::ServicePluginManager;
+    use tower::ServiceExt;
 
     fn test_config() -> Config {
         Config {
@@ -39,6 +45,7 @@ mod gateway_tests {
             eager_service_loading: false,
             enable_config_updates: false,
             directories: Directories::from_env(),
+            body_spool_threshold_bytes: 1_048_576,
         }
     }
 
@@ -163,5 +170,157 @@ mod gateway_tests {
         let mut response_headers = HeaderMap::new();
         handler.add_cors_headers(&mut response_headers, Some("http://example.com"));
         assert!(!response_headers.contains_key("access-control-allow-origin"));
+    }
+
+    #[tokio::test]
+    async fn studio_spa_route_returns_html_with_cache_headers() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio/services/s3")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-cache"
+        );
+        assert!(resp.headers().get("etag").is_some());
+    }
+
+    #[tokio::test]
+    async fn studio_asset_route_returns_cacheable_asset_headers() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio/assets/app.js")
+            .header("accept-encoding", "gzip")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+        assert!(resp.headers().get("etag").is_some());
+    }
+
+    #[tokio::test]
+    async fn studio_api_route_takes_internal_precedence() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio-api/services")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("services").is_some());
+    }
+
+    #[tokio::test]
+    async fn aws_route_non_regression_for_unknown_service() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef",
+            )
+            .body(Body::from(""))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn aws_route_disabled_service_returns_501_internal_failure() {
+        let mut config = test_config();
+        config.services = ServicesConfig::only(["s3"]);
+
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/sns/aws4_request, SignedHeaders=host, Signature=deadbeef",
+            )
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("Version=2010-03-31&Action=ListTopics"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "text/xml");
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("<Code>InternalFailure</Code>"));
+        assert!(body.contains(
+            "Service 'sns' is not enabled. Please check your 'SERVICES' configuration variable."
+        ));
+    }
+
+    #[tokio::test]
+    async fn aws_route_non_regression_with_studio_flow_catalog_present() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let studio_req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio-api/flows/catalog")
+            .body(Body::empty())
+            .unwrap();
+        let studio_resp = app.clone().oneshot(studio_req).await.unwrap();
+        assert_eq!(studio_resp.status(), StatusCode::OK);
+
+        let aws_req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20260306/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef",
+            )
+            .body(Body::from(""))
+            .unwrap();
+        let aws_resp = app.oneshot(aws_req).await.unwrap();
+        assert_eq!(aws_resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 }

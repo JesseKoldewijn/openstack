@@ -23,6 +23,7 @@ COPY crates/aws-protocol/Cargo.toml       crates/aws-protocol/Cargo.toml
 COPY crates/service-framework/Cargo.toml  crates/service-framework/Cargo.toml
 COPY crates/state/Cargo.toml              crates/state/Cargo.toml
 COPY crates/internal-api/Cargo.toml       crates/internal-api/Cargo.toml
+COPY crates/studio-ui/Cargo.toml          crates/studio-ui/Cargo.toml
 COPY crates/dns/Cargo.toml                crates/dns/Cargo.toml
 COPY crates/services/s3/Cargo.toml            crates/services/s3/Cargo.toml
 COPY crates/services/sqs/Cargo.toml           crates/services/sqs/Cargo.toml
@@ -68,7 +69,8 @@ RUN cargo build --release --bin openstack
 # Now copy the real source and rebuild
 COPY . .
 
-RUN cargo build --release --bin openstack
+RUN find crates -type f -path "*/src/*" -exec touch {} + \
+    && cargo build --release --bin openstack
 
 # ─────────────────────────────────────────────
 # Stage 2: minimal runtime image
@@ -80,6 +82,10 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
+
+# Prepare runtime directories for non-root execution.
+RUN mkdir -p /var/lib/localstack /etc/localstack/init \
+    && chown -R 1000:1000 /var/lib/localstack /etc/localstack
 
 # Non-root user
 RUN useradd -ms /bin/bash openstack
@@ -103,7 +109,8 @@ ENV PERSISTENCE=0 \
     DNS_PORT=53 \
     DNS_RESOLVE_IP=127.0.0.1 \
     LOCALSTACK_HOST=localhost.localstack.cloud:4566 \
-    LS_LOG=info
+    LS_LOG=info \
+    MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000
 
 # Health check matching LocalStack's endpoint
 HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=5 \

@@ -12,20 +12,22 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: body.clone(),
-        raw_body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
+        spooled_body: None,
     }
 }
 
 fn body(resp: &openstack_service_framework::traits::DispatchResponse) -> Value {
-    serde_json::from_slice(&resp.body).expect("response body is valid JSON")
+    serde_json::from_slice(resp.body.as_bytes()).expect("response body is valid JSON")
 }
 
 fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 async fn request_cert(p: &AcmProvider, domain: &str) -> String {
@@ -174,15 +176,22 @@ async fn test_add_tags() {
 #[tokio::test]
 async fn test_describe_not_found() {
     let p = AcmProvider::new();
+    let missing_arn = "arn:aws:acm:us-east-1:000000000000:certificate/nonexistent";
     let resp = p
         .dispatch(&make_ctx(
             "DescribeCertificate",
             json!({
-                "CertificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/nonexistent",
+                "CertificateArn": missing_arn,
             }),
         ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body_str(&resp).contains("ResourceNotFoundException"));
+    assert_eq!(resp.content_type, "application/json");
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "ResourceNotFoundException");
+    assert_eq!(
+        payload["message"],
+        format!("Certificate with arn {missing_arn} not found in account 000000000000")
+    );
 }

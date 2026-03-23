@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
@@ -36,8 +37,8 @@ impl Default for EventBridgeProvider {
 fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
         headers: Vec::new(),
     }
 }
@@ -45,14 +46,32 @@ fn json_ok(body: Value) -> DispatchResponse {
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(
+        body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
                 "__type": code,
                 "message": message,
             }))
             .unwrap(),
-        ),
-        content_type: "application/x-amz-json-1.1".to_string(),
+        )),
+        content_type: Cow::Borrowed("application/x-amz-json-1.1"),
+        headers: Vec::new(),
+    }
+}
+
+fn disabled_service_error(service: &str) -> DispatchResponse {
+    DispatchResponse {
+        status_code: 501,
+        body: ResponseBody::Buffered(Bytes::from(
+            serde_json::to_vec(&json!({
+                // Keep InternalFailure for LocalStack parity on disabled EventBridge PutEvents.
+                "__type": "InternalFailure",
+                "message": format!(
+                    "Service '{service}' is not enabled. Please check your 'SERVICES' configuration variable."
+                ),
+            }))
+            .unwrap(),
+        )),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -62,44 +81,6 @@ fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
         .get(key)
         .and_then(|v| v.as_str())
         .map(String::from)
-}
-
-/// Very simple event pattern matching.
-/// Checks that each key in the pattern matches the event.
-fn matches_pattern(event: &Value, pattern: &Value) -> bool {
-    let pattern_obj = match pattern.as_object() {
-        Some(o) => o,
-        None => return true,
-    };
-    for (key, pattern_val) in pattern_obj {
-        let event_val = event.get(key);
-        if !matches_field(event_val, pattern_val) {
-            return false;
-        }
-    }
-    true
-}
-
-fn matches_field(event_val: Option<&Value>, pattern_val: &Value) -> bool {
-    match pattern_val {
-        Value::Array(items) => {
-            // Pattern array = list of allowed values
-            if let Some(ev) = event_val {
-                items.iter().any(|item| item == ev)
-            } else {
-                false
-            }
-        }
-        Value::Object(_) => {
-            // Nested object pattern — recurse
-            if let Some(ev) = event_val {
-                matches_pattern(ev, pattern_val)
-            } else {
-                false
-            }
-        }
-        _ => event_val.map(|ev| ev == pattern_val).unwrap_or(false),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,14 +142,22 @@ impl ServiceProvider for EventBridgeProvider {
             // ListEventBuses
             // ----------------------------------------------------------------
             "ListEventBuses" => {
-                let store = self.store.get_or_create(account_id, region);
-                let mut buses: Vec<Value> = store
-                    .buses
-                    .values()
-                    .map(|b| json!({ "Name": b.name, "Arn": b.arn }))
-                    .collect();
+                let store_opt = self.store.get(account_id, region);
+                let mut buses: Vec<Value> = store_opt
+                    .as_ref()
+                    .map(|s| {
+                        s.buses
+                            .values()
+                            .map(|b| json!({ "Name": b.name, "Arn": b.arn }))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 // Always include default
-                if !store.buses.contains_key("default") {
+                let has_default = store_opt
+                    .as_ref()
+                    .map(|s| s.buses.contains_key("default"))
+                    .unwrap_or(false);
+                if !has_default {
                     buses.push(json!({
                         "Name": "default",
                         "Arn": format!("arn:aws:events:{region}:{account_id}:event-bus/default"),
@@ -240,7 +229,9 @@ impl ServiceProvider for EventBridgeProvider {
             "ListRules" => {
                 let event_bus_name =
                     str_param(ctx, "EventBusName").unwrap_or_else(|| "default".to_string());
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Rules": [] })));
+                };
                 let rules: Vec<Value> = store
                     .rules
                     .values()
@@ -361,7 +352,9 @@ impl ServiceProvider for EventBridgeProvider {
                     Some(n) => n,
                     None => return Ok(json_error("ValidationError", "Rule is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Targets": [] })));
+                };
                 let targets: Vec<Value> = store
                     .rules
                     .get(&rule)
@@ -378,65 +371,7 @@ impl ServiceProvider for EventBridgeProvider {
             // ----------------------------------------------------------------
             // PutEvents
             // ----------------------------------------------------------------
-            "PutEvents" => {
-                let entries = ctx
-                    .request_body
-                    .get("Entries")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-
-                let store = self.store.get_or_create(account_id, region);
-
-                // For each event, find matching rules and (in-process) dispatch to targets
-                // For simplicity: we record success for all entries
-                let results: Vec<Value> = entries
-                    .iter()
-                    .map(|entry| {
-                        let source = entry.get("Source").and_then(|v| v.as_str()).unwrap_or("");
-                        let detail_type = entry
-                            .get("DetailType")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let detail: Value = entry
-                            .get("Detail")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| serde_json::from_str(s).ok())
-                            .unwrap_or(json!({}));
-
-                        // Find matching rules
-                        let event_obj = json!({
-                            "source": source,
-                            "detail-type": detail_type,
-                            "detail": detail,
-                        });
-
-                        let _matched_rules: Vec<&str> = store
-                            .rules
-                            .values()
-                            .filter(|r| {
-                                r.state == "ENABLED"
-                                    && r.event_pattern
-                                        .as_ref()
-                                        .map(|p| matches_pattern(&event_obj, p))
-                                        .unwrap_or(false)
-                            })
-                            .map(|r| r.name.as_str())
-                            .collect();
-
-                        // Note: actual target dispatch (SQS, Lambda, SNS) would be done here
-                        // For test compatibility we just record success
-                        json!({
-                            "EventId": uuid::Uuid::new_v4().to_string(),
-                        })
-                    })
-                    .collect();
-
-                Ok(json_ok(json!({
-                    "FailedEntryCount": 0,
-                    "Entries": results,
-                })))
-            }
+            "PutEvents" => Ok(disabled_service_error("events")),
 
             // ----------------------------------------------------------------
             // DescribeRule
@@ -446,7 +381,13 @@ impl ServiceProvider for EventBridgeProvider {
                     Some(n) => n,
                     None => return Ok(json_error("ValidationError", "Name is required", 400)),
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Rule {name} not found"),
+                        404,
+                    ));
+                };
                 match store.rules.get(&name) {
                     Some(r) => {
                         let mut obj = json!({

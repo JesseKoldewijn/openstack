@@ -1,10 +1,12 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use tracing::{debug, warn};
@@ -43,8 +45,8 @@ fn xml_wrap(action: &str, request_id: &str, inner: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(xml.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -58,8 +60,8 @@ fn xml_no_result(action: &str, request_id: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(xml.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -73,8 +75,8 @@ fn sqs_error(code: &str, message: &str) -> DispatchResponse {
     );
     DispatchResponse {
         status_code: 400,
-        body: Bytes::from(xml.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("text/xml"),
         headers: Vec::new(),
     }
 }
@@ -82,8 +84,8 @@ fn sqs_error(code: &str, message: &str) -> DispatchResponse {
 fn sqs_json_response(value: serde_json::Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(value.to_string().into_bytes()),
-        content_type: "application/x-amz-json-1.0".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(value.to_string().into_bytes())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.0"),
         headers: Vec::new(),
     }
 }
@@ -95,21 +97,59 @@ fn sqs_json_error(code: &str, message: &str, status_code: u16) -> DispatchRespon
     });
     DispatchResponse {
         status_code,
-        body: Bytes::from(body.to_string().into_bytes()),
-        content_type: "application/x-amz-json-1.0".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(body.to_string().into_bytes())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.0"),
         headers: Vec::new(),
     }
 }
 
 fn new_request_id() -> String {
-    uuid::Uuid::new_v4().to_string()
+    static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+    let next = REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("r-{next:016x}")
 }
 
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+fn escape_xml(s: &str) -> Cow<'_, str> {
+    if !s
+        .as_bytes()
+        .iter()
+        .any(|b| matches!(b, b'&' | b'<' | b'>' | b'"'))
+    {
+        return Cow::Borrowed(s);
+    }
+
+    let mut escaped = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(ch),
+        }
+    }
+    Cow::Owned(escaped)
+}
+
+fn push_xml_escaped(dst: &mut String, s: &str) {
+    if !s
+        .as_bytes()
+        .iter()
+        .any(|b| matches!(b, b'&' | b'<' | b'>' | b'"'))
+    {
+        dst.push_str(s);
+        return;
+    }
+
+    for ch in s.chars() {
+        match ch {
+            '&' => dst.push_str("&amp;"),
+            '<' => dst.push_str("&lt;"),
+            '>' => dst.push_str("&gt;"),
+            '"' => dst.push_str("&quot;"),
+            _ => dst.push(ch),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -117,10 +157,16 @@ fn escape_xml(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn parse_params(ctx: &RequestContext) -> HashMap<String, String> {
-    let mut params: HashMap<String, String> = HashMap::new();
-
     // Query protocol form body
-    let body_str = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    let body_str = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
+    let body_param_estimate = if body_str.is_empty() {
+        0
+    } else {
+        body_str.as_bytes().iter().filter(|&&b| b == b'&').count() + 1
+    };
+    let mut params: HashMap<String, String> =
+        HashMap::with_capacity(body_param_estimate + ctx.query_params.len() + 4);
+
     for (k, v) in body_str.split('&').filter_map(|kv| {
         let mut it = kv.splitn(2, '=');
         let k = it.next()?;
@@ -136,7 +182,10 @@ fn parse_params(ctx: &RequestContext) -> HashMap<String, String> {
 
     // AWS CLI v2 JSON mode for SQS may send operation in x-amz-target and JSON body
     if !params.contains_key("Action") {
-        if let Some(target) = ctx.headers.get("x-amz-target")
+        if let Some(target) = ctx
+            .headers
+            .get("x-amz-target")
+            .and_then(|v| v.to_str().ok())
             && target.starts_with("AmazonSQS.")
             && let Some(op) = target.split('.').nth(1)
         {
@@ -144,7 +193,7 @@ fn parse_params(ctx: &RequestContext) -> HashMap<String, String> {
         }
 
         if let Ok(serde_json::Value::Object(map)) =
-            serde_json::from_slice::<serde_json::Value>(&ctx.raw_body)
+            serde_json::from_slice::<serde_json::Value>(ctx.raw_body_bytes())
         {
             for (k, v) in map {
                 if let Some(s) = v.as_str() {
@@ -187,8 +236,13 @@ fn normalize_queue_url_for_endpoint(url: &str, endpoint: &str) -> String {
 fn apply_transport_compat(ctx: &RequestContext, params: &mut HashMap<String, String>) {
     // AWS CLI v2 SQS returns hostname URLs (sqs.us-east-1.localhost.localstack.cloud)
     // in GetQueueUrl, but follow-up calls still target endpoint-url host.
-    if let Some(endpoint) = ctx.headers.get("host") {
-        let scheme = if ctx.headers.get("x-forwarded-proto").map(|v| v.as_str()) == Some("https") {
+    if let Some(endpoint) = ctx.headers.get("host").and_then(|v| v.to_str().ok()) {
+        let scheme = if ctx
+            .headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            == Some("https")
+        {
             "https"
         } else {
             "http"
@@ -201,6 +255,10 @@ fn apply_transport_compat(ctx: &RequestContext, params: &mut HashMap<String, Str
 }
 
 fn url_decode(s: &str) -> String {
+    if !s.as_bytes().iter().any(|b| matches!(b, b'%' | b'+')) {
+        return s.to_string();
+    }
+
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -273,8 +331,8 @@ fn extract_message_attributes(
     result
 }
 
-fn queue_name_from_url(url: &str) -> String {
-    url.rsplit('/').next().unwrap_or("").to_string()
+fn queue_name_from_url(url: &str) -> &str {
+    url.rsplit('/').next().unwrap_or("")
 }
 
 fn base_queue_url(_ctx: &RequestContext) -> String {
@@ -282,7 +340,8 @@ fn base_queue_url(_ctx: &RequestContext) -> String {
         let region = _ctx
             .headers
             .get("x-amz-region")
-            .cloned()
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
             .unwrap_or_else(|| _ctx.region.clone());
         return format!("http://sqs.{region}.localhost.localstack.cloud:4566");
     }
@@ -318,11 +377,11 @@ fn handle_create_queue(
 
 fn handle_delete_queue(store: &mut SqsStore, params: &HashMap<String, String>) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
-    let name = queue_name_from_url(&url);
-    if !store.delete_queue(&name) {
+    let name = queue_name_from_url(url);
+    if !store.delete_queue(name) {
         return sqs_error(
             "AWS.SimpleQueueService.NonExistentQueue",
             "Queue does not exist",
@@ -348,7 +407,7 @@ fn handle_get_queue_url(store: &SqsStore, params: &HashMap<String, String>) -> D
         Some(n) => n.clone(),
         None => return sqs_error("MissingParameter", "QueueName is required"),
     };
-    match store.get_queue_by_name(&name) {
+    match store.get_queue_by_name(name.as_str()) {
         None => sqs_error(
             "AWS.SimpleQueueService.NonExistentQueue",
             "Queue does not exist",
@@ -366,11 +425,11 @@ fn handle_get_queue_attributes(
     params: &HashMap<String, String>,
 ) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
-    let name = queue_name_from_url(&url);
-    let q = match store.get_queue_by_name(&name) {
+    let name = queue_name_from_url(url);
+    let q = match store.get_queue_by_name(name) {
         None => {
             return sqs_error(
                 "AWS.SimpleQueueService.NonExistentQueue",
@@ -449,11 +508,11 @@ fn handle_set_queue_attributes(
     params: &HashMap<String, String>,
 ) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
-    let name = queue_name_from_url(&url);
-    let q = match store.get_queue_by_name_mut(&name) {
+    let name = queue_name_from_url(url);
+    let q = match store.get_queue_by_name_mut(name) {
         None => {
             return sqs_error(
                 "AWS.SimpleQueueService.NonExistentQueue",
@@ -469,11 +528,11 @@ fn handle_set_queue_attributes(
 
 fn handle_purge_queue(store: &mut SqsStore, params: &HashMap<String, String>) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
-    let name = queue_name_from_url(&url);
-    match store.get_queue_by_name_mut(&name) {
+    let name = queue_name_from_url(url);
+    match store.get_queue_by_name_mut(name) {
         None => sqs_error(
             "AWS.SimpleQueueService.NonExistentQueue",
             "Queue does not exist",
@@ -487,20 +546,20 @@ fn handle_purge_queue(store: &mut SqsStore, params: &HashMap<String, String>) ->
 
 fn handle_send_message(store: &mut SqsStore, params: &HashMap<String, String>) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
     let body = match params.get("MessageBody") {
-        Some(b) => b.clone(),
+        Some(b) => b.as_str(),
         None => return sqs_error("MissingParameter", "MessageBody is required"),
     };
-    let name = queue_name_from_url(&url);
+    let name = queue_name_from_url(url);
     let delay = params.get("DelaySeconds").and_then(|v| v.parse().ok());
     let message_group_id = params.get("MessageGroupId").cloned();
     let dedup_id = params.get("MessageDeduplicationId").cloned();
     let msg_attrs = extract_message_attributes(params);
 
-    let q = match store.get_queue_by_name_mut(&name) {
+    let q = match store.get_queue_by_name_mut(name) {
         None => {
             return sqs_error(
                 "AWS.SimpleQueueService.NonExistentQueue",
@@ -564,12 +623,12 @@ fn handle_send_message_batch(
                     ))
                     .cloned();
 
-                let q = match store.get_queue_by_name_mut(&name) {
+                let q = match store.get_queue_by_name_mut(name) {
                     None => break,
                     Some(q) => q,
                 };
 
-                match q.send_message(body.clone(), delay, HashMap::new(), group_id, dedup_id) {
+                match q.send_message(body.as_str(), delay, HashMap::new(), group_id, dedup_id) {
                     None => {
                         successful.push_str(&format!(
                             "<SendMessageBatchResultEntry>\
@@ -605,7 +664,7 @@ fn handle_receive_message(
     params: &HashMap<String, String>,
 ) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
     let max: usize = params
@@ -615,8 +674,8 @@ fn handle_receive_message(
         .min(10);
     let vt: Option<u32> = params.get("VisibilityTimeout").and_then(|v| v.parse().ok());
 
-    let name = queue_name_from_url(&url);
-    let q = match store.get_queue_by_name_mut(&name) {
+    let name = queue_name_from_url(url);
+    let q = match store.get_queue_by_name_mut(name) {
         None => {
             return sqs_error(
                 "AWS.SimpleQueueService.NonExistentQueue",
@@ -627,52 +686,48 @@ fn handle_receive_message(
     };
 
     let messages = q.receive_messages(max, vt);
+    let redrive_max = q.redrive_policy.as_ref().map(|rp| rp.max_receive_count);
 
-    // DLQ redrive on receive
-    let dlq_msgs = q.messages_for_dlq();
-    if !dlq_msgs.is_empty() {
-        q.remove_dlq_candidates();
+    let mut inner = String::with_capacity(messages.len() * 512);
+    for idx in messages {
+        let Some(msg) = q.messages.get(idx) else {
+            continue;
+        };
+
+        inner.push_str("<Message><MessageId>");
+        inner.push_str(&msg.message_id);
+        inner.push_str("</MessageId><ReceiptHandle>");
+        inner.push_str(&msg.receipt_handle);
+        inner.push_str("</ReceiptHandle><MD5OfBody>");
+        inner.push_str(&msg.md5_of_body);
+        inner.push_str("</MD5OfBody><Body>");
+        push_xml_escaped(&mut inner, &msg.body);
+        inner.push_str("</Body>");
+        for (k, v) in &msg.attributes {
+            inner.push_str("<Attribute><Name>");
+            push_xml_escaped(&mut inner, k);
+            inner.push_str("</Name><Value>");
+            push_xml_escaped(&mut inner, v);
+            inner.push_str("</Value></Attribute>");
+        }
+        for (k, v) in &msg.message_attributes {
+            inner.push_str("<MessageAttribute><Name>");
+            push_xml_escaped(&mut inner, k);
+            inner.push_str("</Name><Value><DataType>");
+            push_xml_escaped(&mut inner, &v.data_type);
+            inner.push_str("</DataType><StringValue>");
+            push_xml_escaped(&mut inner, v.string_value.as_deref().unwrap_or(""));
+            inner.push_str("</StringValue></Value></MessageAttribute>");
+        }
+        inner.push_str("</Message>");
     }
 
-    let mut inner = String::new();
-    for msg in &messages {
-        let mut attrs_xml = String::new();
-        for (k, v) in &msg.attributes {
-            attrs_xml.push_str(&format!(
-                "<Attribute><Name>{}</Name><Value>{}</Value></Attribute>",
-                escape_xml(k),
-                escape_xml(v)
-            ));
-        }
-        let mut msg_attrs_xml = String::new();
-        for (k, v) in &msg.message_attributes {
-            msg_attrs_xml.push_str(&format!(
-                "<MessageAttribute><Name>{}</Name><Value>\
-<DataType>{}</DataType>\
-<StringValue>{}</StringValue>\
-</Value></MessageAttribute>",
-                escape_xml(k),
-                escape_xml(&v.data_type),
-                escape_xml(v.string_value.as_deref().unwrap_or(""))
-            ));
-        }
-
-        inner.push_str(&format!(
-            "<Message>\
-<MessageId>{msg_id}</MessageId>\
-<ReceiptHandle>{rh}</ReceiptHandle>\
-<MD5OfBody>{md5}</MD5OfBody>\
-<Body>{body}</Body>\
-{attrs}\
-{msg_attrs}\
-</Message>",
-            msg_id = escape_xml(&msg.message_id),
-            rh = escape_xml(&msg.receipt_handle),
-            md5 = escape_xml(&msg.md5_of_body),
-            body = escape_xml(&msg.body),
-            attrs = attrs_xml,
-            msg_attrs = msg_attrs_xml,
-        ));
+    if let Some(max_receive_count) = redrive_max
+        && q.messages
+            .iter()
+            .any(|m| m.receive_count >= max_receive_count)
+    {
+        q.remove_dlq_candidates();
     }
 
     xml_wrap("ReceiveMessage", &new_request_id(), &inner)
@@ -683,16 +738,16 @@ fn handle_delete_message(
     params: &HashMap<String, String>,
 ) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
     let rh = match params.get("ReceiptHandle") {
-        Some(r) => r.clone(),
+        Some(r) => r.as_str(),
         None => return sqs_error("MissingParameter", "ReceiptHandle is required"),
     };
-    let name = queue_name_from_url(&url);
-    if let Some(q) = store.get_queue_by_name_mut(&name) {
-        q.delete_message(&rh);
+    let name = queue_name_from_url(url);
+    if let Some(q) = store.get_queue_by_name_mut(name) {
+        q.delete_message(rh);
     }
     xml_no_result("DeleteMessage", &new_request_id())
 }
@@ -702,10 +757,10 @@ fn handle_delete_message_batch(
     params: &HashMap<String, String>,
 ) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
-    let name = queue_name_from_url(&url);
+    let name = queue_name_from_url(url);
 
     let mut inner = String::new();
     let mut i = 1;
@@ -714,7 +769,7 @@ fn handle_delete_message_batch(
         let rh_key = format!("DeleteMessageBatchRequestEntry.{i}.ReceiptHandle");
         match (params.get(&id_key), params.get(&rh_key)) {
             (Some(id), Some(rh)) => {
-                if let Some(q) = store.get_queue_by_name_mut(&name) {
+                if let Some(q) = store.get_queue_by_name_mut(name) {
                     q.delete_message(rh);
                 }
                 inner.push_str(&format!(
@@ -734,11 +789,11 @@ fn handle_change_message_visibility(
     params: &HashMap<String, String>,
 ) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
     let rh = match params.get("ReceiptHandle") {
-        Some(r) => r.clone(),
+        Some(r) => r.as_str(),
         None => return sqs_error("MissingParameter", "ReceiptHandle is required"),
     };
     let vt: u32 = params
@@ -746,9 +801,9 @@ fn handle_change_message_visibility(
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
 
-    let name = queue_name_from_url(&url);
-    if let Some(q) = store.get_queue_by_name_mut(&name) {
-        q.change_visibility(&rh, vt);
+    let name = queue_name_from_url(url);
+    if let Some(q) = store.get_queue_by_name_mut(name) {
+        q.change_visibility(rh, vt);
     }
     xml_no_result("ChangeMessageVisibility", &new_request_id())
 }
@@ -758,10 +813,10 @@ fn handle_change_message_visibility_batch(
     params: &HashMap<String, String>,
 ) -> DispatchResponse {
     let url = match params.get("QueueUrl") {
-        Some(u) => u.clone(),
+        Some(u) => u.as_str(),
         None => return sqs_error("MissingParameter", "QueueUrl is required"),
     };
-    let name = queue_name_from_url(&url);
+    let name = queue_name_from_url(url);
 
     let mut inner = String::new();
     let mut i = 1;
@@ -775,7 +830,7 @@ fn handle_change_message_visibility_batch(
                     .get(&vt_key)
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(30);
-                if let Some(q) = store.get_queue_by_name_mut(&name) {
+                if let Some(q) = store.get_queue_by_name_mut(name) {
                     q.change_visibility(rh, vt);
                 }
                 inner.push_str(&format!(
@@ -801,6 +856,7 @@ impl ServiceProvider for SqsProvider {
     }
 
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        let op_start = std::time::Instant::now();
         let mut params = parse_params(ctx);
         apply_transport_compat(ctx, &mut params);
         let query_mode_json = ctx
@@ -824,27 +880,9 @@ impl ServiceProvider for SqsProvider {
 
         debug!(service = "sqs", action = %action, "SQS dispatch");
 
-        let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-
         let response = if query_mode_json {
             match action.as_str() {
-                "CreateQueue" => {
-                    let name = match params.get("QueueName") {
-                        Some(n) => n.clone(),
-                        None => {
-                            return Ok(sqs_json_error(
-                                "MissingParameter",
-                                "QueueName is required",
-                                400,
-                            ));
-                        }
-                    };
-                    let attributes = extract_indexed_kv(&params, "Attribute");
-                    let base = base_queue_url(ctx);
-                    let q =
-                        store.create_queue(&name, &base, &ctx.account_id, &ctx.region, &attributes);
-                    sqs_json_response(serde_json::json!({ "QueueUrl": q.url.clone() }))
-                }
+                // Read-only JSON ops — acquire shared (read) lock
                 "GetQueueUrl" => {
                     let name = match params.get("QueueName") {
                         Some(n) => n.clone(),
@@ -856,7 +894,14 @@ impl ServiceProvider for SqsProvider {
                             ));
                         }
                     };
-                    match store.get_queue_by_name(&name) {
+                    let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                        return Ok(sqs_json_error(
+                            "AWS.SimpleQueueService.NonExistentQueue",
+                            "The specified queue does not exist.",
+                            400,
+                        ));
+                    };
+                    match store.get_queue_by_name(name.as_str()) {
                         Some(q) => {
                             sqs_json_response(serde_json::json!({ "QueueUrl": q.url.clone() }))
                         }
@@ -867,44 +912,82 @@ impl ServiceProvider for SqsProvider {
                         ),
                     }
                 }
-                "SendMessage" => {
-                    let url = match params.get("QueueUrl") {
-                        Some(u) => u.clone(),
-                        None => {
-                            return Ok(sqs_json_error(
-                                "MissingParameter",
-                                "QueueUrl is required",
-                                400,
-                            ));
-                        }
-                    };
-                    let body = match params.get("MessageBody") {
-                        Some(b) => b.clone(),
-                        None => {
-                            return Ok(sqs_json_error(
-                                "MissingParameter",
-                                "MessageBody is required",
-                                400,
-                            ));
-                        }
-                    };
-                    let name = queue_name_from_url(&url);
-                    let delay = params.get("DelaySeconds").and_then(|v| v.parse().ok());
-                    let message_group_id = params.get("MessageGroupId").cloned();
-                    let dedup_id = params.get("MessageDeduplicationId").cloned();
-                    let msg_attrs = extract_message_attributes(&params);
-                    let q = match store.get_queue_by_name_mut(&name) {
-                        Some(q) => q,
-                        None => {
+                // Write JSON ops — acquire exclusive (write) lock
+                other => match other {
+                    "CreateQueue" => {
+                        let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                        let name = match params.get("QueueName") {
+                            Some(n) => n.clone(),
+                            None => {
+                                return Ok(sqs_json_error(
+                                    "MissingParameter",
+                                    "QueueName is required",
+                                    400,
+                                ));
+                            }
+                        };
+                        let attributes = extract_indexed_kv(&params, "Attribute");
+                        let base = base_queue_url(ctx);
+                        let q = store.create_queue(
+                            &name,
+                            &base,
+                            &ctx.account_id,
+                            &ctx.region,
+                            &attributes,
+                        );
+                        sqs_json_response(serde_json::json!({ "QueueUrl": q.url.clone() }))
+                    }
+                    "SendMessage" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
                             return Ok(sqs_json_error(
                                 "AWS.SimpleQueueService.NonExistentQueue",
                                 "The specified queue does not exist.",
                                 400,
                             ));
-                        }
-                    };
-                    let msg =
-                        match q.send_message(body, delay, msg_attrs, message_group_id, dedup_id) {
+                        };
+                        let url = match params.get("QueueUrl") {
+                            Some(u) => u.as_str(),
+                            None => {
+                                return Ok(sqs_json_error(
+                                    "MissingParameter",
+                                    "QueueUrl is required",
+                                    400,
+                                ));
+                            }
+                        };
+                        let body = match params.get("MessageBody") {
+                            Some(b) => b.as_str(),
+                            None => {
+                                return Ok(sqs_json_error(
+                                    "MissingParameter",
+                                    "MessageBody is required",
+                                    400,
+                                ));
+                            }
+                        };
+                        let name = queue_name_from_url(url);
+                        let delay = params.get("DelaySeconds").and_then(|v| v.parse().ok());
+                        let message_group_id = params.get("MessageGroupId").cloned();
+                        let dedup_id = params.get("MessageDeduplicationId").cloned();
+                        let msg_attrs = extract_message_attributes(&params);
+                        let q = match store.get_queue_by_name_mut(name) {
+                            Some(q) => q,
+                            None => {
+                                return Ok(sqs_json_error(
+                                    "AWS.SimpleQueueService.NonExistentQueue",
+                                    "The specified queue does not exist.",
+                                    400,
+                                ));
+                            }
+                        };
+                        let msg = match q.send_message(
+                            body,
+                            delay,
+                            msg_attrs,
+                            message_group_id,
+                            dedup_id,
+                        ) {
                             Some(m) => m,
                             None => {
                                 return Ok(sqs_json_response(serde_json::json!({
@@ -913,105 +996,246 @@ impl ServiceProvider for SqsProvider {
                                 })));
                             }
                         };
-                    sqs_json_response(serde_json::json!({
-                        "MessageId": msg.message_id,
-                        "MD5OfMessageBody": msg.md5_of_body,
-                    }))
-                }
-                "ReceiveMessage" => {
-                    let url = match params.get("QueueUrl") {
-                        Some(u) => u.clone(),
-                        None => {
-                            return Ok(sqs_json_error(
-                                "MissingParameter",
-                                "QueueUrl is required",
-                                400,
-                            ));
-                        }
-                    };
-                    let max: usize = params
-                        .get("MaxNumberOfMessages")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(1)
-                        .min(10);
-                    let vt: Option<u32> =
-                        params.get("VisibilityTimeout").and_then(|v| v.parse().ok());
-                    let name = queue_name_from_url(&url);
-                    let q = match store.get_queue_by_name_mut(&name) {
-                        Some(q) => q,
-                        None => {
+                        sqs_json_response(serde_json::json!({
+                            "MessageId": msg.message_id,
+                            "MD5OfMessageBody": msg.md5_of_body,
+                        }))
+                    }
+                    "ReceiveMessage" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
                             return Ok(sqs_json_error(
                                 "AWS.SimpleQueueService.NonExistentQueue",
                                 "The specified queue does not exist.",
                                 400,
                             ));
-                        }
-                    };
-                    let messages = q.receive_messages(max, vt);
-                    let payload = messages
-                        .iter()
-                        .map(|msg| {
-                            serde_json::json!({
-                                "MessageId": msg.message_id,
-                                "ReceiptHandle": msg.receipt_handle,
-                                "MD5OfBody": msg.md5_of_body,
-                                "Body": msg.body,
+                        };
+                        let url = match params.get("QueueUrl") {
+                            Some(u) => u.as_str(),
+                            None => {
+                                return Ok(sqs_json_error(
+                                    "MissingParameter",
+                                    "QueueUrl is required",
+                                    400,
+                                ));
+                            }
+                        };
+                        let max: usize = params
+                            .get("MaxNumberOfMessages")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1)
+                            .min(10);
+                        let vt: Option<u32> =
+                            params.get("VisibilityTimeout").and_then(|v| v.parse().ok());
+                        let name = queue_name_from_url(url);
+                        let q = match store.get_queue_by_name_mut(name) {
+                            Some(q) => q,
+                            None => {
+                                return Ok(sqs_json_error(
+                                    "AWS.SimpleQueueService.NonExistentQueue",
+                                    "The specified queue does not exist.",
+                                    400,
+                                ));
+                            }
+                        };
+                        let messages = q.receive_messages(max, vt);
+                        let payload = messages
+                            .into_iter()
+                            .filter_map(|idx| q.messages.get(idx))
+                            .map(|msg| {
+                                serde_json::json!({
+                                    "MessageId": msg.message_id,
+                                    "ReceiptHandle": msg.receipt_handle,
+                                    "MD5OfBody": msg.md5_of_body,
+                                    "Body": msg.body,
+                                })
                             })
-                        })
-                        .collect::<Vec<_>>();
-                    sqs_json_response(serde_json::json!({ "Messages": payload }))
-                }
-                "DeleteQueue" => {
-                    let url = match params.get("QueueUrl") {
-                        Some(u) => u.clone(),
-                        None => {
+                            .collect::<Vec<_>>();
+                        sqs_json_response(serde_json::json!({ "Messages": payload }))
+                    }
+                    "DeleteQueue" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
                             return Ok(sqs_json_error(
-                                "MissingParameter",
-                                "QueueUrl is required",
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "The specified queue does not exist.",
                                 400,
                             ));
+                        };
+                        let url = match params.get("QueueUrl") {
+                            Some(u) => u.as_str(),
+                            None => {
+                                return Ok(sqs_json_error(
+                                    "MissingParameter",
+                                    "QueueUrl is required",
+                                    400,
+                                ));
+                            }
+                        };
+                        let name = queue_name_from_url(url);
+                        if store.delete_queue(name) {
+                            sqs_json_response(serde_json::json!({}))
+                        } else {
+                            sqs_json_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "The specified queue does not exist.",
+                                400,
+                            )
                         }
-                    };
-                    let name = queue_name_from_url(&url);
-                    if store.delete_queue(&name) {
-                        sqs_json_response(serde_json::json!({}))
-                    } else {
-                        sqs_json_error(
-                            "AWS.SimpleQueueService.NonExistentQueue",
-                            "The specified queue does not exist.",
-                            400,
-                        )
                     }
-                }
-                _ => {
-                    warn!(service = "sqs", action = %action, "SQS action not implemented");
-                    return Err(DispatchError::NotImplemented(action));
-                }
+                    _ => {
+                        warn!(service = "sqs", action = %other, "SQS action not implemented");
+                        return Err(DispatchError::NotImplemented(other.to_string()));
+                    }
+                },
             }
         } else {
             match action.as_str() {
-                "CreateQueue" => handle_create_queue(&mut store, ctx, &params),
-                "DeleteQueue" => handle_delete_queue(&mut store, &params),
-                "ListQueues" => handle_list_queues(&store, &params),
-                "GetQueueUrl" => handle_get_queue_url(&store, &params),
-                "GetQueueAttributes" => handle_get_queue_attributes(&store, &params),
-                "SetQueueAttributes" => handle_set_queue_attributes(&mut store, &params),
-                "PurgeQueue" => handle_purge_queue(&mut store, &params),
-                "SendMessage" => handle_send_message(&mut store, &params),
-                "SendMessageBatch" => handle_send_message_batch(&mut store, &params),
-                "ReceiveMessage" => handle_receive_message(&mut store, &params),
-                "DeleteMessage" => handle_delete_message(&mut store, &params),
-                "DeleteMessageBatch" => handle_delete_message_batch(&mut store, &params),
-                "ChangeMessageVisibility" => handle_change_message_visibility(&mut store, &params),
-                "ChangeMessageVisibilityBatch" => {
-                    handle_change_message_visibility_batch(&mut store, &params)
+                // Read-only XML ops — acquire shared (read) lock
+                "ListQueues" => {
+                    let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                        return Ok(xml_wrap("ListQueues", &new_request_id(), ""));
+                    };
+                    handle_list_queues(&store, &params)
                 }
-                _ => {
-                    warn!(service = "sqs", action = %action, "SQS action not implemented");
-                    return Err(DispatchError::NotImplemented(action));
+                "GetQueueUrl" => {
+                    let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                        return Ok(sqs_error(
+                            "AWS.SimpleQueueService.NonExistentQueue",
+                            "Queue does not exist",
+                        ));
+                    };
+                    handle_get_queue_url(&store, &params)
                 }
+                "GetQueueAttributes" => {
+                    let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                        return Ok(sqs_error(
+                            "AWS.SimpleQueueService.NonExistentQueue",
+                            "Queue does not exist",
+                        ));
+                    };
+                    handle_get_queue_attributes(&store, &params)
+                }
+                // Write XML ops — acquire exclusive (write) lock
+                other => match other {
+                    "CreateQueue" => {
+                        let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                        handle_create_queue(&mut store, ctx, &params)
+                    }
+                    "DeleteQueue" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_delete_queue(&mut store, &params)
+                    }
+                    "SetQueueAttributes" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_set_queue_attributes(&mut store, &params)
+                    }
+                    "PurgeQueue" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_purge_queue(&mut store, &params)
+                    }
+                    "SendMessage" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_send_message(&mut store, &params)
+                    }
+                    "SendMessageBatch" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_send_message_batch(&mut store, &params)
+                    }
+                    "ReceiveMessage" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_receive_message(&mut store, &params)
+                    }
+                    "DeleteMessage" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_delete_message(&mut store, &params)
+                    }
+                    "DeleteMessageBatch" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_delete_message_batch(&mut store, &params)
+                    }
+                    "ChangeMessageVisibility" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_change_message_visibility(&mut store, &params)
+                    }
+                    "ChangeMessageVisibilityBatch" => {
+                        let Some(mut store) = self.store.get_mut(&ctx.account_id, &ctx.region)
+                        else {
+                            return Ok(sqs_error(
+                                "AWS.SimpleQueueService.NonExistentQueue",
+                                "Queue does not exist",
+                            ));
+                        };
+                        handle_change_message_visibility_batch(&mut store, &params)
+                    }
+                    _ => {
+                        warn!(service = "sqs", action = %other, "SQS action not implemented");
+                        return Err(DispatchError::NotImplemented(other.to_string()));
+                    }
+                },
             }
         };
+
+        debug!(
+            service = "sqs",
+            action = %action,
+            op_latency_us = op_start.elapsed().as_micros(),
+            "SQS operation complete"
+        );
 
         Ok(response)
     }

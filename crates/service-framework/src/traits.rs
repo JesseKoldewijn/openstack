@@ -1,9 +1,16 @@
+use std::borrow::Cow;
+use std::pin::Pin;
+use std::sync::Mutex;
+
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::HeaderMap;
 use thiserror::Error;
 
+use crate::SpooledBody;
+
 /// The parsed request context passed to provider methods.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RequestContext {
     /// Target AWS service (e.g., "s3", "sqs")
     pub service: String,
@@ -15,16 +22,28 @@ pub struct RequestContext {
     pub account_id: String,
     /// The parsed request body (protocol-specific)
     pub request_body: serde_json::Value,
-    /// Raw request bytes (for protocols that need it)
-    pub raw_body: Bytes,
+    /// Raw request bytes (for protocols that need them).
+    ///
+    /// `None` for S3 PutObject / UploadPart — the binary object payload is
+    /// never materialised eagerly; use `spooled_body` instead.
+    /// For all other protocols this is `Some(bytes)` populated by the gateway.
+    pub raw_body: Option<Bytes>,
     /// Request headers (key lowercased)
-    pub headers: std::collections::HashMap<String, String>,
+    pub headers: HeaderMap,
     /// URL path
     pub path: String,
     /// HTTP method
     pub method: String,
     /// Query string parameters
     pub query_params: std::collections::HashMap<String, String>,
+    /// Unique request ID for tracing (generated once by the gateway).
+    pub request_id: String,
+    /// Spooled request body (for large payloads, may be on disk).
+    ///
+    /// Wrapped in a `Mutex` so that it can be locked and consumed
+    /// (via `SpooledBody::into_reader()`) even when the provider receives
+    /// `ctx: &RequestContext`.
+    pub spooled_body: Option<Mutex<SpooledBody>>,
 }
 
 impl RequestContext {
@@ -40,12 +59,23 @@ impl RequestContext {
             region: region.into(),
             account_id: account_id.into(),
             request_body: serde_json::Value::Null,
-            raw_body: Bytes::new(),
+            raw_body: None,
             headers: Default::default(),
             path: String::new(),
             method: String::new(),
             query_params: Default::default(),
+            request_id: String::new(),
+            spooled_body: None,
         }
+    }
+
+    /// Return a slice of the raw body bytes, or an empty slice if not present.
+    ///
+    /// Providers that need the raw bytes should call this instead of
+    /// accessing `raw_body` directly so that future lazy-materialisation
+    /// changes do not break them.
+    pub fn raw_body_bytes(&self) -> &[u8] {
+        self.raw_body.as_deref().unwrap_or(b"")
     }
 }
 
@@ -95,15 +125,88 @@ pub trait ServiceProvider: Send + Sync {
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError>;
 }
 
+/// The body of a dispatch response.
+///
+/// `Buffered` holds a complete `Bytes` payload in memory. `Streaming` holds
+/// an async byte stream and optional content length — the gateway converts it
+/// to a streaming HTTP response without buffering the whole body.
+pub enum ResponseBody {
+    /// A fully buffered response body.
+    Buffered(Bytes),
+    /// A streaming response body.
+    Streaming {
+        stream: Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+        content_length: Option<u64>,
+    },
+}
+
+impl std::fmt::Debug for ResponseBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResponseBody::Buffered(b) => f
+                .debug_tuple("ResponseBody::Buffered")
+                .field(&format!("{} bytes", b.len()))
+                .finish(),
+            ResponseBody::Streaming { content_length, .. } => f
+                .debug_struct("ResponseBody::Streaming")
+                .field("content_length", content_length)
+                .finish(),
+        }
+    }
+}
+
+/// Allow constructing a `ResponseBody::Buffered` directly from `Bytes`.
+impl From<Bytes> for ResponseBody {
+    fn from(bytes: Bytes) -> Self {
+        ResponseBody::Buffered(bytes)
+    }
+}
+
+impl ResponseBody {
+    /// Borrow the buffered bytes. Panics if this is a streaming body.
+    ///
+    /// Useful in tests where you know the response is always buffered.
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            ResponseBody::Buffered(b) => b,
+            ResponseBody::Streaming { .. } => {
+                panic!("as_bytes() called on a streaming ResponseBody")
+            }
+        }
+    }
+
+    /// Consume this body and return all data as `Bytes`.
+    ///
+    /// For `Buffered`, this is a no-op move. For `Streaming`, this collects
+    /// the entire stream into memory (use sparingly).
+    pub async fn into_bytes(self) -> Result<Bytes, std::io::Error> {
+        match self {
+            ResponseBody::Buffered(b) => Ok(b),
+            ResponseBody::Streaming { mut stream, .. } => {
+                let mut buf = Vec::new();
+                loop {
+                    let next = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+                    match next {
+                        Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
+                        Some(Err(e)) => return Err(e),
+                        None => break,
+                    }
+                }
+                Ok(Bytes::from(buf))
+            }
+        }
+    }
+}
+
 /// A serialized response from a service provider dispatch.
 #[derive(Debug)]
 pub struct DispatchResponse {
     /// HTTP status code
     pub status_code: u16,
-    /// Response body bytes
-    pub body: Bytes,
+    /// Response body
+    pub body: ResponseBody,
     /// Response content type
-    pub content_type: String,
+    pub content_type: Cow<'static, str>,
     /// Additional response headers
     pub headers: Vec<(String, String)>,
 }
@@ -114,8 +217,8 @@ impl DispatchResponse {
             .map_err(|e| DispatchError::SerializationError(e.to_string()))?;
         Ok(Self {
             status_code: 200,
-            body: Bytes::from(bytes),
-            content_type: "application/json".to_string(),
+            body: ResponseBody::Buffered(Bytes::from(bytes)),
+            content_type: Cow::Borrowed("application/json"),
             headers: Vec::new(),
         })
     }
@@ -123,8 +226,25 @@ impl DispatchResponse {
     pub fn ok_xml(xml: String) -> Self {
         Self {
             status_code: 200,
-            body: Bytes::from(xml.into_bytes()),
-            content_type: "text/xml".to_string(),
+            body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+            content_type: Cow::Borrowed("text/xml"),
+            headers: Vec::new(),
+        }
+    }
+
+    /// Create a streaming response.
+    pub fn streaming(
+        stream: Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+        content_length: Option<u64>,
+        content_type: Cow<'static, str>,
+    ) -> Self {
+        Self {
+            status_code: 200,
+            body: ResponseBody::Streaming {
+                stream,
+                content_length,
+            },
+            content_type,
             headers: Vec::new(),
         }
     }

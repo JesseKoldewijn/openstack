@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use openstack_redshift::RedshiftProvider;
 use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
 
@@ -11,16 +10,18 @@ fn make_ctx(operation: &str, params: HashMap<String, String>) -> RequestContext 
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::new(),
-        headers: HashMap::new(),
+        raw_body: None,
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: params,
+        request_id: String::new(),
+        spooled_body: None,
     }
 }
 
 fn body_str(resp: &DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +90,21 @@ async fn test_describe_clusters() {
     assert!(body.contains("<Clusters>"));
     assert!(body.contains("cluster-alpha"));
     assert!(body.contains("cluster-beta"));
+}
+
+#[tokio::test]
+async fn test_describe_clusters_without_store_returns_empty_clusters() {
+    let p = RedshiftProvider::new();
+
+    let resp = p
+        .dispatch(&make_ctx("DescribeClusters", HashMap::new()))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("DescribeClustersResponse"));
+    assert!(body.contains("<Clusters></Clusters>"));
 }
 
 #[tokio::test]

@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
@@ -39,8 +40,8 @@ impl Default for ApiGatewayProvider {
 fn json_ok(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        content_type: "application/json".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -48,8 +49,8 @@ fn json_ok(body: Value) -> DispatchResponse {
 fn json_created(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 201,
-        body: Bytes::from(serde_json::to_vec(&body).unwrap()),
-        content_type: "application/json".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -57,14 +58,14 @@ fn json_created(body: Value) -> DispatchResponse {
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(
+        body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
+                "__type": code,
                 "message": message,
-                "code": code,
             }))
             .unwrap(),
-        ),
-        content_type: "application/json".to_string(),
+        )),
+        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -85,6 +86,35 @@ fn short_id() -> String {
     Uuid::new_v4().to_string()[..8].to_string()
 }
 
+fn canonical_operation(ctx: &RequestContext) -> &str {
+    match (ctx.method.as_str(), ctx.path.as_str()) {
+        ("GET", path)
+            if path.starts_with("/restapis/")
+                && path.len() > "/restapis/".len()
+                && !path[1 + "restapis/".len()..].contains('/') =>
+        {
+            "GetRestApi"
+        }
+        ("GET", "/restapis") => "GetRestApis",
+        ("GET", "/restapis/") => "GetRestApis",
+        ("POST", "/restapis") => "CreateRestApi",
+        ("DELETE", path)
+            if path.starts_with("/restapis/")
+                && path.len() > "/restapis/".len()
+                && !path[1 + "restapis/".len()..].contains('/') =>
+        {
+            "DeleteRestApi"
+        }
+        ("GET", path) if path.ends_with("/resources") => "GetResources",
+        ("POST", path) if path.contains("/resources/") => "CreateResource",
+        ("PUT", path) if path.ends_with("/integration") => "PutIntegration",
+        ("PUT", path) if path.contains("/methods/") => "PutMethod",
+        ("POST", path) if path.ends_with("/deployments") => "CreateDeployment",
+        ("GET", path) if path.ends_with("/stages") => "GetStages",
+        _ => ctx.operation.as_str(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ServiceProvider
 // ---------------------------------------------------------------------------
@@ -98,12 +128,13 @@ impl ServiceProvider for ApiGatewayProvider {
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
         let region = &ctx.region;
         let account_id = &ctx.account_id;
+        let op = canonical_operation(ctx);
 
         // API Gateway uses REST paths. The operation is derived from method + path.
         // The gateway layer sets ctx.operation based on path pattern matching.
         // We support the standard API Gateway V1 management API operations.
 
-        match ctx.operation.as_str() {
+        match op {
             // ----------------------------------------------------------------
             // CreateRestApi  POST /restapis
             // ----------------------------------------------------------------
@@ -149,7 +180,9 @@ impl ServiceProvider for ApiGatewayProvider {
             // GetRestApis  GET /restapis
             // ----------------------------------------------------------------
             "GetRestApis" => {
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "items": [] })));
+                };
                 let apis: Vec<Value> = store
                     .apis
                     .values()
@@ -168,14 +201,20 @@ impl ServiceProvider for ApiGatewayProvider {
                         return Ok(json_error("BadRequestException", "restApiId required", 400));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        "Invalid Rest API Id specified",
+                        404,
+                    ));
+                };
                 match store.apis.get(&api_id) {
                     Some(a) => Ok(json_ok(
                         json!({ "id": a.id, "name": a.name, "createdDate": a.created.timestamp() }),
                     )),
                     None => Ok(json_error(
                         "NotFoundException",
-                        "Invalid API identifier specified",
+                        "Invalid Rest API Id specified",
                         404,
                     )),
                 }
@@ -198,8 +237,8 @@ impl ServiceProvider for ApiGatewayProvider {
                 store.stages.retain(|(aid, _), _| aid != &api_id);
                 Ok(DispatchResponse {
                     status_code: 202,
-                    body: Bytes::new(),
-                    content_type: "application/json".to_string(),
+                    body: ResponseBody::Buffered(Bytes::new()),
+                    content_type: Cow::Borrowed("application/json"),
                     headers: Vec::new(),
                 })
             }
@@ -227,10 +266,31 @@ impl ServiceProvider for ApiGatewayProvider {
                 };
 
                 let resource_id = short_id();
-                let store_ref = self.store.get_or_create(account_id, region);
+                let store_ref = self.store.get(account_id, region);
+                if !store_ref
+                    .as_ref()
+                    .is_some_and(|s| s.apis.contains_key(&api_id))
+                {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        "Invalid API identifier specified",
+                        404,
+                    ));
+                }
+                if let Some(pid) = parent_id.as_deref()
+                    && !store_ref
+                        .as_ref()
+                        .is_some_and(|s| s.resources.contains_key(pid))
+                {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        "Invalid Resource identifier specified",
+                        404,
+                    ));
+                }
                 let parent_path = parent_id
                     .as_deref()
-                    .and_then(|pid| store_ref.resources.get(pid))
+                    .and_then(|pid| store_ref.as_ref().and_then(|s| s.resources.get(pid)))
                     .map(|r| r.path.clone())
                     .unwrap_or_else(|| "/".to_string());
                 drop(store_ref);
@@ -251,13 +311,6 @@ impl ServiceProvider for ApiGatewayProvider {
                 };
 
                 let mut store = self.store.get_or_create(account_id, region);
-                if !store.apis.contains_key(&api_id) {
-                    return Ok(json_error(
-                        "NotFoundException",
-                        "Invalid API identifier specified",
-                        404,
-                    ));
-                }
                 store.resources.insert(resource_id.clone(), resource);
 
                 Ok(json_created(json!({
@@ -278,7 +331,9 @@ impl ServiceProvider for ApiGatewayProvider {
                         return Ok(json_error("BadRequestException", "restApiId required", 400));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "items": [] })));
+                };
                 let resources: Vec<Value> = store
                     .resources
                     .values()
@@ -463,7 +518,9 @@ impl ServiceProvider for ApiGatewayProvider {
                         return Ok(json_error("BadRequestException", "restApiId required", 400));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "items": [] })));
+                };
                 let deployments: Vec<Value> = store
                     .deployments
                     .values()
@@ -483,7 +540,9 @@ impl ServiceProvider for ApiGatewayProvider {
                         return Ok(json_error("BadRequestException", "restApiId required", 400));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "item": [] })));
+                };
                 let stages: Vec<Value> = store
                     .stages
                     .iter()
@@ -524,7 +583,13 @@ impl ServiceProvider for ApiGatewayProvider {
                         ));
                     }
                 };
-                let store = self.store.get_or_create(account_id, region);
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        "Invalid resource identifier specified",
+                        404,
+                    ));
+                };
                 if let Some(resource) = store.resources.get(&resource_id) {
                     if let Some(method) = resource.methods.get(&http_method) {
                         Ok(json_ok(json!({

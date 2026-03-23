@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::sync::Mutex;
 
+use axum::http::HeaderMap;
 use bytes::Bytes;
+use openstack_service_framework::SpooledBody;
 
 /// Full context for an in-flight AWS request as it passes through the handler chain.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RequestContext {
     /// Target AWS service (e.g., "s3", "sqs")
     pub service: String,
@@ -19,10 +22,13 @@ pub struct RequestContext {
     pub protocol: openstack_aws_protocol::AwsProtocol,
     /// Parsed request parameters as a unified JSON value
     pub params: serde_json::Value,
-    /// Raw request body bytes
-    pub raw_body: Bytes,
-    /// Request headers (keys lowercased)
-    pub headers: HashMap<String, String>,
+    /// Raw request body bytes.
+    ///
+    /// `None` for S3 PutObject / UploadPart (body lives in `spooled_body`).
+    /// `Some(bytes)` for all other requests.
+    pub raw_body: Option<Bytes>,
+    /// Request headers
+    pub headers: HeaderMap,
     /// URL path
     pub path: String,
     /// HTTP method
@@ -31,27 +37,32 @@ pub struct RequestContext {
     pub query_params: HashMap<String, String>,
     /// Unique request ID for tracing
     pub request_id: String,
+    /// Spooled request body (for large payloads, may be on disk)
+    pub spooled_body: Option<SpooledBody>,
 }
 
 impl RequestContext {
+    /// Look up a request header by name (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(&name.to_lowercase()).map(|s| s.as_str())
+        self.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
-    pub fn to_service_request_context(
-        &self,
-    ) -> openstack_service_framework::traits::RequestContext {
+    /// Convert to the service-framework `RequestContext`, consuming self
+    /// (because `SpooledBody` is not `Clone`).
+    pub fn to_service_request_context(self) -> openstack_service_framework::traits::RequestContext {
         openstack_service_framework::traits::RequestContext {
-            service: self.service.clone(),
-            operation: self.operation.clone(),
-            region: self.region.clone(),
-            account_id: self.account_id.clone(),
-            request_body: self.params.clone(),
-            raw_body: self.raw_body.clone(),
-            headers: self.headers.clone(),
-            path: self.path.clone(),
-            method: self.method.clone(),
-            query_params: self.query_params.clone(),
+            service: self.service,
+            operation: self.operation,
+            region: self.region,
+            account_id: self.account_id,
+            request_body: self.params,
+            raw_body: self.raw_body,
+            headers: self.headers,
+            path: self.path,
+            method: self.method,
+            query_params: self.query_params,
+            request_id: self.request_id,
+            spooled_body: self.spooled_body.map(Mutex::new),
         }
     }
 }

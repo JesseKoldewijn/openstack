@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.2",
+  "service": "s3",
+  "protocol": "rest_xml",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create",
+          "title": "Create bucket",
+          "operation": { "method": "PUT", "path": "/{{inputs.resource_name}}" },
+          "captures": [{ "name": "resource_name", "source": "inputs.resource_name" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete",
+          "title": "Delete bucket",
+          "operation": { "method": "DELETE", "path": "/{{captures.resource_name}}" },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}

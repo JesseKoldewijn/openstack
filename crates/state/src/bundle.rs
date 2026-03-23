@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -24,18 +25,73 @@ impl<S: Default + Send + Sync + Clone + 'static> AccountRegionBundle<S> {
         account_id: &str,
         region: &str,
     ) -> dashmap::mapref::one::RefMut<'_, AccountRegionKey, S> {
+        // `AccountRegionKey::new` performs a single allocation for the combined
+        // key — only incurred on the write path (insert-if-absent).
         let key = AccountRegionKey::new(account_id, region);
         self.stores.entry(key).or_default()
     }
 
     /// Get an immutable reference to the store for a given account + region, if it exists.
+    ///
+    /// Uses a stack-allocated buffer for the lookup key to avoid heap allocation
+    /// on the read hot path.  AWS account IDs (12 chars) + regions (≤ 20 chars)
+    /// fit comfortably within the 64-byte stack buffer.
     pub fn get(
         &self,
         account_id: &str,
         region: &str,
     ) -> Option<dashmap::mapref::one::Ref<'_, AccountRegionKey, S>> {
-        let key = AccountRegionKey::new(account_id, region);
-        self.stores.get(&key)
+        let a = account_id.as_bytes();
+        let r = region.as_bytes();
+        let total = a.len() + 1 + r.len(); // separator is one null byte
+
+        if total <= 63 {
+            // Fast path: build the combined key on the stack.
+            let mut buf = [0u8; 64];
+            buf[..a.len()].copy_from_slice(a);
+            buf[a.len()] = 0; // null byte separator
+            buf[a.len() + 1..total].copy_from_slice(r);
+            // SAFETY: `a` and `r` are valid UTF-8 (from `&str`); the null byte
+            // is valid in a UTF-8 `str` (it is a one-byte sequence U+0000).
+            let key_str = unsafe { std::str::from_utf8_unchecked(&buf[..total]) };
+            self.stores.get(key_str)
+        } else {
+            // Slow path: fall back to a heap-allocated key for unusually long
+            // account IDs or region strings (should not occur in practice).
+            let key = AccountRegionKey::new(account_id, region);
+            self.stores.get(key.borrow() as &str)
+        }
+    }
+
+    /// Get a mutable reference to the store for a given account + region, if it exists.
+    ///
+    /// Uses the same stack-allocated lookup key optimization as [`get`] to
+    /// avoid heap allocation on the write hot path.
+    pub fn get_mut(
+        &self,
+        account_id: &str,
+        region: &str,
+    ) -> Option<dashmap::mapref::one::RefMut<'_, AccountRegionKey, S>> {
+        let a = account_id.as_bytes();
+        let r = region.as_bytes();
+        let total = a.len() + 1 + r.len(); // separator is one null byte
+
+        if total <= 63 {
+            // Fast path: build the combined key on the stack.
+            let mut buf = [0u8; 64];
+            buf[..a.len()].copy_from_slice(a);
+            buf[a.len()] = 0; // null byte separator
+            buf[a.len() + 1..total].copy_from_slice(r);
+            // SAFETY: `a` and `r` are valid UTF-8 (from `&str`); the null byte
+            // is valid in a UTF-8 `str` (it is a one-byte sequence U+0000).
+            let key_str = unsafe { std::str::from_utf8_unchecked(&buf[..total]) };
+            self.stores.get_mut(key_str)
+        } else {
+            // Slow path: fall back to a heap-allocated key for unusually long
+            // account IDs or region strings (should not occur in practice).
+            let key = AccountRegionKey::new(account_id, region);
+            self.stores.get_mut(key.borrow() as &str)
+        }
     }
 
     /// Returns all (key, store) pairs (for iteration/serialization).
@@ -57,7 +113,7 @@ impl<S: Default + Send + Sync + Clone + 'static> AccountRegionBundle<S> {
 
     /// Clears all state from all accounts and regions.
     pub fn clear(&self) {
-        self.stores.clear();
+        self.stores.clear()
     }
 }
 
@@ -99,7 +155,7 @@ impl<S: Default + Send + Sync + Clone + 'static> AccountBundle<S> {
     }
 
     pub fn clear(&self) {
-        self.stores.clear();
+        self.stores.clear()
     }
 }
 
@@ -148,5 +204,50 @@ mod tests {
         assert_eq!(bundle.len(), 1);
         bundle.clear();
         assert_eq!(bundle.len(), 0);
+    }
+
+    #[test]
+    fn test_get_is_zero_alloc_compatible() {
+        // Verify that get() finds keys inserted via get_or_create().
+        let bundle: AccountRegionBundle<TestStore> = AccountRegionBundle::new();
+        bundle.get_or_create("123456789012", "us-east-1").count = 99;
+        let found = bundle.get("123456789012", "us-east-1");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().count, 99);
+    }
+
+    #[test]
+    fn test_get_mut_is_zero_alloc_compatible() {
+        let bundle: AccountRegionBundle<TestStore> = AccountRegionBundle::new();
+        bundle.get_or_create("123456789012", "us-east-1").count = 1;
+
+        {
+            let mut found = bundle.get_mut("123456789012", "us-east-1");
+            assert!(found.is_some());
+            found.as_mut().unwrap().count = 7;
+        }
+
+        assert_eq!(bundle.get("123456789012", "us-east-1").unwrap().count, 7);
+    }
+
+    #[test]
+    fn test_heap_fallback_long_key_lookup() {
+        let bundle: AccountRegionBundle<TestStore> = AccountRegionBundle::new();
+        let long_account = "12345678901234567890123456789012345678901234567890";
+        let long_region = "us-east-1-very-long-region-segment";
+
+        bundle.get_or_create(long_account, long_region).count = 5;
+
+        let found = bundle.get(long_account, long_region);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().count, 5);
+
+        {
+            let mut found_mut = bundle.get_mut(long_account, long_region);
+            assert!(found_mut.is_some());
+            found_mut.as_mut().unwrap().count = 9;
+        }
+
+        assert_eq!(bundle.get(long_account, long_region).unwrap().count, 9);
     }
 }

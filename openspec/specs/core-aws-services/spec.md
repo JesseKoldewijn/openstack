@@ -1,7 +1,7 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: S3 object storage emulation
-The system SHALL emulate the Amazon S3 API including bucket operations (CreateBucket, DeleteBucket, ListBuckets, HeadBucket), object operations (PutObject, GetObject, DeleteObject, HeadObject, CopyObject, ListObjectsV2), multipart uploads (CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload), and bucket policies/ACLs.
+The system SHALL emulate the Amazon S3 API including bucket operations (CreateBucket, DeleteBucket, ListBuckets, HeadBucket), object operations (PutObject, GetObject, DeleteObject, HeadObject, CopyObject, ListObjectsV2), multipart uploads (CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload), and bucket policies/ACLs. S3 emulation SHALL meet required-lane performance and resource envelopes while preserving functional parity, and SHALL support parity-declared persistence behavior in durable modes.
 
 #### Scenario: Create and use a bucket
 - **WHEN** a client calls `CreateBucket` with bucket name `my-bucket`, then `PutObject` with key `test.txt` and body `hello`
@@ -19,8 +19,12 @@ The system SHALL emulate the Amazon S3 API including bucket operations (CreateBu
 - **WHEN** a client generates a pre-signed URL for `GetObject` and makes an HTTP GET to that URL
 - **THEN** the gateway SHALL serve the object without requiring an Authorization header
 
+#### Scenario: Durable mode survives restart
+- **WHEN** S3 state is created in a declared durable mode and the runtime restarts
+- **THEN** bucket and object visibility after restart SHALL remain parity-consistent with declared durability semantics
+
 ### Requirement: SQS message queue emulation
-The system SHALL emulate the Amazon SQS API including queue operations (CreateQueue, DeleteQueue, ListQueues, GetQueueUrl, GetQueueAttributes, SetQueueAttributes), message operations (SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, ChangeMessageVisibility), and dead-letter queue support.
+The system SHALL emulate the Amazon SQS API including queue operations (CreateQueue, DeleteQueue, ListQueues, GetQueueUrl, GetQueueAttributes, SetQueueAttributes), message operations (SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, ChangeMessageVisibility), and dead-letter queue support. SQS emulation SHALL satisfy required-lane latency/throughput/resource envelopes and persistence parity semantics in declared durable modes.
 
 #### Scenario: Send and receive a message
 - **WHEN** a client creates a queue, sends a message with body `test`, then calls `ReceiveMessage`
@@ -38,8 +42,12 @@ The system SHALL emulate the Amazon SQS API including queue operations (CreateQu
 - **WHEN** messages are sent to a FIFO queue (`.fifo` suffix) with the same message group ID
 - **THEN** `ReceiveMessage` SHALL return them in the order they were sent
 
+#### Scenario: Queue state survives durable restart
+- **WHEN** queue and message state exist in a declared durable mode and the runtime restarts
+- **THEN** queue existence and eligible message visibility SHALL remain parity-consistent after restart
+
 ### Requirement: SNS notification emulation
-The system SHALL emulate the Amazon SNS API including topic operations (CreateTopic, DeleteTopic, ListTopics), subscription operations (Subscribe, Unsubscribe, ListSubscriptions), and message publishing (Publish, PublishBatch). The system SHALL support SQS, HTTP/HTTPS, and Lambda subscription protocols.
+The system SHALL emulate the Amazon SNS API including topic operations (CreateTopic, DeleteTopic, ListTopics), subscription operations (Subscribe, Unsubscribe, ListSubscriptions), and message publishing (Publish, PublishBatch). The system SHALL support SQS, HTTP/HTTPS, and Lambda subscription protocols. SNS emulation SHALL maintain parity behavior while meeting class-specific performance/resource envelopes.
 
 #### Scenario: Publish to SQS subscriber
 - **WHEN** an SQS queue is subscribed to an SNS topic and a message is published to the topic
@@ -54,7 +62,7 @@ The system SHALL emulate the Amazon SNS API including topic operations (CreateTo
 - **THEN** the system SHALL POST the notification to the HTTP endpoint
 
 ### Requirement: DynamoDB table emulation
-The system SHALL emulate the Amazon DynamoDB API including table operations (CreateTable, DeleteTable, DescribeTable, ListTables, UpdateTable), item operations (PutItem, GetItem, DeleteItem, UpdateItem, Query, Scan, BatchGetItem, BatchWriteItem, TransactGetItems, TransactWriteItems), and secondary indexes (GSI, LSI).
+The system SHALL emulate the Amazon DynamoDB API including table operations (CreateTable, DeleteTable, DescribeTable, ListTables, UpdateTable), item operations (PutItem, GetItem, DeleteItem, UpdateItem, Query, Scan, BatchGetItem, BatchWriteItem, TransactGetItems, TransactWriteItems), and secondary indexes (GSI, LSI). DynamoDB emulation SHALL preserve parity semantics while satisfying class-specific performance/resource envelopes and declared persistence durability semantics.
 
 #### Scenario: CRUD operations
 - **WHEN** a table with partition key `pk` is created and an item `{pk: "1", data: "hello"}` is put
@@ -71,6 +79,10 @@ The system SHALL emulate the Amazon DynamoDB API including table operations (Cre
 #### Scenario: Conditional write failure
 - **WHEN** `PutItem` is called with a condition expression `attribute_not_exists(pk)` and the item already exists
 - **THEN** the operation SHALL fail with `ConditionalCheckFailedException`
+
+#### Scenario: Durable table state survives restart
+- **WHEN** table and item state are created in a declared durable mode and the runtime restarts
+- **THEN** table metadata and item visibility SHALL remain parity-consistent after restart
 
 ### Requirement: DynamoDB Streams emulation
 The system SHALL emulate DynamoDB Streams, providing a change data capture stream for DynamoDB table modifications. The system SHALL support `DescribeStream`, `GetRecords`, `GetShardIterator`, and `ListStreams` operations.

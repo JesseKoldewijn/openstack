@@ -22,3 +22,8 @@ Thumbs.db
 
 # Build artifacts
 dist/
+artifacts/
+
+# AWS CLI installer artifacts
+aws/
+awscliv2.zip

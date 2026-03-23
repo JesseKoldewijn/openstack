@@ -1,0 +1,17 @@
+{
+  "service": "sqs",
+  "protocol": "query",
+  "steps": [
+    {
+      "operation": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=CreateQueue&QueueName=fixture-q&Version=2012-11-05"
+      },
+      "response": {
+        "status": 200,
+        "body": "<CreateQueueResponse><QueueUrl>fixture-q</QueueUrl></CreateQueueResponse>"
+      }
+    }
+  ]
+}

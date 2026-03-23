@@ -11,16 +11,18 @@ fn make_ctx(operation: &str, xml_body: &str, path: &str, method: &str) -> Reques
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::from(xml_body.as_bytes().to_vec()),
-        headers: HashMap::new(),
+        raw_body: Some(Bytes::from(xml_body.as_bytes().to_vec())),
+        headers: Default::default(),
         path: path.to_string(),
         method: method.to_string(),
         query_params: HashMap::new(),
+        request_id: String::new(),
+        spooled_body: None,
     }
 }
 
 fn body_str(resp: &DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 /// Extract text content of a simple XML tag (first occurrence)
@@ -271,4 +273,23 @@ async fn test_list_resource_record_sets() {
     assert!(body.contains("b.listrr.com"));
     assert!(body.contains("10.0.0.1"));
     assert!(body.contains("example.com"));
+}
+
+#[tokio::test]
+async fn test_list_resource_record_sets_missing_zone_returns_no_such_hosted_zone() {
+    let p = Route53Provider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListResourceRecordSets",
+            "",
+            "/2013-04-01/hostedzone/Z1D633PJN98FT9/rrset",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    assert_eq!(resp.content_type, "text/xml");
+    let body = body_str(&resp);
+    assert!(body.contains("<Code>NoSuchHostedZone</Code>"));
+    assert!(body.contains("<Message>No hosted zone found with ID: Z1D633PJN98FT9</Message>"));
 }

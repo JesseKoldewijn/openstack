@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.2",
+  "service": "cloudformation",
+  "protocol": "query",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create",
+          "title": "Create stack",
+          "operation": { "method": "POST", "path": "/", "body": "Action=CreateStack&StackName={{inputs.resource_name}}&TemplateBody=%7B%22Resources%22%3A%7B%7D%7D&Version=2010-05-15" },
+          "captures": [{ "name": "resource_name", "source": "inputs.resource_name" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete",
+          "title": "Delete stack",
+          "operation": { "method": "POST", "path": "/", "body": "Action=DeleteStack&StackName={{captures.resource_name}}&Version=2010-05-15" },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}

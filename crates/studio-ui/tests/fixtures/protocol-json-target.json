@@ -1,0 +1,15 @@
+{
+  "protocol": "json_target",
+  "operation": {
+    "method": "POST",
+    "path": "/",
+    "body": "{}"
+  },
+  "response": {
+    "status": 200,
+    "body": "{\"StreamDescription\":{\"StreamARN\":\"arn:aws:kinesis:us-east-1:000:stream/s1\"}}"
+  },
+  "captures": {
+    "stream_arn": "StreamDescription.StreamARN"
+  }
+}

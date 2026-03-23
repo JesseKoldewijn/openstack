@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -61,7 +61,7 @@ pub struct IamGroup {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct IamStore {
-    pub users: HashMap<String, IamUser>,
+    pub users: BTreeMap<String, IamUser>,
     pub roles: HashMap<String, IamRole>,
     pub policies: HashMap<String, IamPolicy>, // ARN → policy
     pub groups: HashMap<String, IamGroup>,

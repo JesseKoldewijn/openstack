@@ -1,0 +1,17 @@
+{
+  "service": "dynamodb",
+  "protocol": "json_target",
+  "steps": [
+    {
+      "operation": {
+        "method": "POST",
+        "path": "/",
+        "body": "{}"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"TableDescription\":{\"TableArn\":\"arn:aws:dynamodb:table/t1\"}}"
+      }
+    }
+  ]
+}

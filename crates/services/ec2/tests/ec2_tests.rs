@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use openstack_ec2::Ec2Provider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 
@@ -11,16 +10,18 @@ fn make_ctx(operation: &str, params: HashMap<String, String>) -> RequestContext 
         region: "us-east-1".to_string(),
         account_id: "000000000000".to_string(),
         request_body: serde_json::json!({}),
-        raw_body: Bytes::new(),
-        headers: HashMap::new(),
+        raw_body: None,
+        headers: Default::default(),
         path: "/".to_string(),
         method: "POST".to_string(),
         query_params: params,
+        request_id: String::new(),
+        spooled_body: None,
     }
 }
 
 fn body_str(resp: &openstack_service_framework::traits::DispatchResponse) -> String {
-    String::from_utf8_lossy(&resp.body).to_string()
+    String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +244,25 @@ async fn test_run_instances() {
     assert!(body.contains("ami-12345678"));
     assert!(body.contains("t2.micro"));
     assert!(body.contains("running"));
+}
+
+#[tokio::test]
+async fn test_terminate_missing_instance_returns_not_found() {
+    let p = Ec2Provider::new();
+    let mut params = HashMap::new();
+    params.insert(
+        "InstanceId.1".to_string(),
+        "i-1234567890abcdef0".to_string(),
+    );
+
+    let resp = p
+        .dispatch(&make_ctx("TerminateInstances", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("InvalidInstanceID.NotFound"));
+    assert!(body.contains("The instance ID 'i-1234567890abcdef0' does not exist"));
 }
 
 #[tokio::test]

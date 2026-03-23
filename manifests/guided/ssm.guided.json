@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.2",
+  "service": "ssm",
+  "protocol": "json_target",
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [{"id":"create","title":"Put parameter","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"AmazonSSM.PutParameter"},"body":"{\"Name\":\"/{{inputs.resource_name}}\",\"Type\":\"String\",\"Value\":\"value\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
+      "cleanup": [{"id":"delete","title":"Delete parameter","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"AmazonSSM.DeleteParameter"},"body":"{\"Name\":\"/{{captures.resource_name}}\"}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+    }
+  ]
+}

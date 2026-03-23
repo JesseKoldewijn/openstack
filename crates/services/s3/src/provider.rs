@@ -1,31 +1,149 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use digest::Digest as _;
+use openstack_service_framework::HashingReader;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
+use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
 
-use crate::store::S3Store;
+use crate::object_store::{ObjectFileStore, ObjectLocation};
+use crate::store::{ObjectDataRef, S3Store};
 
-pub struct S3Provider {
-    store: Arc<AccountRegionBundle<S3Store>>,
+/// Objects whose byte count is at or below this threshold are stored
+/// inline in the in-memory store (`ObjectDataRef::Inline`) rather than
+/// being written to the filesystem.  This eliminates all disk I/O on the
+/// hot GET/HEAD/LIST paths for the vast majority of emulator workloads.
+///
+/// Objects above the threshold are still written to disk and streamed
+/// from disk on reads, which is appropriate for large blobs.
+const INLINE_OBJECT_THRESHOLD: u64 = 256 * 1024; // 256 KiB
+
+/// A [`std::io::Read`] adapter that feeds every byte through a running MD5
+/// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
+/// so that hashing and disk writes happen on a blocking thread rather than
+/// a tokio worker.
+struct Md5Read<R> {
+    inner: R,
+    hasher: md5::Md5,
 }
 
-impl S3Provider {
-    pub fn new() -> Self {
+impl<R: std::io::Read> Md5Read<R> {
+    fn new(inner: R) -> Self {
         Self {
-            store: Arc::new(AccountRegionBundle::new()),
+            inner,
+            hasher: md5::Md5::new(),
+        }
+    }
+
+    fn finalize(self) -> md5::digest::Output<md5::Md5> {
+        self.hasher.finalize()
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for Md5Read<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.hasher.update(&buf[..n]);
+        }
+        Ok(n)
+    }
+}
+
+enum MultipartPartReader {
+    Inline(std::io::Cursor<Bytes>),
+    File(std::fs::File),
+}
+
+impl std::io::Read for MultipartPartReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Inline(reader) => std::io::Read::read(reader, buf),
+            Self::File(reader) => std::io::Read::read(reader, buf),
         }
     }
 }
 
-impl Default for S3Provider {
-    fn default() -> Self {
-        Self::new()
+struct MultipartRead {
+    readers: VecDeque<MultipartPartReader>,
+}
+
+impl MultipartRead {
+    fn from_data_refs(data_refs: Vec<ObjectDataRef>) -> io::Result<Self> {
+        let mut readers = VecDeque::with_capacity(data_refs.len());
+        for data_ref in data_refs {
+            match data_ref {
+                ObjectDataRef::Inline(bytes) => {
+                    readers.push_back(MultipartPartReader::Inline(std::io::Cursor::new(bytes)));
+                }
+                ObjectDataRef::FileRef(path) => {
+                    readers.push_back(MultipartPartReader::File(std::fs::File::open(path)?));
+                }
+            }
+        }
+        Ok(Self { readers })
+    }
+}
+
+impl std::io::Read for MultipartRead {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while let Some(reader) = self.readers.front_mut() {
+            let n = std::io::Read::read(reader, buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            self.readers.pop_front();
+        }
+        Ok(0)
+    }
+}
+
+pub struct S3Provider {
+    store: Arc<AccountRegionBundle<S3Store>>,
+    /// Path for S3 object file storage.
+    s3_objects_dir: PathBuf,
+    /// Filesystem object store, initialized in `start()`.
+    object_store: tokio::sync::OnceCell<ObjectFileStore>,
+}
+
+impl S3Provider {
+    pub fn new(s3_objects_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            store: Arc::new(AccountRegionBundle::new()),
+            s3_objects_dir: s3_objects_dir.into(),
+            object_store: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// Returns a [`PersistableStore`](openstack_state::PersistableStore) that
+    /// shares the same in-memory store as this provider.  Call this **before**
+    /// consuming the provider via `ServicePluginManager::register()`.
+    pub fn persistable_store(&self) -> Arc<dyn openstack_state::PersistableStore> {
+        Arc::new(crate::persistence::S3PersistableStore::new(
+            Arc::clone(&self.store),
+            self.s3_objects_dir.clone(),
+        ))
+    }
+
+    /// Get the object file store, panicking if not yet initialized.
+    ///
+    /// This is safe because `ensure_running()` always calls `start()`
+    /// before any `dispatch()` call.
+    fn file_store(&self) -> &ObjectFileStore {
+        self.object_store
+            .get()
+            .expect("ObjectFileStore not initialized — start() not called")
     }
 }
 
@@ -40,8 +158,8 @@ fn xml_ok(xml: &str) -> DispatchResponse {
 fn xml_response(status: u16, xml: String) -> DispatchResponse {
     DispatchResponse {
         status_code: status,
-        body: Bytes::from(xml.into_bytes()),
-        content_type: "text/xml".to_string(),
+        body: ResponseBody::Buffered(Bytes::from(xml.into_bytes())),
+        content_type: Cow::Borrowed("application/xml"),
         headers: Vec::new(),
     }
 }
@@ -56,11 +174,22 @@ fn s3_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     )
 }
 
+fn s3_bucket_error(code: &str, message: &str, bucket: &str, status: u16) -> DispatchResponse {
+    xml_response(
+        status,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<Error><Code>{code}</Code><Message>{message}</Message><RequestId>00000000-0000-0000-0000-000000000000</RequestId><BucketName>{}</BucketName></Error>",
+            xml_escape(bucket)
+        ),
+    )
+}
+
 fn empty_200() -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
-        body: Bytes::new(),
-        content_type: String::new(),
+        body: ResponseBody::Buffered(Bytes::new()),
+        content_type: Cow::Borrowed(""),
         headers: Vec::new(),
     }
 }
@@ -68,8 +197,8 @@ fn empty_200() -> DispatchResponse {
 fn empty_204() -> DispatchResponse {
     DispatchResponse {
         status_code: 204,
-        body: Bytes::new(),
-        content_type: String::new(),
+        body: ResponseBody::Buffered(Bytes::new()),
+        content_type: Cow::Borrowed(""),
         headers: Vec::new(),
     }
 }
@@ -91,13 +220,6 @@ fn key_from_path(path: &str) -> String {
     let path = path.trim_start_matches('/');
     let slash = path.find('/').unwrap_or(path.len());
     path[slash..].trim_start_matches('/').to_string()
-}
-
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 // ---------------------------------------------------------------------------
@@ -123,27 +245,45 @@ fn handle_create_bucket(store: &mut S3Store, ctx: &RequestContext) -> DispatchRe
 
     DispatchResponse {
         status_code: 200,
-        body: Bytes::new(),
-        content_type: String::new(),
+        body: ResponseBody::Buffered(Bytes::new()),
+        content_type: Cow::Borrowed(""),
         headers: vec![("Location".to_string(), format!("/{bucket}"))],
     }
 }
 
-fn handle_delete_bucket(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
+/// Async DeleteBucket — also removes the bucket directory from filesystem.
+async fn handle_delete_bucket_async(
+    store_bundle: &AccountRegionBundle<S3Store>,
+    file_store: &ObjectFileStore,
+    ctx: &RequestContext,
+) -> DispatchResponse {
     let bucket = match bucket_from_path(&ctx.path) {
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
 
-    if !store.bucket_exists(&bucket) {
-        return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+    {
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        if !store.as_ref().is_some_and(|s| s.bucket_exists(&bucket)) {
+            return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+        }
+        if !store.as_ref().is_some_and(|s| {
+            s.is_bucket_empty(&bucket) && !s.has_incomplete_multipart_uploads(&bucket)
+        }) {
+            return s3_error("BucketNotEmpty", "The bucket is not empty", 409);
+        }
     }
 
-    if !store.is_bucket_empty(&bucket) {
-        return s3_error("BucketNotEmpty", "The bucket is not empty", 409);
+    {
+        let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+        store.delete_bucket(&bucket);
     }
 
-    store.delete_bucket(&bucket);
+    // Clean up bucket directory on filesystem (async I/O)
+    let _ = file_store
+        .delete_bucket_dir(&ctx.account_id, &ctx.region, &bucket)
+        .await;
+
     empty_204()
 }
 
@@ -171,7 +311,7 @@ fn handle_list_buckets(store: &S3Store, _ctx: &RequestContext) -> DispatchRespon
     for b in buckets {
         xml.push_str(&format!(
             "<Bucket><Name>{}</Name><CreationDate>{}</CreationDate></Bucket>",
-            escape_xml(&b.name),
+            xml_escape(&b.name),
             b.creation_date.format("%Y-%m-%dT%H:%M:%S.000Z")
         ));
     }
@@ -187,7 +327,14 @@ fn handle_get_bucket_location(store: &S3Store, ctx: &RequestContext) -> Dispatch
 
     let b = match store.get_bucket(&bucket) {
         Some(b) => b,
-        None => return s3_error("NoSuchBucket", "The specified bucket does not exist", 404),
+        None => {
+            return s3_bucket_error(
+                "NoSuchBucket",
+                "The specified bucket does not exist",
+                &bucket,
+                404,
+            );
+        }
     };
 
     // us-east-1 is represented as empty string in the XML
@@ -207,99 +354,346 @@ fn handle_get_bucket_location(store: &S3Store, ctx: &RequestContext) -> Dispatch
 // Object operations
 // ---------------------------------------------------------------------------
 
-fn handle_put_object(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
+/// Async PutObject — writes body to filesystem via ObjectFileStore, then
+/// stores metadata in S3Store.
+async fn handle_put_object_async(
+    store_bundle: &AccountRegionBundle<S3Store>,
+    file_store: &ObjectFileStore,
+    ctx: &RequestContext,
+) -> DispatchResponse {
     let bucket = match bucket_from_path(&ctx.path) {
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
     let key = key_from_path(&ctx.path);
 
-    if !store.bucket_exists(&bucket) {
-        return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
-    }
+    // Preflight store lookup with one mutable guard: validate bucket existence and
+    // read versioning state without taking separate read/write locks.
+    let versioning_enabled = {
+        let store = match store_bundle.get_mut(&ctx.account_id, &ctx.region) {
+            Some(store) => store,
+            None => return s3_error("NoSuchBucket", "The specified bucket does not exist", 404),
+        };
+
+        let bucket_state = match store.get_bucket(&bucket) {
+            Some(b) => b,
+            None => return s3_error("NoSuchBucket", "The specified bucket does not exist", 404),
+        };
+        bucket_state.versioning.as_str() == "Enabled"
+    };
 
     let content_type = ctx
         .headers
         .get("content-type")
-        .cloned()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
 
     let metadata: HashMap<String, String> = ctx
         .headers
         .iter()
         .filter_map(|(k, v)| {
-            k.strip_prefix("x-amz-meta-")
-                .map(|mk| (mk.to_string(), v.clone()))
+            k.as_str()
+                .strip_prefix("x-amz-meta-")
+                .and_then(|mk| v.to_str().ok().map(|mv| (mk.to_string(), mv.to_string())))
         })
         .collect();
 
-    let data = ctx.raw_body.to_vec();
-    store.put_object(&bucket, &key, data, content_type, metadata);
+    // Generate version_id now so we can use it for the file path
+    let version_id = if versioning_enabled {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        "null".to_string()
+    };
 
-    let version = store.get_object(&bucket, &key);
-    let mut headers = Vec::new();
-    if let Some(v) = version {
-        headers.push(("ETag".to_string(), v.etag.clone()));
-        if v.version_id != "null" {
-            headers.push(("x-amz-version-id".to_string(), v.version_id.clone()));
+    // Get body data — prefer spooled_body (streaming, no full copy in memory),
+    // fall back to raw_body for unit-test contexts where spooled_body is None.
+    let (etag, size, object_data) = if let Some(mutex) = ctx.spooled_body.as_ref() {
+        // Take the SpooledBody out of the Mutex so we can consume it into a reader.
+        // The guard must be dropped before any .await, so use a block scope.
+        let (spooled, spooled_len) = {
+            let mut guard = mutex.lock().expect("spooled_body mutex poisoned");
+            let spooled = std::mem::replace(
+                &mut *guard,
+                openstack_service_framework::SpooledBody::new(0),
+            );
+            let spooled_len = spooled.len() as u64;
+            (spooled, spooled_len)
+        };
+
+        if spooled_len <= INLINE_OBJECT_THRESHOLD {
+            // Small object: read into memory, hash on the way.
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
+            let mut body_bytes = Vec::with_capacity(spooled_len as usize);
+            if let Err(e) =
+                tokio::io::AsyncReadExt::read_to_end(&mut hashing_reader, &mut body_bytes).await
+            {
+                warn!(error = %e, "Failed to read spooled body");
+                return s3_error("InternalError", "Failed to read request body", 500);
+            }
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            let size = body_bytes.len() as u64;
+            (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
+        } else {
+            // Large object: run sync I/O in spawn_blocking to avoid blocking
+            // tokio worker threads during the copy loop.
+            let file_store_clone = file_store.clone();
+            let account_id_c = ctx.account_id.clone();
+            let region_c = ctx.region.clone();
+            let bucket_c = bucket.clone();
+            let key_c = key.clone();
+            let version_id_c = version_id.clone();
+
+            let result = tokio::task::spawn_blocking(move || {
+                let mut md5_reader = Md5Read::new(spooled);
+                let (file_path, bytes_written) = file_store_clone.write_object_from_sync_reader(
+                    &account_id_c,
+                    &region_c,
+                    &bucket_c,
+                    &key_c,
+                    &version_id_c,
+                    &mut md5_reader,
+                )?;
+                let digest = md5_reader.finalize();
+                let etag = format!("\"{}\"", hex::encode(digest));
+                io::Result::Ok((etag, bytes_written, file_path))
+            })
+            .await;
+
+            match result {
+                Ok(Ok((etag, bytes_written, file_path))) => {
+                    (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Failed to stream object to filesystem");
+                    return s3_error("InternalError", "Failed to store object", 500);
+                }
+                Err(_) => {
+                    return s3_error("InternalError", "Object write task panicked", 500);
+                }
+            }
         }
+    } else {
+        // Fallback for unit-test contexts where spooled_body is None.
+        let body_bytes = ctx.raw_body_bytes().to_vec();
+        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&body_bytes)));
+        let size = body_bytes.len() as u64;
+        let object_data = if size <= INLINE_OBJECT_THRESHOLD {
+            ObjectDataRef::Inline(Bytes::from(body_bytes))
+        } else {
+            let file_path = match file_store
+                .write_object(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &key,
+                    &version_id,
+                    &body_bytes,
+                )
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "Failed to write object to filesystem");
+                    return s3_error("InternalError", "Failed to store object", 500);
+                }
+            };
+            ObjectDataRef::FileRef(file_path)
+        };
+        (etag, size, object_data)
+    };
+
+    let new_file_path = match &object_data {
+        ObjectDataRef::FileRef(path) => Some(path.clone()),
+        _ => None,
+    };
+
+    // Build version and store in S3Store (short-lived guard)
+    let version = crate::store::ObjectVersion {
+        version_id: version_id.clone(),
+        last_modified: chrono::Utc::now(),
+        etag: etag.clone(),
+        content_type,
+        content_encoding: None,
+        content_disposition: None,
+        cache_control: None,
+        size,
+        metadata,
+        acl: "private".to_string(),
+        data: object_data,
+        delete_marker: false,
+    };
+
+    let prev = {
+        let mut store = match store_bundle.get_mut(&ctx.account_id, &ctx.region) {
+            Some(store) => store,
+            None => {
+                if let Some(path) = new_file_path.as_ref() {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
+                return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+            }
+        };
+
+        if !store.bucket_exists(&bucket) {
+            drop(store);
+            if let Some(path) = new_file_path.as_ref() {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+        }
+
+        store.put_object_version(&bucket, &key, version)
+    };
+
+    let replaced_file_path = if version_id == "null" {
+        prev.and_then(|old| match old {
+            ObjectDataRef::FileRef(path) => {
+                if new_file_path.as_deref() == Some(path.as_path()) {
+                    None
+                } else {
+                    Some(path)
+                }
+            }
+            _ => None,
+        })
+    } else {
+        None
+    };
+
+    if let Some(path) = replaced_file_path {
+        let _ = tokio::fs::remove_file(path).await;
     }
+
+    let response_headers = {
+        let mut headers = vec![("ETag".to_string(), etag)];
+        if version_id != "null" {
+            headers.push(("x-amz-version-id".to_string(), version_id));
+        }
+        headers
+    };
 
     DispatchResponse {
         status_code: 200,
-        body: Bytes::new(),
-        content_type: String::new(),
-        headers,
+        body: ResponseBody::Buffered(Bytes::new()),
+        content_type: Cow::Borrowed(""),
+        headers: response_headers,
     }
 }
 
-fn handle_get_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse {
+/// Async GetObject — streams file-backed objects via ReaderStream.
+async fn handle_get_object_async(
+    store_bundle: &AccountRegionBundle<S3Store>,
+    ctx: &RequestContext,
+) -> DispatchResponse {
     let bucket = match bucket_from_path(&ctx.path) {
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
     let key = key_from_path(&ctx.path);
 
-    if !store.bucket_exists(&bucket) {
-        return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
-    }
+    // Short-lived guard to read version metadata
+    let version_info = {
+        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else {
+            return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+        };
 
-    // Support versionId query param
-    let version_id = ctx.query_params.get("versionId").cloned();
+        if !store.bucket_exists(&bucket) {
+            return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+        }
 
-    let version = if let Some(ref vid) = version_id {
-        store.get_object_version(&bucket, &key, vid)
-    } else {
-        store.get_object(&bucket, &key)
+        let version_id = ctx.query_params.get("versionId").cloned();
+        let version = if let Some(ref vid) = version_id {
+            store.get_object_version(&bucket, &key, vid)
+        } else {
+            store.get_object(&bucket, &key)
+        };
+
+        version.map(|v| {
+            (
+                v.data.clone(),
+                v.etag.clone(),
+                v.last_modified,
+                v.size,
+                v.version_id.clone(),
+                v.content_type.clone(),
+                v.content_encoding.clone(),
+                v.metadata.clone(),
+            )
+        })
     };
 
-    match version {
+    match version_info {
         None => s3_error("NoSuchKey", "The specified key does not exist", 404),
-        Some(v) => {
+        Some((
+            data,
+            etag,
+            last_modified,
+            size,
+            version_id,
+            content_type,
+            content_encoding,
+            metadata,
+        )) => {
             let mut headers = vec![
-                ("ETag".to_string(), v.etag.clone()),
+                ("ETag".to_string(), etag),
                 (
                     "Last-Modified".to_string(),
-                    v.last_modified
+                    last_modified
                         .format("%a, %d %b %Y %H:%M:%S GMT")
                         .to_string(),
                 ),
-                ("Content-Length".to_string(), v.size.to_string()),
+                ("Content-Length".to_string(), size.to_string()),
             ];
-            if v.version_id != "null" {
-                headers.push(("x-amz-version-id".to_string(), v.version_id.clone()));
+            if version_id != "null" {
+                headers.push(("x-amz-version-id".to_string(), version_id));
             }
-            for (mk, mv) in &v.metadata {
+            for (mk, mv) in &metadata {
                 headers.push((format!("x-amz-meta-{mk}"), mv.clone()));
             }
-            if let Some(enc) = &v.content_encoding {
+            if let Some(enc) = &content_encoding {
                 headers.push(("Content-Encoding".to_string(), enc.clone()));
             }
 
+            let body = match data {
+                ObjectDataRef::Inline(bytes) => ResponseBody::Buffered(bytes),
+                ObjectDataRef::FileRef(path) => {
+                    // For small objects read the entire file into memory and
+                    // return a buffered response — this avoids the spawn_blocking
+                    // overhead of ReaderStream for tiny payloads.
+                    if size <= INLINE_OBJECT_THRESHOLD {
+                        match tokio::fs::read(&path).await {
+                            Ok(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
+                            Err(e) => {
+                                warn!(error = %e, path = %path.display(), "Failed to read object file");
+                                return s3_error("InternalError", "Failed to read object", 500);
+                            }
+                        }
+                    } else {
+                        match ObjectFileStore::read_object_at(&path).await {
+                            Ok(file) => {
+                                // Stream directly through ReaderStream.
+                                const READ_BUF: usize = 512 * 1024;
+                                let stream = ReaderStream::with_capacity(file, READ_BUF);
+                                ResponseBody::Streaming {
+                                    stream: Box::pin(stream),
+                                    content_length: Some(size),
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, path = %path.display(), "Failed to open object file for streaming");
+                                return s3_error("InternalError", "Failed to read object", 500);
+                            }
+                        }
+                    }
+                }
+            };
+
             DispatchResponse {
                 status_code: 200,
-                body: Bytes::from(v.data.clone()),
-                content_type: v.content_type.clone(),
+                body,
+                content_type: Cow::Owned(content_type),
                 headers,
             }
         }
@@ -338,63 +732,99 @@ fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse
             }
             DispatchResponse {
                 status_code: 200,
-                body: Bytes::new(),
-                content_type: v.content_type.clone(),
+                body: ResponseBody::Buffered(Bytes::new()),
+                content_type: Cow::Owned(v.content_type.clone()),
                 headers,
             }
         }
     }
 }
 
-fn handle_delete_object(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
+/// Async DeleteObject — deletes backing file for FileRef data.
+async fn handle_delete_object_async(
+    store_bundle: &AccountRegionBundle<S3Store>,
+    ctx: &RequestContext,
+) -> DispatchResponse {
     let bucket = match bucket_from_path(&ctx.path) {
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
     let key = key_from_path(&ctx.path);
 
-    if !store.bucket_exists(&bucket) {
-        return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+    {
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        if !store.as_ref().is_some_and(|s| s.bucket_exists(&bucket)) {
+            return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+        }
     }
 
-    let version_id = ctx.query_params.get("versionId").cloned();
+    let version_id_param = ctx.query_params.get("versionId").cloned();
     let mut headers = Vec::new();
 
-    if let Some(vid) = version_id {
-        store.delete_object_version(&bucket, &key, &vid);
+    if let Some(vid) = version_id_param {
+        // Delete a specific version — get it first for file cleanup
+        let removed = {
+            let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+            store.delete_object_version(&bucket, &key, &vid)
+        };
+        if let Some(removed_version) = &removed
+            && let ObjectDataRef::FileRef(path) = &removed_version.data
+        {
+            let _ = tokio::fs::remove_file(path).await;
+        }
         headers.push(("x-amz-version-id".to_string(), vid));
-    } else if let Some(deleted) = store.delete_object(&bucket, &key)
-        && deleted.delete_marker
-    {
-        headers.push(("x-amz-delete-marker".to_string(), "true".to_string()));
-        headers.push(("x-amz-version-id".to_string(), deleted.version_id));
+    } else {
+        let deleted = {
+            let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+            store.delete_object(&bucket, &key)
+        };
+        if let Some(deleted_version) = &deleted {
+            // If not versioned, the actual object was removed — clean up file
+            if !deleted_version.delete_marker
+                && let ObjectDataRef::FileRef(path) = &deleted_version.data
+            {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            if deleted_version.delete_marker {
+                headers.push(("x-amz-delete-marker".to_string(), "true".to_string()));
+                headers.push((
+                    "x-amz-version-id".to_string(),
+                    deleted_version.version_id.clone(),
+                ));
+            }
+        }
     }
 
     DispatchResponse {
         status_code: 204,
-        body: Bytes::new(),
-        content_type: String::new(),
+        body: ResponseBody::Buffered(Bytes::new()),
+        content_type: Cow::Borrowed(""),
         headers,
     }
 }
 
-fn handle_delete_objects(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
+/// Async DeleteObjects (batch) — deletes backing files for removed objects.
+async fn handle_delete_objects_async(
+    store_bundle: &AccountRegionBundle<S3Store>,
+    ctx: &RequestContext,
+) -> DispatchResponse {
     let bucket = match bucket_from_path(&ctx.path) {
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
 
-    if !store.bucket_exists(&bucket) {
-        return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+    {
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        if !store.as_ref().is_some_and(|s| s.bucket_exists(&bucket)) {
+            return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
+        }
     }
 
     // Parse the XML body for object keys
-    let body = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
 
-    // Simple XML key extraction (avoids pulling in another XML dep just for parsing here)
     let keys: Vec<(String, Option<String>)> = {
         let mut result = Vec::new();
-        // Each <Object><Key>...</Key><VersionId>...</VersionId></Object>
         let mut remaining = body;
         while let Some(obj_start) = remaining.find("<Object>") {
             remaining = &remaining[obj_start + 8..];
@@ -411,26 +841,42 @@ fn handle_delete_objects(store: &mut S3Store, ctx: &RequestContext) -> DispatchR
     };
 
     let mut deleted_xml = String::new();
-    let errors_xml = String::new();
+    let mut files_to_delete: Vec<PathBuf> = Vec::new();
 
-    for (key, version_id) in keys {
-        if let Some(vid) = version_id {
-            store.delete_object_version(&bucket, &key, &vid);
-            deleted_xml.push_str(&format!(
-                "<Deleted><Key>{}</Key><VersionId>{}</VersionId></Deleted>",
-                escape_xml(&key),
-                escape_xml(&vid)
-            ));
-        } else {
-            store.delete_object(&bucket, &key);
-            deleted_xml.push_str(&format!(
-                "<Deleted><Key>{}</Key></Deleted>",
-                escape_xml(&key)
-            ));
+    {
+        let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+
+        for (key, version_id) in &keys {
+            if let Some(vid) = version_id {
+                if let Some(removed) = store.delete_object_version(&bucket, key, vid)
+                    && let ObjectDataRef::FileRef(path) = &removed.data
+                {
+                    files_to_delete.push(path.clone());
+                }
+                deleted_xml.push_str(&format!(
+                    "<Deleted><Key>{}</Key><VersionId>{}</VersionId></Deleted>",
+                    xml_escape(key),
+                    xml_escape(vid)
+                ));
+            } else {
+                if let Some(removed) = store.delete_object(&bucket, key)
+                    && !removed.delete_marker
+                    && let ObjectDataRef::FileRef(path) = &removed.data
+                {
+                    files_to_delete.push(path.clone());
+                }
+                deleted_xml.push_str(&format!(
+                    "<Deleted><Key>{}</Key></Deleted>",
+                    xml_escape(key)
+                ));
+            }
         }
     }
 
-    let _ = errors_xml; // no errors expected in normal path
+    // Clean up files (async I/O — no store guard held)
+    for path in &files_to_delete {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 
     xml_ok(&format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -438,28 +884,40 @@ fn handle_delete_objects(store: &mut S3Store, ctx: &RequestContext) -> DispatchR
     ))
 }
 
-fn handle_copy_object(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
+/// Async CopyObject — uses filesystem-level copy for FileRef sources.
+async fn handle_copy_object_async(
+    store_bundle: &AccountRegionBundle<S3Store>,
+    file_store: &ObjectFileStore,
+    ctx: &RequestContext,
+) -> DispatchResponse {
     let dest_bucket = match bucket_from_path(&ctx.path) {
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Destination bucket required", 400),
     };
     let dest_key = key_from_path(&ctx.path);
 
-    // x-amz-copy-source: /src-bucket/src-key
-    let copy_source = match ctx.headers.get("x-amz-copy-source") {
-        Some(s) => s.clone(),
+    let copy_source = match ctx
+        .headers
+        .get("x-amz-copy-source")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(s) => s.to_string(),
         None => return s3_error("InvalidRequest", "Missing x-amz-copy-source header", 400),
     };
 
     let copy_source = urlencoding_decode(&copy_source);
     let (src_bucket, src_key) = parse_copy_source(&copy_source);
 
-    if !store.bucket_exists(&dest_bucket) {
-        return s3_error("NoSuchBucket", "Destination bucket does not exist", 404);
-    }
+    // Read source object metadata (short-lived guard)
+    let src_info = {
+        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else {
+            return s3_error("NoSuchBucket", "Destination bucket does not exist", 404);
+        };
 
-    // Read source (we need to clone the data out before mutably borrowing)
-    let src_data = {
+        if !store.bucket_exists(&dest_bucket) {
+            return s3_error("NoSuchBucket", "Destination bucket does not exist", 404);
+        }
+
         let src = store.get_object(&src_bucket, &src_key);
         match src {
             None => return s3_error("NoSuchKey", "Source key does not exist", 404),
@@ -468,29 +926,154 @@ fn handle_copy_object(store: &mut S3Store, ctx: &RequestContext) -> DispatchResp
                 v.content_type.clone(),
                 v.metadata.clone(),
                 v.etag.clone(),
+                v.size,
+                v.version_id.clone(),
                 v.last_modified,
             ),
         }
     };
 
-    let (data, ct, meta, src_etag, src_last_modified) = src_data;
-    store.put_object(&dest_bucket, &dest_key, data, ct, meta);
+    let (src_data, ct, meta, src_etag, src_size, src_version_id, src_last_modified) = src_info;
 
-    let etag = store
-        .get_object(&dest_bucket, &dest_key)
-        .map(|v| v.etag.clone())
-        .unwrap_or(src_etag);
-    let last_modified = store
-        .get_object(&dest_bucket, &dest_key)
-        .map(|v| v.last_modified)
-        .unwrap_or(src_last_modified);
+    // Determine versioning for destination
+    let versioning_enabled = {
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        store.as_ref().is_some_and(|s| {
+            s.get_bucket(&dest_bucket)
+                .map(|b| b.versioning.as_str() == "Enabled")
+                .unwrap_or(false)
+        })
+    };
+
+    let dest_version_id = if versioning_enabled {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        "null".to_string()
+    };
+
+    // Copy data — keep small objects inline; use filesystem for large ones.
+    let dest_data = match &src_data {
+        ObjectDataRef::Inline(bytes) => {
+            // Source is already in memory — keep it inline for the destination
+            // if it's within the threshold; otherwise write to disk.
+            if src_size <= INLINE_OBJECT_THRESHOLD {
+                ObjectDataRef::Inline(bytes.clone())
+            } else {
+                match file_store
+                    .write_object(
+                        &ctx.account_id,
+                        &ctx.region,
+                        &dest_bucket,
+                        &dest_key,
+                        &dest_version_id,
+                        bytes,
+                    )
+                    .await
+                {
+                    Ok(dest_path) => ObjectDataRef::FileRef(dest_path),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to write copied object to filesystem");
+                        return s3_error("InternalError", "Failed to copy object", 500);
+                    }
+                }
+            }
+        }
+        ObjectDataRef::FileRef(path) => {
+            if src_size <= INLINE_OBJECT_THRESHOLD {
+                // Small file-backed object — read into memory and keep inline.
+                match tokio::fs::read(path).await {
+                    Ok(bytes) => ObjectDataRef::Inline(Bytes::from(bytes)),
+                    Err(e) => {
+                        warn!(error = %e, path = %path.display(), "Failed to read source object file for copy");
+                        return s3_error("InternalError", "Failed to copy object", 500);
+                    }
+                }
+            } else {
+                match file_store
+                    .copy_object(
+                        ObjectLocation {
+                            account_id: &ctx.account_id,
+                            region: &ctx.region,
+                            bucket: &src_bucket,
+                            key: &src_key,
+                            version_id: &src_version_id,
+                        },
+                        ObjectLocation {
+                            account_id: &ctx.account_id,
+                            region: &ctx.region,
+                            bucket: &dest_bucket,
+                            key: &dest_key,
+                            version_id: &dest_version_id,
+                        },
+                    )
+                    .await
+                {
+                    Ok(dest_path) => ObjectDataRef::FileRef(dest_path),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to copy object on filesystem");
+                        return s3_error("InternalError", "Failed to copy object", 500);
+                    }
+                }
+            }
+        }
+    };
+
+    let new_file_path = match &dest_data {
+        ObjectDataRef::FileRef(path) => Some(path.clone()),
+        _ => None,
+    };
+
+    // Build version and store
+    let version = crate::store::ObjectVersion {
+        version_id: dest_version_id.clone(),
+        last_modified: chrono::Utc::now(),
+        etag: src_etag.clone(),
+        content_type: ct,
+        content_encoding: None,
+        content_disposition: None,
+        cache_control: None,
+        size: src_size,
+        metadata: meta,
+        acl: "private".to_string(),
+        data: dest_data,
+        delete_marker: false,
+    };
+
+    let (etag, last_modified, replaced_file_path) = {
+        let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+        let prev = store.put_object_version(&dest_bucket, &dest_key, version);
+        let replaced = if dest_version_id == "null" {
+            prev.and_then(|old| match old {
+                ObjectDataRef::FileRef(path) => {
+                    if new_file_path.as_deref() == Some(path.as_path()) {
+                        None
+                    } else {
+                        Some(path)
+                    }
+                }
+                _ => None,
+            })
+        } else {
+            None
+        };
+
+        let v = store.get_object(&dest_bucket, &dest_key);
+        match v {
+            Some(v) => (v.etag.clone(), v.last_modified, replaced),
+            None => (src_etag, src_last_modified, replaced),
+        }
+    };
+
+    if let Some(path) = replaced_file_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 
     xml_ok(&format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <CopyObjectResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <LastModified>{}</LastModified><ETag>{}</ETag></CopyObjectResult>",
         last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-        escape_xml(&etag)
+        xml_escape(&etag)
     ))
 }
 
@@ -548,7 +1131,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     let mut content_keys: Vec<String> = Vec::new();
 
     if delimiter.is_empty() {
-        content_keys = all_keys.clone();
+        content_keys = std::mem::take(&mut all_keys);
     } else {
         for key in &all_keys {
             let suffix = &key[prefix.len()..];
@@ -579,8 +1162,8 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
 <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Name>{}</Name><Prefix>{}</Prefix><MaxKeys>{}</MaxKeys>\
 <KeyCount>{}</KeyCount><IsTruncated>{}</IsTruncated>",
-        escape_xml(&bucket),
-        escape_xml(&prefix),
+        xml_escape(&bucket),
+        xml_escape(&prefix),
         max_keys,
         key_count,
         truncated
@@ -589,7 +1172,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     if let Some(ref t) = next_token {
         xml.push_str(&format!(
             "<NextContinuationToken>{}</NextContinuationToken>",
-            escape_xml(t)
+            xml_escape(t)
         ));
     }
 
@@ -603,9 +1186,9 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
 <Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Contents>",
-                key = escape_xml(key),
+                key = xml_escape(key),
                 lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                etag = escape_xml(&v.etag),
+                etag = xml_escape(&v.etag),
                 size = v.size,
             ));
         }
@@ -614,7 +1197,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     for cp in &common_prefixes {
         xml.push_str(&format!(
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
-            escape_xml(cp)
+            xml_escape(cp)
         ));
     }
 
@@ -666,7 +1249,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     let mut common_prefixes: Vec<String> = Vec::new();
     let mut content_keys: Vec<String> = Vec::new();
     if delimiter.is_empty() {
-        content_keys = all_keys.clone();
+        content_keys = std::mem::take(&mut all_keys);
     } else {
         for key in &all_keys {
             let suffix = &key[prefix.len()..];
@@ -694,8 +1277,8 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
 <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Name>{name}</Name><Prefix>{prefix}</Prefix>\
 <MaxKeys>{max_keys}</MaxKeys><IsTruncated>{truncated}</IsTruncated>",
-        name = escape_xml(&bucket),
-        prefix = escape_xml(&prefix),
+        name = xml_escape(&bucket),
+        prefix = xml_escape(&prefix),
         max_keys = max_keys,
         truncated = truncated,
     );
@@ -703,7 +1286,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     if truncated && !next_marker.is_empty() {
         xml.push_str(&format!(
             "<NextMarker>{}</NextMarker>",
-            escape_xml(&next_marker)
+            xml_escape(&next_marker)
         ));
     }
 
@@ -717,9 +1300,9 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
 <Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Contents>",
-                key = escape_xml(key),
+                key = xml_escape(key),
                 lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                etag = escape_xml(&v.etag),
+                etag = xml_escape(&v.etag),
                 size = v.size,
             ));
         }
@@ -728,7 +1311,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     for cp in &common_prefixes {
         xml.push_str(&format!(
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
-            escape_xml(cp)
+            xml_escape(cp)
         ));
     }
 
@@ -754,15 +1337,17 @@ fn handle_create_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -> 
     let content_type = ctx
         .headers
         .get("content-type")
-        .cloned()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
 
     let metadata: HashMap<String, String> = ctx
         .headers
         .iter()
         .filter_map(|(k, v)| {
-            k.strip_prefix("x-amz-meta-")
-                .map(|mk| (mk.to_string(), v.clone()))
+            k.as_str()
+                .strip_prefix("x-amz-meta-")
+                .and_then(|mk| v.to_str().ok().map(|mv| (mk.to_string(), mv.to_string())))
         })
         .collect();
 
@@ -773,13 +1358,24 @@ fn handle_create_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -> 
 <InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Bucket>{bucket}</Bucket><Key>{key}</Key><UploadId>{upload_id}</UploadId>\
 </InitiateMultipartUploadResult>",
-        bucket = escape_xml(&bucket),
-        key = escape_xml(&key),
-        upload_id = escape_xml(&upload_id)
+        bucket = xml_escape(&bucket),
+        key = xml_escape(&key),
+        upload_id = xml_escape(&upload_id)
     ))
 }
 
-fn handle_upload_part(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
+/// Async UploadPart — writes part body to filesystem via ObjectFileStore.
+async fn handle_upload_part_async(
+    store_bundle: &AccountRegionBundle<S3Store>,
+    file_store: &ObjectFileStore,
+    ctx: &RequestContext,
+) -> DispatchResponse {
+    let request_bucket = match bucket_from_path(&ctx.path) {
+        Some(b) => b,
+        None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
+    };
+    let request_key = key_from_path(&ctx.path);
+
     let upload_id = match ctx.query_params.get("uploadId") {
         Some(id) => id.clone(),
         None => return s3_error("InvalidRequest", "uploadId required", 400),
@@ -793,19 +1389,125 @@ fn handle_upload_part(store: &mut S3Store, ctx: &RequestContext) -> DispatchResp
         None => return s3_error("InvalidRequest", "partNumber required", 400),
     };
 
-    let data = ctx.raw_body.to_vec();
-    match store.upload_part(&upload_id, part_number, data) {
-        None => s3_error("NoSuchUpload", "The specified upload does not exist", 404),
-        Some(etag) => DispatchResponse {
-            status_code: 200,
-            body: Bytes::new(),
-            content_type: String::new(),
-            headers: vec![("ETag".to_string(), etag)],
-        },
+    // Look up the multipart upload to get bucket/key (short-lived guard)
+    let (bucket, key) = {
+        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else {
+            return s3_error("NoSuchUpload", "The specified upload does not exist", 404);
+        };
+        match store.get_multipart_upload(&upload_id) {
+            None => return s3_error("NoSuchUpload", "The specified upload does not exist", 404),
+            Some(u) => {
+                if u.bucket != request_bucket || u.key != request_key {
+                    return s3_error("NoSuchUpload", "The specified upload does not exist", 404);
+                }
+                (u.bucket.clone(), u.key.clone())
+            }
+        }
+    };
+
+    // Get part data — prefer spooled_body (streaming), fall back to raw_body.
+    let (etag, size, part_data) = if let Some(mutex) = ctx.spooled_body.as_ref() {
+        // Take the SpooledBody out of the Mutex so we can consume it into a reader.
+        // The guard must be dropped before any .await, so use a block scope.
+        let (spooled, spooled_len) = {
+            let mut guard = mutex.lock().expect("spooled_body mutex poisoned");
+            let spooled = std::mem::replace(
+                &mut *guard,
+                openstack_service_framework::SpooledBody::new(0),
+            );
+            let spooled_len = spooled.len() as u64;
+            (spooled, spooled_len)
+        };
+
+        if spooled_len <= INLINE_OBJECT_THRESHOLD {
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
+            let mut data = Vec::with_capacity(spooled_len as usize);
+            if let Err(e) =
+                tokio::io::AsyncReadExt::read_to_end(&mut hashing_reader, &mut data).await
+            {
+                warn!(error = %e, "Failed to read spooled body for upload part");
+                return s3_error("InternalError", "Failed to read request body", 500);
+            }
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            let size = data.len() as u64;
+            (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
+        } else {
+            let part_version_id = format!("part-{}", part_number);
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
+            let (file_path, bytes_written) = match file_store
+                .write_object_from_reader(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &format!("__multipart/{upload_id}/{key}"),
+                    &part_version_id,
+                    &mut hashing_reader,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!(error = %e, "Failed to stream upload part to filesystem");
+                    return s3_error("InternalError", "Failed to store part", 500);
+                }
+            };
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+        }
+    } else {
+        // Fallback for unit-test contexts where spooled_body is None.
+        let data = ctx.raw_body_bytes().to_vec();
+        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&data)));
+        let size = data.len() as u64;
+        let part_data = if size <= INLINE_OBJECT_THRESHOLD {
+            ObjectDataRef::Inline(Bytes::from(data))
+        } else {
+            let part_version_id = format!("part-{}", part_number);
+            let file_path = match file_store
+                .write_object(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &format!("__multipart/{upload_id}/{key}"),
+                    &part_version_id,
+                    &data,
+                )
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "Failed to write upload part to filesystem");
+                    return s3_error("InternalError", "Failed to store part", 500);
+                }
+            };
+            ObjectDataRef::FileRef(file_path)
+        };
+        (etag, size, part_data)
+    };
+
+    // Store part metadata in S3Store (short-lived guard)
+    {
+        let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+        store.upload_part_with_etag(&upload_id, part_number, part_data, etag.clone(), size);
+    }
+
+    DispatchResponse {
+        status_code: 200,
+        body: ResponseBody::Buffered(Bytes::new()),
+        content_type: Cow::Borrowed(""),
+        headers: vec![("ETag".to_string(), etag)],
     }
 }
 
-fn handle_complete_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
+/// Async CompleteMultipartUpload — concatenates file-backed parts into
+/// a single object file on disk, then stores the version in S3Store.
+async fn handle_complete_multipart_upload_async(
+    store_bundle: &AccountRegionBundle<S3Store>,
+    file_store: &ObjectFileStore,
+    ctx: &RequestContext,
+) -> DispatchResponse {
     let bucket = match bucket_from_path(&ctx.path) {
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
@@ -817,8 +1519,8 @@ fn handle_complete_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -
         None => return s3_error("InvalidRequest", "uploadId required", 400),
     };
 
-    // Parse parts from body: <CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"etag"</ETag></Part>...</CompleteMultipartUpload>
-    let body = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    // Parse parts from body XML
+    let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
     let parts: Vec<(u32, String)> = {
         let mut result = Vec::new();
         let mut remaining = body;
@@ -837,25 +1539,229 @@ fn handle_complete_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -
         result
     };
 
-    match store.complete_multipart_upload(&upload_id, &parts) {
-        None => s3_error("NoSuchUpload", "The specified upload does not exist", 404),
-        Some(v) => {
-            let location = format!("http://localhost:4566/{bucket}/{key}");
-            xml_ok(&format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+    // Gather part file paths and metadata from the store (short-lived guard)
+    let upload_info = {
+        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else {
+            return s3_error("NoSuchUpload", "The specified upload does not exist", 404);
+        };
+        match store.get_multipart_upload(&upload_id) {
+            None => return s3_error("NoSuchUpload", "The specified upload does not exist", 404),
+            Some(u) => {
+                if u.bucket != bucket || u.key != key {
+                    return s3_error("NoSuchUpload", "The specified upload does not exist", 404);
+                }
+                let content_type = u.content_type.clone();
+                let metadata = u.metadata.clone();
+                let mut sorted_parts: Vec<u32> = parts.iter().map(|(n, _)| *n).collect();
+                sorted_parts.sort_unstable();
+
+                let mut part_paths: Vec<(u32, ObjectDataRef, u64)> = Vec::new();
+                for pn in &sorted_parts {
+                    if let Some(part) = u.parts.get(pn) {
+                        part_paths.push((*pn, part.data.clone(), part.size));
+                    }
+                }
+                (content_type, metadata, part_paths)
+            }
+        }
+    };
+
+    let (content_type, metadata, part_data) = upload_info;
+
+    // Determine versioning
+    let versioning_enabled = {
+        let store = store_bundle.get(&ctx.account_id, &ctx.region);
+        store.as_ref().is_some_and(|s| {
+            s.get_bucket(&bucket)
+                .map(|b| b.versioning.as_str() == "Enabled")
+                .unwrap_or(false)
+        })
+    };
+
+    let version_id = if versioning_enabled {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        "null".to_string()
+    };
+
+    let estimated_size: u64 = part_data.iter().map(|(_, _, size)| *size).sum();
+    let part_count = part_data.len();
+
+    let multipart_etag = {
+        let mut concat = Vec::with_capacity(part_count * 16);
+        for (pn, _, _) in &part_data {
+            if let Some((_expected_pn, supplied_etag)) = parts.iter().find(|(n, _)| n == pn)
+                && let Ok(bytes) = hex::decode(supplied_etag.trim_matches('"'))
+                && bytes.len() == 16
+            {
+                concat.extend_from_slice(&bytes);
+            }
+        }
+        if concat.len() == part_count * 16 {
+            format!(
+                "\"{}-{}\"",
+                hex::encode(md5::Md5::digest(&concat)),
+                part_count
+            )
+        } else {
+            String::new()
+        }
+    };
+
+    // For small assembled objects, keep the existing inline path.
+    let assembled_data = if estimated_size <= INLINE_OBJECT_THRESHOLD {
+        let mut combined = Vec::with_capacity(estimated_size as usize);
+        for (_pn, data_ref, _size) in &part_data {
+            match data_ref {
+                ObjectDataRef::Inline(bytes) => {
+                    combined.extend_from_slice(bytes);
+                }
+                ObjectDataRef::FileRef(path) => match tokio::fs::read(path).await {
+                    Ok(bytes) => combined.extend_from_slice(&bytes),
+                    Err(e) => {
+                        warn!(error = %e, path = %path.display(), "Failed to read part file");
+                        return s3_error("InternalError", "Failed to read part", 500);
+                    }
+                },
+            }
+        }
+
+        let etag = if multipart_etag.is_empty() {
+            format!("\"{}\"", hex::encode(md5::Md5::digest(&combined)))
+        } else {
+            multipart_etag.clone()
+        };
+        let size = combined.len() as u64;
+
+        // Clean up any file-backed parts before going inline.
+        for (_pn, data_ref, _size) in &part_data {
+            if let ObjectDataRef::FileRef(path) = data_ref {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+        }
+
+        (etag, size, ObjectDataRef::Inline(Bytes::from(combined)))
+    } else {
+        // Stream all parts directly to the final object file with bounded buffering.
+        let parts_for_reader: Vec<ObjectDataRef> = part_data
+            .iter()
+            .map(|(_, data_ref, _)| data_ref.clone())
+            .collect();
+
+        let fs_clone = file_store.clone();
+        let account_id = ctx.account_id.clone();
+        let region = ctx.region.clone();
+        let bucket_cloned = bucket.clone();
+        let key_cloned = key.clone();
+        let version_id_cloned = version_id.clone();
+
+        let join = tokio::task::spawn_blocking(move || {
+            let mut multipart_reader = MultipartRead::from_data_refs(parts_for_reader)?;
+            let mut hashing_reader = Md5Read::new(&mut multipart_reader);
+            let (path, bytes_written) = fs_clone.write_object_from_sync_reader(
+                &account_id,
+                &region,
+                &bucket_cloned,
+                &key_cloned,
+                &version_id_cloned,
+                &mut hashing_reader,
+            )?;
+            let digest = hashing_reader.finalize();
+            Ok::<(PathBuf, u64, md5::digest::Output<md5::Md5>), io::Error>((
+                path,
+                bytes_written,
+                digest,
+            ))
+        })
+        .await;
+
+        let (file_path, size, digest) = match join {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                warn!(error = %e, "Failed to stream assembled object to filesystem");
+                return s3_error("InternalError", "Failed to store object", 500);
+            }
+            Err(e) => {
+                warn!(error = %e, "Assemble object task panicked");
+                return s3_error("InternalError", "Failed to store object", 500);
+            }
+        };
+
+        // Clean up part files after successful assembly.
+        for (_pn, data_ref, _size) in &part_data {
+            if let ObjectDataRef::FileRef(path) = data_ref {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+        }
+
+        let etag = if multipart_etag.is_empty() {
+            format!("\"{}\"", hex::encode(digest))
+        } else {
+            multipart_etag
+        };
+        (etag, size, ObjectDataRef::FileRef(file_path))
+    };
+
+    let (etag, size, assembled_data) = assembled_data;
+
+    let new_file_path = match &assembled_data {
+        ObjectDataRef::FileRef(path) => Some(path.clone()),
+        _ => None,
+    };
+
+    // Build version and store in S3Store
+    let version = crate::store::ObjectVersion {
+        version_id: version_id.clone(),
+        last_modified: chrono::Utc::now(),
+        etag: etag.clone(),
+        content_type: content_type.clone(),
+        content_encoding: None,
+        content_disposition: None,
+        cache_control: None,
+        size,
+        metadata,
+        acl: "private".to_string(),
+        data: assembled_data,
+        delete_marker: false,
+    };
+
+    let replaced_file_path = {
+        let mut store = store_bundle.get_or_create(&ctx.account_id, &ctx.region);
+        let prev = store.complete_multipart_upload_with_version(&upload_id, version);
+        if version_id == "null" {
+            prev.and_then(|old| match old {
+                ObjectDataRef::FileRef(path) => {
+                    if new_file_path.as_deref() == Some(path.as_path()) {
+                        None
+                    } else {
+                        Some(path)
+                    }
+                }
+                _ => None,
+            })
+        } else {
+            None
+        }
+    };
+
+    if let Some(path) = replaced_file_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    let location = format!("http://localhost:4566/{bucket}/{key}");
+    xml_ok(&format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Location>{location}</Location>\
 <Bucket>{bucket}</Bucket>\
 <Key>{key}</Key>\
 <ETag>{etag}</ETag>\
 </CompleteMultipartUploadResult>",
-                location = escape_xml(&location),
-                bucket = escape_xml(&bucket),
-                key = escape_xml(&key),
-                etag = escape_xml(&v.etag)
-            ))
-        }
-    }
+        location = xml_escape(&location),
+        bucket = xml_escape(&bucket),
+        key = xml_escape(&key),
+        etag = xml_escape(&etag)
+    ))
 }
 
 fn handle_abort_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
@@ -888,7 +1794,7 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
 <ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Bucket>{}</Bucket><KeyMarker></KeyMarker><UploadIdMarker></UploadIdMarker>\
 <IsTruncated>false</IsTruncated>",
-        escape_xml(&bucket)
+        xml_escape(&bucket)
     );
 
     for u in uploads {
@@ -898,8 +1804,8 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
 <UploadId>{id}</UploadId>\
 <Initiated>{initiated}</Initiated>\
 </Upload>",
-            key = escape_xml(&u.key),
-            id = escape_xml(&u.upload_id),
+            key = xml_escape(&u.key),
+            id = xml_escape(&u.upload_id),
             initiated = u.initiated.format("%Y-%m-%dT%H:%M:%S.000Z"),
         ));
     }
@@ -949,8 +1855,9 @@ fn handle_put_bucket_acl(store: &mut S3Store, ctx: &RequestContext) -> DispatchR
     let acl = ctx
         .headers
         .get("x-amz-acl")
-        .cloned()
-        .unwrap_or_else(|| "private".to_string());
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("private")
+        .to_string();
     if let Some(b) = store.get_bucket_mut(&bucket) {
         b.acl = acl;
     }
@@ -1007,8 +1914,8 @@ fn handle_get_bucket_policy(store: &S3Store, ctx: &RequestContext) -> DispatchRe
             ),
             Some(policy) => DispatchResponse {
                 status_code: 200,
-                body: Bytes::from(policy.clone().into_bytes()),
-                content_type: "application/json".to_string(),
+                body: ResponseBody::Buffered(Bytes::from(policy.clone().into_bytes())),
+                content_type: Cow::Borrowed("application/json"),
                 headers: Vec::new(),
             },
         },
@@ -1021,7 +1928,7 @@ fn handle_put_bucket_policy(store: &mut S3Store, ctx: &RequestContext) -> Dispat
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
     if let Some(b) = store.get_bucket_mut(&bucket) {
-        let policy = String::from_utf8_lossy(&ctx.raw_body).to_string();
+        let policy = String::from_utf8_lossy(ctx.raw_body_bytes()).to_string();
         b.policy = Some(policy);
         empty_204()
     } else {
@@ -1072,7 +1979,7 @@ fn handle_put_bucket_versioning(store: &mut S3Store, ctx: &RequestContext) -> Di
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
-    let body = std::str::from_utf8(&ctx.raw_body).unwrap_or("");
+    let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
     let status = extract_xml_text(body, "Status").unwrap_or_default();
 
     if let Some(b) = store.get_bucket_mut(&bucket) {
@@ -1102,8 +2009,8 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Name>{}</Name><Prefix>{}</Prefix><IsTruncated>false</IsTruncated>",
-        escape_xml(&bucket),
-        escape_xml(&prefix)
+        xml_escape(&bucket),
+        xml_escape(&prefix)
     );
 
     for obj in objects {
@@ -1120,8 +2027,8 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
 <IsLatest>{latest}</IsLatest>\
 <LastModified>{lm}</LastModified>\
 </DeleteMarker>",
-                    key = escape_xml(&obj.key),
-                    vid = escape_xml(&v.version_id),
+                    key = xml_escape(&obj.key),
+                    vid = xml_escape(&v.version_id),
                     latest = is_latest,
                     lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
                 ));
@@ -1134,11 +2041,11 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
 <ETag>{etag}</ETag><Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Version>",
-                    key = escape_xml(&obj.key),
-                    vid = escape_xml(&v.version_id),
+                    key = xml_escape(&obj.key),
+                    vid = xml_escape(&v.version_id),
                     latest = is_latest,
                     lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                    etag = escape_xml(&v.etag),
+                    etag = xml_escape(&v.etag),
                     size = v.size,
                 ));
             }
@@ -1154,11 +2061,7 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
 // request with X-Amz-Signature query param as a valid GetObject)
 // ---------------------------------------------------------------------------
 
-fn handle_presigned_get(store: &S3Store, ctx: &RequestContext) -> DispatchResponse {
-    // Pre-signed URLs arrive as GET requests with query params instead of Authorization header.
-    // The gateway/SigV4 layer should have already validated. We just serve the object.
-    handle_get_object(store, ctx)
-}
+// Pre-signed URL handling — uses the async GetObject path directly.
 
 // ---------------------------------------------------------------------------
 // Notification configuration (stub)
@@ -1244,7 +2147,31 @@ impl ServiceProvider for S3Provider {
         "s3"
     }
 
+    async fn start(&self) -> Result<(), anyhow::Error> {
+        let dir = self.s3_objects_dir.clone();
+        let store = self
+            .object_store
+            .get_or_try_init(|| async {
+                ObjectFileStore::new(dir).await.map_err(anyhow::Error::from)
+            })
+            .await?;
+        debug!(
+            "S3 ObjectFileStore initialized at {:?}",
+            self.s3_objects_dir
+        );
+
+        // Clean up any orphaned .tmp files from previous crashes.
+        match store.cleanup_orphaned_temps().await {
+            Ok(0) => {}
+            Ok(n) => debug!("Cleaned up {} orphaned temp files in S3 object store", n),
+            Err(e) => warn!("Failed to clean up orphaned temp files: {}", e),
+        }
+
+        Ok(())
+    }
+
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        let op_start = std::time::Instant::now();
         debug!(
             service = "s3",
             operation = %ctx.operation,
@@ -1257,62 +2184,86 @@ impl ServiceProvider for S3Provider {
         // X-Amz-Target — we derive the operation from method + path + query params.
         let op = derive_s3_operation(ctx);
 
-        // For read operations we use get_or_create (RefMut derefs to &S3Store).
-        // Mutations need a separate block to avoid borrow issues.
+        // For read operations we use get() (read lock); mutations use get_or_create() (write lock).
         let response = match op.as_str() {
             // ---- Bucket ops ----
             "ListBuckets" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_list_buckets(&store, ctx)
+                if let Some(store) = self.store.get(&ctx.account_id, &ctx.region) {
+                    handle_list_buckets(&store, ctx)
+                } else {
+                    // No state yet for this account — return empty bucket list.
+                    xml_ok(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+<Owner><ID>000000000000</ID><DisplayName>localstack</DisplayName></Owner>\
+<Buckets></Buckets></ListAllMyBucketsResult>",
+                    )
+                }
             }
             "CreateBucket" => {
                 let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 handle_create_bucket(&mut store, ctx)
             }
-            "DeleteBucket" => {
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_delete_bucket(&mut store, ctx)
-            }
+            "DeleteBucket" => handle_delete_bucket_async(&self.store, self.file_store(), ctx).await,
             "HeadBucket" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
+                    return Ok(s3_bucket_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        &bucket,
+                        404,
+                    ));
+                };
                 handle_head_bucket(&store, ctx)
             }
             "GetBucketLocation" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
+                    return Ok(s3_bucket_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        &bucket,
+                        404,
+                    ));
+                };
                 handle_get_bucket_location(&store, ctx)
             }
             // ---- Object ops ----
-            "PutObject" => {
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_put_object(&mut store, ctx)
-            }
-            "GetObject" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_get_object(&store, ctx)
-            }
+            "PutObject" => handle_put_object_async(&self.store, self.file_store(), ctx).await,
+            "GetObject" => handle_get_object_async(&self.store, ctx).await,
             "HeadObject" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_head_object(&store, ctx)
             }
-            "DeleteObject" => {
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_delete_object(&mut store, ctx)
-            }
-            "DeleteObjects" => {
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_delete_objects(&mut store, ctx)
-            }
-            "CopyObject" => {
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_copy_object(&mut store, ctx)
-            }
+            "DeleteObject" => handle_delete_object_async(&self.store, ctx).await,
+            "DeleteObjects" => handle_delete_objects_async(&self.store, ctx).await,
+            "CopyObject" => handle_copy_object_async(&self.store, self.file_store(), ctx).await,
             // ---- Listing ----
             "ListObjectsV2" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_list_objects_v2(&store, ctx)
             }
             "ListObjects" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_list_objects(&store, ctx)
             }
             // ---- Multipart ----
@@ -1320,25 +2271,33 @@ impl ServiceProvider for S3Provider {
                 let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 handle_create_multipart_upload(&mut store, ctx)
             }
-            "UploadPart" => {
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_upload_part(&mut store, ctx)
-            }
+            "UploadPart" => handle_upload_part_async(&self.store, self.file_store(), ctx).await,
             "CompleteMultipartUpload" => {
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_complete_multipart_upload(&mut store, ctx)
+                handle_complete_multipart_upload_async(&self.store, self.file_store(), ctx).await
             }
             "AbortMultipartUpload" => {
                 let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 handle_abort_multipart_upload(&mut store, ctx)
             }
             "ListMultipartUploads" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_list_multipart_uploads(&store, ctx)
             }
             // ---- ACL ----
             "GetBucketAcl" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_bucket_acl(&store, ctx)
             }
             "PutBucketAcl" => {
@@ -1346,16 +2305,34 @@ impl ServiceProvider for S3Provider {
                 handle_put_bucket_acl(&mut store, ctx)
             }
             "GetObjectAcl" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_object_acl(&store, ctx)
             }
             "PutObjectAcl" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_put_object_acl(&store, ctx)
             }
             // ---- Policy ----
             "GetBucketPolicy" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_bucket_policy(&store, ctx)
             }
             "PutBucketPolicy" => {
@@ -1368,7 +2345,13 @@ impl ServiceProvider for S3Provider {
             }
             // ---- Versioning ----
             "GetBucketVersioning" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_bucket_versioning(&store, ctx)
             }
             "PutBucketVersioning" => {
@@ -1376,12 +2359,24 @@ impl ServiceProvider for S3Provider {
                 handle_put_bucket_versioning(&mut store, ctx)
             }
             "ListObjectVersions" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_list_object_versions(&store, ctx)
             }
             // ---- Notifications ----
             "GetBucketNotificationConfiguration" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                    return Ok(s3_error(
+                        "NoSuchBucket",
+                        "The specified bucket does not exist",
+                        404,
+                    ));
+                };
                 handle_get_bucket_notification(&store, ctx)
             }
             "PutBucketNotificationConfiguration" => {
@@ -1389,15 +2384,19 @@ impl ServiceProvider for S3Provider {
                 handle_put_bucket_notification(&mut store, ctx)
             }
             // ---- Pre-signed ----
-            "PresignedGetObject" => {
-                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                handle_presigned_get(&store, ctx)
-            }
+            "PresignedGetObject" => handle_get_object_async(&self.store, ctx).await,
             _ => {
                 warn!(service = "s3", operation = %op, "S3 operation not implemented");
                 return Err(DispatchError::NotImplemented(op));
             }
         };
+
+        debug!(
+            service = "s3",
+            operation = %op,
+            op_latency_us = op_start.elapsed().as_micros(),
+            "S3 operation complete"
+        );
 
         Ok(response)
     }
