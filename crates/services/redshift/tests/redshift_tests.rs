@@ -93,6 +93,21 @@ async fn test_describe_clusters() {
 }
 
 #[tokio::test]
+async fn test_describe_clusters_without_store_returns_empty_clusters() {
+    let p = RedshiftProvider::new();
+
+    let resp = p
+        .dispatch(&make_ctx("DescribeClusters", HashMap::new()))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("DescribeClustersResponse"));
+    assert!(body.contains("<Clusters></Clusters>"));
+}
+
+#[tokio::test]
 async fn test_delete_cluster() {
     let p = RedshiftProvider::new();
     let mut params = HashMap::new();

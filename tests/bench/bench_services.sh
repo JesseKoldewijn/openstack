@@ -40,6 +40,7 @@ TARGETS="os,ls,moto"
 OS_PORT=14566
 LS_PORT=14567
 MOTO_PORT=5555
+LOCALSTACK_DOCKER_SOCKET_ARGS=()
 
 usage() {
   cat <<EOF
@@ -89,6 +90,16 @@ fi
 # Helper to check if a target is active
 target_active() {
   [[ ",$TARGETS," == *",$1,"* ]]
+}
+
+configure_localstack_docker_socket_mount() {
+  if [[ -S "/var/run/docker.sock" ]]; then
+    LOCALSTACK_DOCKER_SOCKET_ARGS=(-v "/var/run/docker.sock:/var/run/docker.sock")
+    log "LocalStack Lambda executor: Docker socket mounted"
+  else
+    LOCALSTACK_DOCKER_SOCKET_ARGS=()
+    log "WARN: /var/run/docker.sock not found; LocalStack Lambda create/invoke may fail"
+  fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -661,6 +672,7 @@ start_docker_mode() {
       --name "bench-localstack-$$" \
       --cpus="$CPU_LIMIT" \
       --memory="$MEMORY_LIMIT" \
+      "${LOCALSTACK_DOCKER_SOCKET_ARGS[@]}" \
       -p "$LS_PORT:4566" \
       -e PERSISTENCE=0 \
       "$LOCALSTACK_IMAGE")
@@ -727,6 +739,7 @@ start_binary_mode() {
       --name "bench-localstack-$$" \
       --cpus="$CPU_LIMIT" \
       --memory="$MEMORY_LIMIT" \
+      "${LOCALSTACK_DOCKER_SOCKET_ARGS[@]}" \
       -p "$LS_PORT:4566" \
       -e PERSISTENCE=0 \
       "$LOCALSTACK_IMAGE")
@@ -756,8 +769,10 @@ start_binary_mode() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 if $BINARY_MODE; then
+  configure_localstack_docker_socket_mount
   start_binary_mode
 else
+  configure_localstack_docker_socket_mount
   start_docker_mode
 fi
 
@@ -1425,27 +1440,81 @@ if is_active "lambda"; then
 
   LAMBDA_FUNCTION_NAME="bench-fn-$$"
   LAMBDA_DELETE_FUNCTION_NAME="bench-fn-del-$$"
+  LAMBDA_ROLE_NAME="bench-role-$$"
+  LAMBDA_ROLE_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  LAMBDA_ROLE_ARN_DEFAULT="arn:aws:iam::000000000000:role/${LAMBDA_ROLE_NAME}"
+  LAMBDA_ROLE_ARN_MOTO="arn:aws:iam::123456789012:role/${LAMBDA_ROLE_NAME}"
   LAMBDA_ZIP_B64="UEsDBBQAAAAAABatdlysKm9YNQAAADUAAAASAAAAbGFtYmRhX2Z1bmN0aW9uLnB5ZGVmIGhhbmRsZXIoZXZlbnQsIGNvbnRleHQpOgogICAgcmV0dXJuIHsib2siOiBUcnVlfQpQSwECFAMUAAAAAAAWrXZcrCpvWDUAAAA1AAAAEgAAAAAAAAAAAAAAgAEAAAAAbGFtYmRhX2Z1bmN0aW9uLnB5UEsFBgAAAAABAAEAQAAAAGUAAAAAAA=="
 
-  LAMBDA_CREATE_BODY=$(jq -cn \
+  LAMBDA_CREATE_BODY_OS=$(jq -cn \
     --arg fn "$LAMBDA_FUNCTION_NAME" \
     --arg zip "$LAMBDA_ZIP_B64" \
+    --arg role "$LAMBDA_ROLE_ARN_DEFAULT" \
     '{
       FunctionName: $fn,
       Runtime: "python3.12",
       Handler: "lambda_function.handler",
-      Role: "arn:aws:iam::000000000000:role/test-role",
+      Role: $role,
       Code: { ZipFile: $zip }
     }')
 
-  LAMBDA_DELETE_CREATE_BODY=$(jq -cn \
-    --arg fn "$LAMBDA_DELETE_FUNCTION_NAME" \
+  LAMBDA_CREATE_BODY_LS=$(jq -cn \
+    --arg fn "$LAMBDA_FUNCTION_NAME" \
     --arg zip "$LAMBDA_ZIP_B64" \
+    --arg role "$LAMBDA_ROLE_ARN_DEFAULT" \
     '{
       FunctionName: $fn,
       Runtime: "python3.12",
       Handler: "lambda_function.handler",
-      Role: "arn:aws:iam::000000000000:role/test-role",
+      Role: $role,
+      Code: { ZipFile: $zip }
+    }')
+
+  LAMBDA_CREATE_BODY_MOTO=$(jq -cn \
+    --arg fn "$LAMBDA_FUNCTION_NAME" \
+    --arg zip "$LAMBDA_ZIP_B64" \
+    --arg role "$LAMBDA_ROLE_ARN_MOTO" \
+    '{
+      FunctionName: $fn,
+      Runtime: "python3.12",
+      Handler: "lambda_function.handler",
+      Role: $role,
+      Code: { ZipFile: $zip }
+    }')
+
+  LAMBDA_DELETE_CREATE_BODY_OS=$(jq -cn \
+    --arg fn "$LAMBDA_DELETE_FUNCTION_NAME" \
+    --arg zip "$LAMBDA_ZIP_B64" \
+    --arg role "$LAMBDA_ROLE_ARN_DEFAULT" \
+    '{
+      FunctionName: $fn,
+      Runtime: "python3.12",
+      Handler: "lambda_function.handler",
+      Role: $role,
+      Code: { ZipFile: $zip }
+    }')
+
+  LAMBDA_DELETE_CREATE_BODY_LS=$(jq -cn \
+    --arg fn "$LAMBDA_DELETE_FUNCTION_NAME" \
+    --arg zip "$LAMBDA_ZIP_B64" \
+    --arg role "$LAMBDA_ROLE_ARN_DEFAULT" \
+    '{
+      FunctionName: $fn,
+      Runtime: "python3.12",
+      Handler: "lambda_function.handler",
+      Role: $role,
+      Code: { ZipFile: $zip }
+    }')
+
+  LAMBDA_DELETE_CREATE_BODY_MOTO=$(jq -cn \
+    --arg fn "$LAMBDA_DELETE_FUNCTION_NAME" \
+    --arg zip "$LAMBDA_ZIP_B64" \
+    --arg role "$LAMBDA_ROLE_ARN_MOTO" \
+    '{
+      FunctionName: $fn,
+      Runtime: "python3.12",
+      Handler: "lambda_function.handler",
+      Role: $role,
       Code: { ZipFile: $zip }
     }')
 
@@ -1453,16 +1522,54 @@ if is_active "lambda"; then
   # SigV4-like headers are present. The signature content is not validated, so
   # static dummy values are sufficient to force Lambda routing.
   MOTO_EXTRA=(
+    -H "Host: lambda.us-east-1.amazonaws.com"
     -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/lambda/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy"
     -H "X-Amz-Date: 20260101T000000Z"
   )
 
-  if seed_all_targets "lambda" POST \
-       "$OS_BASE/2015-03-31/functions/" \
-       "$LS_BASE/2015-03-31/functions/" \
-       "$MOTO_BASE/2015-03-31/functions/" \
-       -H "Content-Type: application/json" \
-       -d "$LAMBDA_CREATE_BODY"; then
+  # Create IAM role first for targets that validate RoleAssumePolicy.
+  seed_request "os" POST "$OS_BASE" \
+    --data-urlencode "Action=CreateRole" \
+    --data-urlencode "Version=2010-05-08" \
+    --data-urlencode "RoleName=${LAMBDA_ROLE_NAME}" \
+    --data-urlencode "AssumeRolePolicyDocument=${LAMBDA_ROLE_POLICY}" >/dev/null 2>&1 || true
+  if target_active ls; then
+    seed_request "ls" POST "$LS_BASE" \
+      --data-urlencode "Action=CreateRole" \
+      --data-urlencode "Version=2010-05-08" \
+      --data-urlencode "RoleName=${LAMBDA_ROLE_NAME}" \
+      --data-urlencode "AssumeRolePolicyDocument=${LAMBDA_ROLE_POLICY}" >/dev/null 2>&1 || true
+  fi
+  if target_active moto; then
+    seed_request "moto" POST "$MOTO_BASE" \
+      -H "Host: iam.amazonaws.com" \
+      -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/iam/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy" \
+      -H "X-Amz-Date: 20260101T000000Z" \
+      --data-urlencode "Action=CreateRole" \
+      --data-urlencode "Version=2010-05-08" \
+      --data-urlencode "RoleName=${LAMBDA_ROLE_NAME}" \
+      --data-urlencode "AssumeRolePolicyDocument=${LAMBDA_ROLE_POLICY}" >/dev/null 2>&1 || true
+  fi
+
+  SEED_OS=0; SEED_LS=0; SEED_MOTO=0
+  seed_request "os" POST "$OS_BASE/2015-03-31/functions/" \
+    -H "Content-Type: application/json" \
+    -d "$LAMBDA_CREATE_BODY_OS" && SEED_OS=1 || true
+  if target_active ls; then
+    seed_request "ls" POST "$LS_BASE/2015-03-31/functions/" \
+      -H "Content-Type: application/json" \
+      -d "$LAMBDA_CREATE_BODY_LS" && SEED_LS=1 \
+      || record_seed_failure "lambda" "ls" "seed request failed"
+  fi
+  if target_active moto; then
+    seed_request "moto" POST "$MOTO_BASE/2015-03-31/functions/" \
+      -H "Content-Type: application/json" \
+      -d "$LAMBDA_CREATE_BODY_MOTO" \
+      "${MOTO_EXTRA[@]}" && SEED_MOTO=1 \
+      || record_seed_failure "lambda" "moto" "seed request failed"
+  fi
+
+  if [[ $SEED_OS -eq 1 ]]; then
 
     bench_targets "lambda" "list_functions" GET \
       "$OS_BASE/2015-03-31/functions/" \
@@ -1497,12 +1604,37 @@ if is_active "lambda"; then
       -d "{\"ZipFile\":\"${LAMBDA_ZIP_B64}\"}"
 
     # Dedicated delete seed to avoid removing the main benchmark function.
-    if seed_all_targets "lambda" POST \
-         "$OS_BASE/2015-03-31/functions/" \
-         "$LS_BASE/2015-03-31/functions/" \
-         "$MOTO_BASE/2015-03-31/functions/" \
-         -H "Content-Type: application/json" \
-         -d "$LAMBDA_DELETE_CREATE_BODY"; then
+    _lambda_seed_os=$SEED_OS
+    _lambda_seed_ls=$SEED_LS
+    _lambda_seed_moto=$SEED_MOTO
+
+    _lambda_del_seed_os=0
+    _lambda_del_seed_ls=0
+    _lambda_del_seed_moto=0
+
+    if [[ $_lambda_seed_os -eq 1 ]]; then
+      seed_request "os" POST "$OS_BASE/2015-03-31/functions/" \
+        -H "Content-Type: application/json" \
+        -d "$LAMBDA_DELETE_CREATE_BODY_OS" && _lambda_del_seed_os=1 || true
+    fi
+    if target_active ls && [[ $_lambda_seed_ls -eq 1 ]]; then
+      seed_request "ls" POST "$LS_BASE/2015-03-31/functions/" \
+        -H "Content-Type: application/json" \
+        -d "$LAMBDA_DELETE_CREATE_BODY_LS" && _lambda_del_seed_ls=1 \
+        || record_seed_failure "lambda" "ls" "delete seed request failed"
+    fi
+    if target_active moto && [[ $_lambda_seed_moto -eq 1 ]]; then
+      seed_request "moto" POST "$MOTO_BASE/2015-03-31/functions/" \
+        -H "Content-Type: application/json" \
+        -d "$LAMBDA_DELETE_CREATE_BODY_MOTO" \
+        "${MOTO_EXTRA[@]}" && _lambda_del_seed_moto=1 \
+        || record_seed_failure "lambda" "moto" "delete seed request failed"
+    fi
+
+    if [[ $_lambda_del_seed_os -eq 1 ]]; then
+      SEED_OS=$_lambda_del_seed_os
+      SEED_LS=$_lambda_del_seed_ls
+      SEED_MOTO=$_lambda_del_seed_moto
       _lambda_saved_req=$REQ_COUNT
       _lambda_saved_conc=$CONC
       REQ_COUNT=1
@@ -1513,6 +1645,9 @@ if is_active "lambda"; then
         "$MOTO_BASE/2015-03-31/functions/${LAMBDA_DELETE_FUNCTION_NAME}"
       REQ_COUNT=$_lambda_saved_req
       CONC=$_lambda_saved_conc
+      SEED_OS=$_lambda_seed_os
+      SEED_LS=$_lambda_seed_ls
+      SEED_MOTO=$_lambda_seed_moto
     else
       record_seed_failure "lambda" "os" "delete seed request failed"
     fi

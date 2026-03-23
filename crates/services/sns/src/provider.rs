@@ -667,6 +667,9 @@ impl ServiceProvider for SnsProvider {
                 handle_list_topics(&store, &params)
             }
             "GetTopicAttributes" => {
+                if !params.contains_key("TopicArn") {
+                    return Ok(sns_error("InvalidParameter", "TopicArn is required", 400));
+                }
                 let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
                     return Ok(sns_error("NotFound", "Topic does not exist", 404));
                 };
@@ -683,12 +686,22 @@ impl ServiceProvider for SnsProvider {
                 handle_list_subscriptions(&store, &params)
             }
             "ListSubscriptionsByTopic" => {
+                if !params.contains_key("TopicArn") {
+                    return Ok(sns_error("InvalidParameter", "TopicArn is required", 400));
+                }
                 let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
                     return Ok(sns_error("NotFound", "Topic not found", 404));
                 };
                 handle_list_subscriptions_by_topic(&store, &params)
             }
             "GetSubscriptionAttributes" => {
+                if !params.contains_key("SubscriptionArn") {
+                    return Ok(sns_error(
+                        "InvalidParameter",
+                        "SubscriptionArn is required",
+                        400,
+                    ));
+                }
                 let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
                     return Ok(sns_error("NotFound", "Subscription not found", 404));
                 };

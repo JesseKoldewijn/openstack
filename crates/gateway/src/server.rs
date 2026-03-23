@@ -933,17 +933,17 @@ fn detect_service(
         let host = host.split(':').next().unwrap_or(host);
         let parts: Vec<&str> = host.split('.').collect();
         if parts.len() >= 2 {
-            let potential_service = parts[0];
+            let potential_service = normalize_service_name(parts[0]);
             if potential_service
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-                && is_known_service(potential_service)
+                && is_known_service(&potential_service)
             {
                 // Known service names have a static equivalent — use it.
-                if let Some(s) = known_service_static(potential_service) {
+                if let Some(s) = known_service_static(&potential_service) {
                     return s.to_string();
                 }
-                return potential_service.to_string();
+                return potential_service;
             }
         }
     }
@@ -1433,7 +1433,7 @@ fn is_studio_guided_execution_route(path: &str) -> bool {
 fn is_s3_object_body_request(
     method: &Method,
     path: &str,
-    _headers: &HeaderMap,
+    headers: &HeaderMap,
     query_params: &HashMap<String, String>,
 ) -> bool {
     // Must be PUT or POST (GET, HEAD, DELETE have no object body).
@@ -1465,6 +1465,14 @@ fn is_s3_object_body_request(
         return false;
     }
 
+    // If request clearly targets another SigV4 service, this is not S3.
+    if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok())
+        && let Some(sigv4) = parse_sigv4_auth(auth)
+        && !sigv4.service.eq_ignore_ascii_case("s3")
+    {
+        return false;
+    }
+
     // Exclude paths that belong to known non-S3 services (versioned REST APIs).
     let first = segments[0];
     // Lambda, ELB, EC2 (rare REST calls)
@@ -1475,7 +1483,7 @@ fn is_s3_object_body_request(
         return false;
     }
 
-    // Exclude POST sub-resource operations that carry XML bodies, not binary
+    // Exclude sub-resource operations that carry XML bodies, not binary
     // object data.  These are identified by specific query params:
     //
     //  - CompleteMultipartUpload: POST /bucket/key?uploadId=<id>  (no partNumber)
@@ -1497,14 +1505,74 @@ fn is_s3_object_body_request(
         }
     }
 
+    // XML-body bucket/object subresources should go through normal body parsing.
+    // These requests are not raw object-data uploads.
+    const XML_BODY_SUBRESOURCES: &[&str] = &[
+        "acl",
+        "tagging",
+        "policy",
+        "website",
+        "cors",
+        "lifecycle",
+        "notification",
+        "replication",
+        "requestPayment",
+        "versioning",
+        "logging",
+        "encryption",
+        "object-lock",
+        "ownershipControls",
+        "accelerate",
+        "inventory",
+        "analytics",
+        "metrics",
+    ];
+    if query_params
+        .keys()
+        .any(|key| XML_BODY_SUBRESOURCES.contains(&key.as_str()))
+    {
+        return false;
+    }
+
+    // Accept unsigned simple path-style uploads (/bucket/key) for parity tools,
+    // but require explicit S3 hints for deeper multi-segment paths so non-S3
+    // REST APIs are not misclassified.
+    let has_s3_hint = {
+        let host_hint = headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .map(|host| host.split(':').next().unwrap_or(host))
+            .map(|host| {
+                host.eq_ignore_ascii_case("s3") || host.starts_with("s3.") || host.contains(".s3.")
+            })
+            .unwrap_or(false);
+
+        let auth_hint = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|auth| auth.contains("/s3/aws4_request") || auth.contains("/S3/aws4_request"))
+            .unwrap_or(false);
+
+        host_hint
+            || auth_hint
+            || headers.contains_key("x-amz-content-sha256")
+            || headers.contains_key("x-amz-storage-class")
+    };
+
+    if !has_s3_hint && segments.len() != 2 {
+        return false;
+    }
+
     true
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::http::{HeaderMap, HeaderValue, Method};
+    use bytes::Bytes;
     use serde_json::json;
 
-    use super::extract_rest_operation;
+    use super::{detect_service, extract_rest_operation, is_s3_object_body_request};
 
     #[test]
     fn maps_lambda_create_function_with_or_without_trailing_slash() {
@@ -1530,5 +1598,57 @@ mod tests {
             extract_rest_operation("GET", "/2015-03-31/functions", &params),
             "ListFunctions"
         );
+    }
+
+    #[test]
+    fn detect_service_normalizes_es_host_alias() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "host",
+            HeaderValue::from_static("es.us-east-1.localhost.localstack.cloud"),
+        );
+        let query = std::collections::HashMap::new();
+
+        let service = detect_service("/my-index/_doc/1", &query, &headers, &Bytes::new(), None);
+        assert_eq!(service, "opensearch");
+    }
+
+    #[test]
+    fn s3_object_body_detection_rejects_non_s3_unsigned_multisegment_put() {
+        let headers = HeaderMap::new();
+        let query = std::collections::HashMap::new();
+
+        assert!(!is_s3_object_body_request(
+            &Method::PUT,
+            "/my-index/_doc/1",
+            &headers,
+            &query,
+        ));
+    }
+
+    #[test]
+    fn s3_object_body_detection_accepts_unsigned_simple_path_style_put() {
+        let headers = HeaderMap::new();
+        let query = std::collections::HashMap::new();
+
+        assert!(is_s3_object_body_request(
+            &Method::PUT,
+            "/bench-bucket/object",
+            &headers,
+            &query,
+        ));
+    }
+
+    #[test]
+    fn s3_object_body_detection_rejects_xml_subresource_uploads() {
+        let headers = HeaderMap::new();
+        let query = std::collections::HashMap::from([("tagging".to_string(), String::new())]);
+
+        assert!(!is_s3_object_body_request(
+            &Method::PUT,
+            "/bench-bucket/object",
+            &headers,
+            &query,
+        ));
     }
 }

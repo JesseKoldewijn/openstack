@@ -17,8 +17,9 @@ env:
   PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
-  PARITY_MOTO_IMAGE: motoserver/moto:latest
+  PARITY_MOTO_IMAGE: motoserver/moto:5.1.22
   PARITY_DOCKER_NETWORK_MODE: bridge
+  OHA_VERSION: 1.14.0
 
 permissions:
   contents: read
@@ -476,7 +477,7 @@ jobs:
       - name: Install oha
         run: |
           set -euo pipefail
-          curl -sSfL https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64 -o /usr/local/bin/oha
+          curl -sSfL "https://github.com/hatoo/oha/releases/download/v${OHA_VERSION}/oha-linux-amd64" -o /usr/local/bin/oha
           chmod +x /usr/local/bin/oha
           oha --version
       - name: Run benchmark (default profile)

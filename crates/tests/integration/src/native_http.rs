@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use once_cell::sync::Lazy;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -10,6 +11,67 @@ use crate::parity::{CaptureJson, ProtocolFamily, ScenarioStep};
 
 const RESPONSE_HEADER_ALLOWLIST: &[&str] = &["content-type", "etag", "x-amz-bucket-region"];
 const INLINE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+
+static RE_XML_DECL: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<\?xml[^>]*\?>"#).expect("valid regex"));
+static RE_XMLNS: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"\s+xmlns=\"[^\"]+\""#).expect("valid regex"));
+static RE_RESPONSE_METADATA: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"<ResponseMetadata>.*?</ResponseMetadata>"#).expect("valid regex")
+});
+static RE_REQUEST_ID: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<RequestId>[^<]+</RequestId>"#).expect("valid regex"));
+static RE_UUID_IN_TAG: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#">[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}<"#)
+        .expect("valid regex")
+});
+static RE_RUN_ID: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"[A-Za-z0-9_-]+core-[0-9]{14}"#).expect("valid regex"));
+static RE_SQS_HOST_URL: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"http://[a-z0-9\.-]+:[0-9]+/000000000000/"#).expect("valid regex")
+});
+static RE_MESSAGE_ID: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<MessageId>[^<]+</MessageId>"#).expect("valid regex"));
+static RE_RECEIPT_HANDLE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<ReceiptHandle>.*?</ReceiptHandle>"#).expect("valid regex"));
+static RE_MD5_OF_BODY: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<MD5OfBody>.*?</MD5OfBody>"#).expect("valid regex"));
+static RE_MD5_OF_MESSAGE_BODY: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"<MD5OfMessageBody>.*?</MD5OfMessageBody>"#).expect("valid regex")
+});
+static RE_ACCESS_KEY_ID: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<AccessKeyId>.*?</AccessKeyId>"#).expect("valid regex"));
+static RE_SECRET_ACCESS_KEY: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"<SecretAccessKey>.*?</SecretAccessKey>"#).expect("valid regex")
+});
+static RE_SESSION_TOKEN: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<SessionToken>.*?</SessionToken>"#).expect("valid regex"));
+static RE_EXPIRATION: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<Expiration>.*?</Expiration>"#).expect("valid regex"));
+static RE_ASSUMED_ROLE_ID: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<AssumedRoleId>.*?</AssumedRoleId>"#).expect("valid regex"));
+static RE_PACKED_POLICY_SIZE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"<PackedPolicySize>.*?</PackedPolicySize>"#).expect("valid regex")
+});
+static RE_SEQUENCE_NUMBER: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"<SequenceNumber>.*?</SequenceNumber>"#).expect("valid regex")
+});
+static RE_TYPE_TAG: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<Type>.*?</Type>"#).expect("valid regex"));
+static RE_ATTRIBUTE_TAG: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<Attribute>.*?</Attribute>"#).expect("valid regex"));
+static RE_MISSING_QUEUE_MESSAGE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r#"Queue does not exist|The specified queue does not exist(?: for this wsdl version\.)?"#,
+    )
+    .expect("valid regex")
+});
+static RE_MISSING_DDB_TABLE_MESSAGE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"Cannot do operations on a non-existent table: [A-Za-z0-9_-]+"#)
+        .expect("valid regex")
+});
+static RE_XML_SPACE_BETWEEN_TAGS: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#">\s+<"#).expect("valid regex"));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -1682,94 +1744,44 @@ pub fn normalize_xml(raw: &str) -> String {
         text = text.replace("  ", " ");
     }
 
-    if let Ok(re) = regex::Regex::new(r#"<\?xml[^>]*\?>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"\s+xmlns=\"[^\"]+\""#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<ResponseMetadata>.*?</ResponseMetadata>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<RequestId>[^<]+</RequestId>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) =
-        regex::Regex::new(r#">[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}<"#)
-    {
-        text = re.replace_all(&text, "><").to_string();
-    }
+    text = RE_XML_DECL.replace_all(&text, "").to_string();
+    text = RE_XMLNS.replace_all(&text, "").to_string();
+    text = RE_RESPONSE_METADATA.replace_all(&text, "").to_string();
+    text = RE_REQUEST_ID.replace_all(&text, "").to_string();
+    text = RE_UUID_IN_TAG.replace_all(&text, "><").to_string();
 
-    if let Ok(re) = regex::Regex::new(r#"[A-Za-z0-9_-]+core-[0-9]{14}"#) {
-        text = re.replace_all(&text, "<run-id>").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"http://[a-z0-9\.-]+:[0-9]+/000000000000/"#) {
-        text = re
-            .replace_all(
-                &text,
-                "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/",
-            )
-            .to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<MessageId>[^<]+</MessageId>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<ReceiptHandle>.*?</ReceiptHandle>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<MD5OfBody>.*?</MD5OfBody>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<MD5OfMessageBody>.*?</MD5OfMessageBody>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<AccessKeyId>.*?</AccessKeyId>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<SecretAccessKey>.*?</SecretAccessKey>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<SessionToken>.*?</SessionToken>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<Expiration>.*?</Expiration>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<AssumedRoleId>.*?</AssumedRoleId>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<PackedPolicySize>.*?</PackedPolicySize>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<SequenceNumber>.*?</SequenceNumber>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<Type>.*?</Type>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(r#"<Attribute>.*?</Attribute>"#) {
-        text = re.replace_all(&text, "").to_string();
-    }
-    if let Ok(re) = regex::Regex::new(
-        r#"Queue does not exist|The specified queue does not exist(?: for this wsdl version\.)?"#,
-    ) {
-        text = re
-            .replace_all(&text, "The specified queue does not exist")
-            .to_string();
-    }
-    if let Ok(re) =
-        regex::Regex::new(r#"Cannot do operations on a non-existent table: [A-Za-z0-9_-]+"#)
-    {
-        text = re
-            .replace_all(&text, "Cannot do operations on a non-existent table")
-            .to_string();
-    }
+    text = RE_RUN_ID.replace_all(&text, "<run-id>").to_string();
+    text = RE_SQS_HOST_URL
+        .replace_all(
+            &text,
+            "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/",
+        )
+        .to_string();
+    text = RE_MESSAGE_ID.replace_all(&text, "").to_string();
+    text = RE_RECEIPT_HANDLE.replace_all(&text, "").to_string();
+    text = RE_MD5_OF_BODY.replace_all(&text, "").to_string();
+    text = RE_MD5_OF_MESSAGE_BODY.replace_all(&text, "").to_string();
+    text = RE_ACCESS_KEY_ID.replace_all(&text, "").to_string();
+    text = RE_SECRET_ACCESS_KEY.replace_all(&text, "").to_string();
+    text = RE_SESSION_TOKEN.replace_all(&text, "").to_string();
+    text = RE_EXPIRATION.replace_all(&text, "").to_string();
+    text = RE_ASSUMED_ROLE_ID.replace_all(&text, "").to_string();
+    text = RE_PACKED_POLICY_SIZE.replace_all(&text, "").to_string();
+    text = RE_SEQUENCE_NUMBER.replace_all(&text, "").to_string();
+    text = RE_TYPE_TAG.replace_all(&text, "").to_string();
+    text = RE_ATTRIBUTE_TAG.replace_all(&text, "").to_string();
+    text = RE_MISSING_QUEUE_MESSAGE
+        .replace_all(&text, "The specified queue does not exist")
+        .to_string();
+    text = RE_MISSING_DDB_TABLE_MESSAGE
+        .replace_all(&text, "Cannot do operations on a non-existent table")
+        .to_string();
     while text.contains("> <") {
         text = text.replace("> <", "><");
     }
-    if let Ok(re) = regex::Regex::new(r#">\s+<"#) {
-        text = re.replace_all(&text, "><").to_string();
-    }
+    text = RE_XML_SPACE_BETWEEN_TAGS
+        .replace_all(&text, "><")
+        .to_string();
     text
 }
 

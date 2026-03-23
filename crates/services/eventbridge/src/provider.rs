@@ -63,6 +63,7 @@ fn disabled_service_error(service: &str) -> DispatchResponse {
         status_code: 501,
         body: ResponseBody::Buffered(Bytes::from(
             serde_json::to_vec(&json!({
+                // Keep InternalFailure for LocalStack parity on disabled EventBridge PutEvents.
                 "__type": "InternalFailure",
                 "message": format!(
                     "Service '{service}' is not enabled. Please check your 'SERVICES' configuration variable."

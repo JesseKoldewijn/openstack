@@ -229,4 +229,25 @@ mod tests {
 
         assert_eq!(bundle.get("123456789012", "us-east-1").unwrap().count, 7);
     }
+
+    #[test]
+    fn test_heap_fallback_long_key_lookup() {
+        let bundle: AccountRegionBundle<TestStore> = AccountRegionBundle::new();
+        let long_account = "12345678901234567890123456789012345678901234567890";
+        let long_region = "us-east-1-very-long-region-segment";
+
+        bundle.get_or_create(long_account, long_region).count = 5;
+
+        let found = bundle.get(long_account, long_region);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().count, 5);
+
+        {
+            let mut found_mut = bundle.get_mut(long_account, long_region);
+            assert!(found_mut.is_some());
+            found_mut.as_mut().unwrap().count = 9;
+        }
+
+        assert_eq!(bundle.get(long_account, long_region).unwrap().count, 9);
+    }
 }

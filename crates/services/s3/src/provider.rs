@@ -267,7 +267,9 @@ async fn handle_delete_bucket_async(
         if !store.as_ref().is_some_and(|s| s.bucket_exists(&bucket)) {
             return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
         }
-        if !store.as_ref().is_some_and(|s| s.is_bucket_empty(&bucket)) {
+        if !store.as_ref().is_some_and(|s| {
+            s.is_bucket_empty(&bucket) && !s.has_incomplete_multipart_uploads(&bucket)
+        }) {
             return s3_error("BucketNotEmpty", "The bucket is not empty", 409);
         }
     }
@@ -1368,6 +1370,12 @@ async fn handle_upload_part_async(
     file_store: &ObjectFileStore,
     ctx: &RequestContext,
 ) -> DispatchResponse {
+    let request_bucket = match bucket_from_path(&ctx.path) {
+        Some(b) => b,
+        None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
+    };
+    let request_key = key_from_path(&ctx.path);
+
     let upload_id = match ctx.query_params.get("uploadId") {
         Some(id) => id.clone(),
         None => return s3_error("InvalidRequest", "uploadId required", 400),
@@ -1388,7 +1396,12 @@ async fn handle_upload_part_async(
         };
         match store.get_multipart_upload(&upload_id) {
             None => return s3_error("NoSuchUpload", "The specified upload does not exist", 404),
-            Some(u) => (u.bucket.clone(), u.key.clone()),
+            Some(u) => {
+                if u.bucket != request_bucket || u.key != request_key {
+                    return s3_error("NoSuchUpload", "The specified upload does not exist", 404);
+                }
+                (u.bucket.clone(), u.key.clone())
+            }
         }
     };
 
@@ -1534,6 +1547,9 @@ async fn handle_complete_multipart_upload_async(
         match store.get_multipart_upload(&upload_id) {
             None => return s3_error("NoSuchUpload", "The specified upload does not exist", 404),
             Some(u) => {
+                if u.bucket != bucket || u.key != key {
+                    return s3_error("NoSuchUpload", "The specified upload does not exist", 404);
+                }
                 let content_type = u.content_type.clone();
                 let metadata = u.metadata.clone();
                 let mut sorted_parts: Vec<u32> = parts.iter().map(|(n, _)| *n).collect();

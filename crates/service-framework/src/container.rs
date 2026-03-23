@@ -161,8 +161,8 @@ impl ServiceContainer {
         {
             let mut state = self.state.write().await;
             *state = ServiceState::Stopped;
+            self.atomic_state.store(ATOMIC_STOPPED, Ordering::Release);
         }
-        self.atomic_state.store(ATOMIC_STOPPED, Ordering::Release);
         Ok(())
     }
 }

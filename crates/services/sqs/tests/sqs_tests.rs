@@ -82,7 +82,7 @@ fn is_uuid_like_message_id(s: &str) -> bool {
         }
     }
 
-    if bytes[14] != b'4' || bytes[19] != b'8' {
+    if bytes[14] != b'4' || !matches!(bytes[19].to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b') {
         return false;
     }
 

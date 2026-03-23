@@ -427,14 +427,13 @@ impl ServiceProvider for KinesisProvider {
                 let shard = &mut stream.shards[shard_idx];
                 let sequence_number = shard.next_sequence_number();
                 let record = crate::store::KinesisRecord {
-                    sequence_number,
+                    sequence_number: sequence_number.clone(),
                     partition_key: partition_key.to_owned(),
                     data: data.to_owned(),
                     approximate_arrival_timestamp: Utc::now(),
                 };
                 let shard_id = shard.shard_id.clone();
                 shard.records.push_back(record);
-                let sequence_number = &shard.records.back().unwrap().sequence_number;
 
                 Ok(json_ok(json!({
                     "ShardId": shard_id,

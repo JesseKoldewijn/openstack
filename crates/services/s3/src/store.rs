@@ -359,6 +359,12 @@ impl S3Store {
         self.objects.get(name).map(|m| m.is_empty()).unwrap_or(true)
     }
 
+    pub fn has_incomplete_multipart_uploads(&self, bucket: &str) -> bool {
+        self.multipart_uploads
+            .values()
+            .any(|upload| upload.bucket == bucket)
+    }
+
     // --- object helpers ----------------------------------------------------
 
     pub fn put_object(
@@ -406,8 +412,6 @@ impl S3Store {
                 obj.versions.push(version);
             } else {
                 obj.versions.insert(0, version);
-                // Keep at most 100 non-current versions to avoid unbounded growth
-                obj.versions.truncate(100);
             }
             prev
         } else {
@@ -435,7 +439,6 @@ impl S3Store {
                 obj.versions.push(version);
             } else {
                 obj.versions.insert(0, version);
-                obj.versions.truncate(100);
             }
             prev
         } else {

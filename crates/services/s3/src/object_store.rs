@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashSet;
+use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
@@ -58,6 +59,13 @@ impl ObjectFileStore {
         format!("{:032x}", xxh3_128(key.as_bytes()))
     }
 
+    /// Legacy SHA-256 hash used by older object path layouts.
+    fn key_hash_legacy_sha256(key: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(key.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
     async fn ensure_dir_exists(&self, dir: &Path) -> io::Result<()> {
         if self.known_dirs.contains(dir) {
             return Ok(());
@@ -85,6 +93,14 @@ impl ObjectFileStore {
             .join(Self::key_hash(key))
     }
 
+    fn object_dir_legacy(&self, account_id: &str, region: &str, bucket: &str, key: &str) -> PathBuf {
+        self.base_dir
+            .join(account_id)
+            .join(region)
+            .join(bucket)
+            .join(Self::key_hash_legacy_sha256(key))
+    }
+
     /// Build the full file path for a specific object version.
     fn object_path(
         &self,
@@ -96,6 +112,42 @@ impl ObjectFileStore {
     ) -> PathBuf {
         self.object_dir(account_id, region, bucket, key)
             .join(version_id)
+    }
+
+    fn object_path_legacy(
+        &self,
+        account_id: &str,
+        region: &str,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> PathBuf {
+        self.object_dir_legacy(account_id, region, bucket, key)
+            .join(version_id)
+    }
+
+    async fn resolve_existing_object_path(
+        &self,
+        account_id: &str,
+        region: &str,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> io::Result<PathBuf> {
+        let current = self.object_path(account_id, region, bucket, key, version_id);
+        if fs::metadata(&current).await.is_ok() {
+            return Ok(current);
+        }
+
+        let legacy = self.object_path_legacy(account_id, region, bucket, key, version_id);
+        if fs::metadata(&legacy).await.is_ok() {
+            return Ok(legacy);
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "object file not found in current or legacy layout",
+        ))
     }
 
     /// Build the bucket-level directory path.
@@ -253,7 +305,9 @@ impl ObjectFileStore {
         key: &str,
         version_id: &str,
     ) -> io::Result<fs::File> {
-        let path = self.object_path(account_id, region, bucket, key, version_id);
+        let path = self
+            .resolve_existing_object_path(account_id, region, bucket, key, version_id)
+            .await?;
         fs::File::open(&path).await
     }
 
@@ -276,23 +330,52 @@ impl ObjectFileStore {
         key: &str,
         version_id: &str,
     ) -> io::Result<()> {
-        let path = self.object_path(account_id, region, bucket, key, version_id);
-        match fs::remove_file(&path).await {
+        let current_path = self.object_path(account_id, region, bucket, key, version_id);
+        let legacy_path = self.object_path_legacy(account_id, region, bucket, key, version_id);
+
+        let mut deleted = false;
+        match fs::remove_file(&current_path).await {
             Ok(()) => {
-                debug!(path = %path.display(), "Object file deleted");
+                deleted = true;
+                debug!(path = %current_path.display(), "Object file deleted");
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                // Already gone — not an error.
-                debug!(path = %path.display(), "Object file already absent");
+                match fs::remove_file(&legacy_path).await {
+                    Ok(()) => {
+                        deleted = true;
+                        debug!(path = %legacy_path.display(), "Legacy object file deleted");
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        // Already gone — not an error.
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             Err(e) => return Err(e),
         }
 
-        // Clean up empty parent directories (key_hash dir, then bucket dir).
-        let key_dir = self.object_dir(account_id, region, bucket, key);
-        Self::remove_dir_if_empty(&key_dir).await;
-        if fs::metadata(&key_dir).await.is_err() {
-            self.known_dirs.remove(&key_dir);
+        if !deleted {
+            debug!(
+                current_path = %current_path.display(),
+                legacy_path = %legacy_path.display(),
+                "Object file already absent"
+            );
+        }
+
+        // Clean up empty parent directories in both current and legacy layouts.
+        let current_key_dir = self.object_dir(account_id, region, bucket, key);
+        let legacy_key_dir = self.object_dir_legacy(account_id, region, bucket, key);
+
+        Self::remove_dir_if_empty(&current_key_dir).await;
+        if fs::metadata(&current_key_dir).await.is_err() {
+            self.known_dirs.remove(&current_key_dir);
+        }
+
+        if legacy_key_dir != current_key_dir {
+            Self::remove_dir_if_empty(&legacy_key_dir).await;
+            if fs::metadata(&legacy_key_dir).await.is_err() {
+                self.known_dirs.remove(&legacy_key_dir);
+            }
         }
 
         Ok(())
@@ -340,13 +423,15 @@ impl ObjectFileStore {
         src: ObjectLocation<'_>,
         dst: ObjectLocation<'_>,
     ) -> io::Result<PathBuf> {
-        let src = self.object_path(
-            src.account_id,
-            src.region,
-            src.bucket,
-            src.key,
-            src.version_id,
-        );
+        let src = self
+            .resolve_existing_object_path(
+                src.account_id,
+                src.region,
+                src.bucket,
+                src.key,
+                src.version_id,
+            )
+            .await?;
         let dst_dir = self.object_dir(dst.account_id, dst.region, dst.bucket, dst.key);
         self.ensure_dir_exists(&dst_dir).await?;
         let dst = dst_dir.join(dst.version_id);
@@ -636,6 +721,12 @@ mod tests {
         let key_dir = store.object_dir("acct1", "us-east-1", "bkt", "same-key");
         let final_path = key_dir.join("null");
         assert!(final_path.exists(), "final object file should exist");
+        let final_bytes = tokio::fs::read(&final_path).await.unwrap();
+        assert_eq!(final_bytes.len(), 64);
+        assert!(
+            (0u8..10).any(|i| final_bytes == vec![i; 64]),
+            "final object should match one complete writer payload"
+        );
 
         // No .tmp files should remain.
         let mut entries = tokio::fs::read_dir(&key_dir).await.unwrap();
@@ -667,5 +758,23 @@ mod tests {
         let dir = path.parent().unwrap();
         let tmp_path = dir.join("v1.tmp");
         assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn read_object_falls_back_to_legacy_sha256_layout() {
+        let (store, _tmp) = make_store().await;
+        let legacy_dir = store.object_dir_legacy("acct1", "us-east-1", "bkt", "legacy-key");
+        tokio::fs::create_dir_all(&legacy_dir).await.unwrap();
+        let legacy_path = legacy_dir.join("v1");
+        tokio::fs::write(&legacy_path, b"legacy-data").await.unwrap();
+
+        let mut file = store
+            .read_object("acct1", "us-east-1", "bkt", "legacy-key", "v1")
+            .await
+            .expect("legacy object should be readable");
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"legacy-data");
     }
 }

@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -85,8 +86,32 @@ fn query_ok(action: &str, inner: &str) -> DispatchResponse {
 }
 
 fn query_metric_data(ctx: &RequestContext) -> Vec<Value> {
+    fn coerce_value(raw: &str) -> Value {
+        if let Ok(v) = raw.parse::<i64>() {
+            return Value::Number(v.into());
+        }
+        if let Ok(v) = raw.parse::<f64>()
+            && let Some(n) = serde_json::Number::from_f64(v)
+        {
+            return Value::Number(n);
+        }
+        Value::String(raw.to_string())
+    }
+
+    // Query API requests primarily carry MetricData.member.* in the
+    // x-www-form-urlencoded body. Fall back to query params for compatibility.
+    let mut form_params: HashMap<String, String> = HashMap::new();
+    if let Ok(parsed) =
+        serde_urlencoded::from_bytes::<HashMap<String, String>>(ctx.raw_body_bytes())
+    {
+        form_params = parsed;
+    }
+    if form_params.is_empty() {
+        form_params = ctx.query_params.clone();
+    }
+
     let mut members: BTreeMap<usize, serde_json::Map<String, Value>> = BTreeMap::new();
-    for (key, value) in &ctx.query_params {
+    for (key, value) in &form_params {
         if let Some(rest) = key.strip_prefix("MetricData.member.") {
             let mut parts = rest.splitn(2, '.');
             let Some(index) = parts.next().and_then(|s| s.parse::<usize>().ok()) else {
@@ -95,10 +120,33 @@ fn query_metric_data(ctx: &RequestContext) -> Vec<Value> {
             let Some(field) = parts.next() else {
                 continue;
             };
-            members
-                .entry(index)
-                .or_default()
-                .insert(field.to_string(), Value::String(value.clone()));
+
+            let entry = members.entry(index).or_default();
+            if let Some(dim_rest) = field.strip_prefix("Dimensions.member.") {
+                let mut dim_parts = dim_rest.splitn(2, '.');
+                let Some(dim_index) = dim_parts.next().and_then(|s| s.parse::<usize>().ok()) else {
+                    continue;
+                };
+                let Some(dim_field) = dim_parts.next() else {
+                    continue;
+                };
+
+                let dims = entry
+                    .entry("Dimensions".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                let Some(dims_arr) = dims.as_array_mut() else {
+                    continue;
+                };
+                while dims_arr.len() < dim_index {
+                    dims_arr.push(Value::Object(serde_json::Map::new()));
+                }
+
+                if let Some(Value::Object(dim_obj)) = dims_arr.get_mut(dim_index - 1) {
+                    dim_obj.insert(dim_field.to_string(), Value::String(value.clone()));
+                }
+            } else {
+                entry.insert(field.to_string(), coerce_value(value));
+            }
         }
     }
     members.into_values().map(Value::Object).collect()

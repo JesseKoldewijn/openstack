@@ -55,6 +55,8 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             }))
             .unwrap(),
         )),
+        // LocalStack parity: KMS errors currently return application/json while
+        // successful responses use application/x-amz-json-1.1.
         content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }

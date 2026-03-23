@@ -583,6 +583,19 @@ impl ServiceProvider for StepFunctionsProvider {
                 };
 
                 let mut store = self.store.get_or_create(account_id, region);
+                if !store
+                    .state_machines
+                    .contains_key(&execution.state_machine_arn)
+                {
+                    return Ok(json_error(
+                        "StateMachineDoesNotExist",
+                        &format!(
+                            "State Machine Does Not Exist: '{}'",
+                            execution.state_machine_arn
+                        ),
+                        400,
+                    ));
+                }
                 store.executions.insert(exec_arn.clone(), execution);
 
                 Ok(json_ok(json!({

@@ -5,7 +5,13 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+
+static RE_S3_OWNER: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<Owner>.*?</Owner>"#).expect("valid owner regex"));
+static RE_S3_EMPTY_BUCKETS: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"<Buckets\s*/>"#).expect("valid buckets regex"));
 
 use crate::classification::{
     PersistenceMode, ServiceDurabilityClass, ServiceExecutionClass, parse_persistence_mode,
@@ -921,18 +927,10 @@ fn normalized_body_for_comparison(
         return body.to_string();
     }
 
-    let without_owner = regex::Regex::new(r#"<Owner>.*?</Owner>"#)
-        .ok()
-        .map(|re| re.replace_all(body, "<Owner></Owner>").to_string())
-        .unwrap_or_else(|| body.to_string());
-
-    regex::Regex::new(r#"<Buckets\s*/>"#)
-        .ok()
-        .map(|re| {
-            re.replace_all(&without_owner, "<Buckets></Buckets>")
-                .to_string()
-        })
-        .unwrap_or(without_owner)
+    let without_owner = RE_S3_OWNER.replace_all(body, "<Owner></Owner>").to_string();
+    RE_S3_EMPTY_BUCKETS
+        .replace_all(&without_owner, "<Buckets></Buckets>")
+        .to_string()
 }
 
 fn uses_broader_s3_normalization(scenario: &Scenario, selected_profile: &str) -> bool {
@@ -1623,7 +1621,11 @@ mod tests {
             .into_iter()
             .map(|scenario| scenario.service)
             .collect::<BTreeSet<_>>();
+        let configured_services = super::all_service_names()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
 
+        assert_eq!(configured_services, smoke_services);
         assert_eq!(readme_services, smoke_services);
     }
 }

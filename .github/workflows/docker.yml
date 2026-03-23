@@ -46,7 +46,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' }}
-            type=raw,value=beta,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=raw,value=beta,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
             type=ref,event=pr
 
   build-amd64:
@@ -61,6 +61,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Keep schedule semantics deterministic regardless of default branch.
+          ref: ${{ github.event_name == 'schedule' && 'refs/heads/main' || github.ref }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -104,6 +107,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Keep schedule semantics deterministic regardless of default branch.
+          ref: ${{ github.event_name == 'schedule' && 'refs/heads/main' || github.ref }}
 
       - name: Set up QEMU (for arm64 emulation)
         uses: docker/setup-qemu-action@v3
@@ -209,7 +215,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [publish-amd64-fast, publish-manifest]
     permissions:
-      contents: read
       packages: write
     steps:
       - name: Delete temporary staging tags from GHCR
@@ -228,8 +233,7 @@ jobs:
             VERSION_ID=$(gh api \
               "/users/${OWNER}/packages/container/${PACKAGE_NAME}/versions" \
               --paginate \
-              --jq ".[] | select(.metadata.container.tags | index(\"${TAG}\")) | .id" \
-              2>/dev/null || true)
+              --jq ".[] | select(.metadata.container.tags | index(\"${TAG}\")) | .id")
 
             if [[ -n "$VERSION_ID" ]]; then
               echo "Deleting version ${VERSION_ID} (tag: ${TAG})" >&2

@@ -48,6 +48,7 @@ fn json_ok_text_plain(body: Value) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(&body).unwrap())),
+        // LocalStack returns text/plain for ListDomainNames while the payload is JSON.
         content_type: Cow::Borrowed("text/plain; charset=utf-8"),
         headers: Vec::new(),
     }
@@ -245,7 +246,8 @@ impl ServiceProvider for OpenSearchProvider {
                 domain_names.sort_by(|left, right| {
                     left["DomainName"]
                         .as_str()
-                        .cmp(&right["DomainName"].as_str())
+                        .unwrap_or_default()
+                        .cmp(right["DomainName"].as_str().unwrap_or_default())
                 });
 
                 Ok(json_ok_text_plain(json!({

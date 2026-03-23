@@ -439,9 +439,22 @@ impl ServiceProvider for Ec2Provider {
                     }
                     result
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(existing_store) = self.store.get(account_id, region) else {
+                    if let Some(id) = ids.first() {
+                        return Ok(xml_error(
+                            "InvalidInstanceID.NotFound",
+                            &format!("The instance ID '{id}' does not exist"),
+                            400,
+                        ));
+                    }
+                    return Ok(xml_ok(
+                        "TerminateInstances",
+                        &rid,
+                        "<instancesSet></instancesSet>",
+                    ));
+                };
                 for id in &ids {
-                    if !store.instances.contains_key(id) {
+                    if !existing_store.instances.contains_key(id) {
                         return Ok(xml_error(
                             "InvalidInstanceID.NotFound",
                             &format!("The instance ID '{id}' does not exist"),
@@ -449,6 +462,9 @@ impl ServiceProvider for Ec2Provider {
                         ));
                     }
                 }
+
+                drop(existing_store);
+                let mut store = self.store.get_or_create(account_id, region);
                 for id in &ids {
                     if let Some(inst) = store.instances.get_mut(id) {
                         inst.state = "terminated".to_string();

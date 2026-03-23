@@ -202,7 +202,7 @@ async fn test_remove_targets() {
 }
 
 #[tokio::test]
-async fn test_put_events() {
+async fn test_put_events_returns_service_disabled_error() {
     let p = EventBridgeProvider::new();
     let resp = p
         .dispatch(&make_ctx(

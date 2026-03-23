@@ -286,16 +286,28 @@ fn uuid_hex_upper(n: usize) -> String {
     })
 }
 
-/// Encode `n` random bytes as lowercase hex (2n chars) using the thread-local fast RNG.
-fn uuid_hex_lower(n: usize) -> String {
-    FAST_RNG.with(|rng| {
-        let mut rng = rng.borrow_mut();
-        let mut s = String::with_capacity(n * 2);
-        for _ in 0..n {
-            write!(s, "{:02x}", rng.random::<u8>()).expect("write to String is infallible");
-        }
-        s
-    })
+/// Encode `n` random bytes as lowercase hex using a CSPRNG for credentials.
+fn secure_hex_lower(n: usize) -> String {
+    let mut bytes = vec![0u8; n];
+    rand::rng().fill(&mut bytes);
+
+    let mut s = String::with_capacity(n * 2);
+    for b in bytes {
+        write!(s, "{:02x}", b).expect("write to String is infallible");
+    }
+    s
+}
+
+/// Encode `n` random bytes as uppercase hex using a CSPRNG for credentials.
+fn secure_hex_upper(n: usize) -> String {
+    let mut bytes = vec![0u8; n];
+    rand::rng().fill(&mut bytes);
+
+    let mut s = String::with_capacity(n * 2);
+    for b in bytes {
+        write!(s, "{:02X}", b).expect("write to String is infallible");
+    }
+    s
 }
 
 /// Look up a request parameter from query_params first, then from the JSON request body.
@@ -791,14 +803,15 @@ impl ServiceProvider for IamProvider {
                 let session_name = param(ctx, "RoleSessionName").unwrap_or("session");
                 let expiry = (Utc::now() + chrono::Duration::hours(1)).format("%Y-%m-%dT%H:%M:%SZ");
                 // Generate the three UUID-derived tokens with one allocation each.
-                let access_key_suffix = uuid_hex_upper(8); // ASIA + 16 uppercase hex
-                let secret_key = uuid_hex_lower(16); // 32 lowercase hex
-                let role_id_suffix = uuid_hex_upper(8); // AROA + 16 uppercase hex
+                let access_key_suffix = secure_hex_upper(8); // ASIA + 16 uppercase hex
+                let secret_key = secure_hex_lower(16); // 32 lowercase hex
+                let role_id_suffix = secure_hex_upper(8); // AROA + 16 uppercase hex
+                let session_token = secure_hex_lower(32);
                 let creds_xml = format!(
                     "<Credentials>\
 <AccessKeyId>ASIA{access_key_suffix}</AccessKeyId>\
 <SecretAccessKey>{secret_key}</SecretAccessKey>\
-<SessionToken>FQoGZXIvYXdzENr//</SessionToken>\
+<SessionToken>{session_token}</SessionToken>\
 <Expiration>{expiry}</Expiration>\
 </Credentials>\
 <AssumedRoleUser>\

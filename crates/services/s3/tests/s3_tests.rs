@@ -159,6 +159,35 @@ async fn test_delete_non_empty_bucket_fails() {
 }
 
 #[tokio::test]
+async fn test_delete_bucket_with_incomplete_multipart_upload_fails() {
+    let provider = new_provider().await;
+    provider
+        .dispatch(&make_ctx("PUT", "/mp-bucket", b""))
+        .await
+        .unwrap();
+
+    // Create multipart upload but do not complete/abort it.
+    let mut create_qp = HashMap::new();
+    create_qp.insert("uploads".to_string(), String::new());
+    let create_resp = provider
+        .dispatch(&make_ctx_with_query(
+            "POST",
+            "/mp-bucket/obj.bin",
+            b"",
+            create_qp,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status_code, 200);
+
+    let delete_resp = provider
+        .dispatch(&make_ctx("DELETE", "/mp-bucket", b""))
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status_code, 409);
+}
+
+#[tokio::test]
 async fn test_head_bucket() {
     let provider = new_provider().await;
     let ctx = make_ctx("PUT", "/hb-bucket", b"");

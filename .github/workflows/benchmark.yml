@@ -18,11 +18,12 @@ on:
 
 env:
   PARITY_LOCALSTACK_IMAGE: localstack/localstack:3.7.2
-  PARITY_MOTO_IMAGE: motoserver/moto:latest
+  PARITY_MOTO_IMAGE: motoserver/moto:5.1.22
   PARITY_OPENSTACK_IMAGE: ghcr.io/jessekoldewijn/openstack:latest
   PARITY_DOCKER_CPU_LIMIT: "2"
   PARITY_DOCKER_MEMORY_LIMIT: 4g
   PARITY_DOCKER_NETWORK_MODE: bridge
+  OHA_VERSION: 1.14.0
 
 permissions:
   contents: read
@@ -46,6 +47,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR_LOGIN: ${{ github.event.comment.user.login }}
           COMMENT_AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association }}
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_PROFILE: ${{ github.event.inputs.profile }}
@@ -67,10 +69,16 @@ jobs:
               exit 0
             fi
 
-            if [[ "${COMMENT_AUTHOR_ASSOCIATION:-}" != "OWNER" \
-               && "${COMMENT_AUTHOR_ASSOCIATION:-}" != "MEMBER" \
-               && "${COMMENT_AUTHOR_ASSOCIATION:-}" != "COLLABORATOR" ]]; then
-              echo "Comment author is not a trusted collaborator — skipping" >&2
+            # Require explicit write-level repository permission before running
+            # PR code from an issue comment trigger.
+            PERMISSION=$(gh api \
+              "repos/${{ github.repository }}/collaborators/${COMMENT_AUTHOR_LOGIN}/permission" \
+              --jq '.permission' 2>/dev/null || echo "none")
+            if [[ "$PERMISSION" != "admin" \
+               && "$PERMISSION" != "maintain" \
+               && "$PERMISSION" != "write" ]]; then
+              echo "Comment author does not have write-level permission — skipping" >&2
+              echo "association=${COMMENT_AUTHOR_ASSOCIATION:-unknown}, permission=${PERMISSION}" >&2
               echo "should_run=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -156,7 +164,7 @@ jobs:
   benchmark:
     name: Benchmark (${{ needs.check-trigger.outputs.profile }} profile)
     runs-on: ubuntu-latest
-    continue-on-error: true
+    continue-on-error: false
     needs: [check-trigger, prepare-openstack-runtime-image]
     if: needs.check-trigger.outputs.should_run == 'true'
     env:
@@ -213,7 +221,7 @@ jobs:
       - name: Install oha
         run: |
           set -euo pipefail
-          curl -sSfL https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64 -o /usr/local/bin/oha
+          curl -sSfL "https://github.com/hatoo/oha/releases/download/v${OHA_VERSION}/oha-linux-amd64" -o /usr/local/bin/oha
           chmod +x /usr/local/bin/oha
           oha --version
       - name: Run benchmark (${{ env.BENCH_PROFILE }} profile)
@@ -278,4 +286,5 @@ jobs:
           path: |
             benchmark-report.json
             benchmark-gate.json
+            benchmark_gate_summary.md
           retention-days: 14
