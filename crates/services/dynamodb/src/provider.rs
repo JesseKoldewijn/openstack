@@ -9,6 +9,7 @@ use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tracing::warn;
 
@@ -38,11 +39,7 @@ impl DynamoDbProvider {
 
     /// Get-or-create the inner Arc<DashMap<String, Table>>, releasing the
     /// outer shard lock immediately after cloning the Arc.
-    fn get_or_create_tables(
-        &self,
-        account_id: &str,
-        region: &str,
-    ) -> Arc<DashMap<String, Table>> {
+    fn get_or_create_tables(&self, account_id: &str, region: &str) -> Arc<DashMap<String, Table>> {
         self.store.get_or_create(account_id, region).tables_ref()
     }
 }
@@ -64,6 +61,43 @@ fn json_ok(body: Value) -> DispatchResponse {
         content_type: Cow::Borrowed("application/x-amz-json-1.0"),
         headers: Vec::new(),
     }
+}
+
+/// Serialize `val` directly to JSON bytes, bypassing the intermediate
+/// `serde_json::Value` tree that `json_ok(json!({...}))` would produce.
+fn serialize_response<T: Serialize>(val: &T) -> DispatchResponse {
+    DispatchResponse {
+        status_code: 200,
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(val).unwrap())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.0"),
+        headers: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thin response wrapper structs — derive Serialize to avoid double-serialization
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct GetItemResp<'a> {
+    #[serde(rename = "Item", skip_serializing_if = "Option::is_none")]
+    item: Option<&'a Item>,
+}
+
+#[derive(Serialize)]
+struct QueryResp<'a> {
+    #[serde(rename = "Items")]
+    items: &'a [Item],
+    #[serde(rename = "Count")]
+    count: usize,
+    #[serde(rename = "ScannedCount")]
+    scanned_count: usize,
+}
+
+#[derive(Serialize)]
+struct MutationResp<'a> {
+    #[serde(rename = "Attributes", skip_serializing_if = "Option::is_none")]
+    attributes: Option<&'a Item>,
 }
 
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
@@ -207,7 +241,11 @@ fn parse_expr_names(v: Option<&Value>) -> HashMap<String, String> {
 
 fn parse_expr_values(v: Option<&Value>) -> HashMap<String, AttributeValue> {
     v.and_then(|m| m.as_object())
-        .map(|o| o.iter().map(|(k, v)| (k.clone(), av_from_json(v))).collect())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), av_from_json(v)))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -238,7 +276,11 @@ fn parse_key_condition(
             if comps.len() == 2 {
                 let name = resolve_attr_name(comps[0].trim(), attr_names);
                 let val = resolve_attr_value(comps[1].trim(), attr_values);
-                let prefix = if let AttributeValue::S(s) = val { s.clone() } else { String::new() };
+                let prefix = if let AttributeValue::S(s) = val {
+                    s.clone()
+                } else {
+                    String::new()
+                };
                 if name == range_key_name {
                     range_cond = Some(RangeCondition::BeginsWith(prefix));
                 }
@@ -499,13 +541,13 @@ fn table_description(table: &crate::store::Table) -> Value {
 // Project item fields
 // ---------------------------------------------------------------------------
 
-fn project_item(
-    item: &Item,
+fn project_item<'a>(
+    item: &'a Item,
     projection: Option<&str>,
     attr_names: &HashMap<String, String>,
-) -> Item {
+) -> Cow<'a, Item> {
     match projection {
-        None | Some("") => item.clone(),
+        None | Some("") => Cow::Borrowed(item),
         Some(expr) => {
             // Resolve ExpressionAttributeNames placeholders (#name → actual name)
             // before splitting on commas.
@@ -532,10 +574,12 @@ fn project_item(
                 out
             };
             let attrs: Vec<&str> = resolved.split(',').map(|s| s.trim()).collect();
-            item.iter()
-                .filter(|(k, _)| attrs.contains(&k.as_str()))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
+            Cow::Owned(
+                item.iter()
+                    .filter(|(k, _)| attrs.contains(&k.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            )
         }
     }
 }
@@ -619,7 +663,7 @@ impl ServiceProvider for DynamoDbProvider {
                     store.tables_ref()
                     // outer RefMut (shard lock) released here
                 };
-                let desc = table_description(&*tables.get(&name).unwrap());
+                let desc = table_description(&tables.get(&name).unwrap());
                 Ok(json_ok(json!({ "TableDescription": desc })))
             }
 
@@ -671,7 +715,7 @@ impl ServiceProvider for DynamoDbProvider {
                         "Cannot do operations on a non-existent table",
                         400,
                     )),
-                    Some(table) => Ok(json_ok(json!({ "Table": table_description(&*table) }))),
+                    Some(table) => Ok(json_ok(json!({ "Table": table_description(&table) }))),
                 }
             }
 
@@ -779,7 +823,7 @@ impl ServiceProvider for DynamoDbProvider {
                                 }
                             }
                         }
-                        let desc = table_description(&*table);
+                        let desc = table_description(&table);
                         Ok(json_ok(json!({ "TableDescription": desc })))
                     }
                 }
@@ -834,13 +878,15 @@ impl ServiceProvider for DynamoDbProvider {
                 }
 
                 let old = table.put_item(item);
-                let mut resp = json!({});
-                if return_values == "ALL_OLD"
-                    && let Some(old_item) = old
-                {
-                    resp["Attributes"] = json!(old_item);
-                }
-                Ok(json_ok(resp))
+                // Opt 4: drop the write lock before serialization.
+                drop(table);
+                Ok(serialize_response(&MutationResp {
+                    attributes: if return_values == "ALL_OLD" {
+                        old.as_ref()
+                    } else {
+                        None
+                    },
+                }))
             }
 
             "GetItem" => {
@@ -879,13 +925,19 @@ impl ServiceProvider for DynamoDbProvider {
                     Some(t) => t,
                 };
 
-                match table.get_item(&key) {
-                    None => Ok(json_ok(json!({}))),
+                // Opt 2: project_item returns Cow::Borrowed for no-projection (no clone).
+                // Opt 1: serialize_response writes bytes directly — lock is held only
+                //        during this fast byte-serialization pass, then dropped.
+                let resp = match table.get_item(&key) {
+                    None => serialize_response(&GetItemResp { item: None }),
                     Some(item) => {
                         let out = project_item(item, projection, &attr_names);
-                        Ok(json_ok(json!({ "Item": out })))
+                        serialize_response(&GetItemResp { item: Some(&*out) })
                     }
-                }
+                };
+                // Opt 4: explicitly drop the shard lock before returning.
+                drop(table);
+                Ok(resp)
             }
 
             "DeleteItem" => {
@@ -1126,6 +1178,8 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
+                // Collect owned items under the lock; Cow::into_owned() moves
+                // already-projected items (Cow::Owned) without extra allocation.
                 let mut items: Vec<Item> = table
                     .query(&hash_val, range_cond.as_ref(), index_name, scan_forward)
                     .into_iter()
@@ -1136,25 +1190,29 @@ impl ServiceProvider for DynamoDbProvider {
                             true
                         }
                     })
-                    .map(|item| project_item(item, projection_expr, &attr_names))
+                    .map(|item| project_item(item, projection_expr, &attr_names).into_owned())
                     .collect();
 
                 let total_count = items.len();
                 if let Some(lim) = limit {
                     items.truncate(lim);
                 }
-
                 let count = items.len();
-                let mut resp = json!({
-                    "Items": items,
-                    "Count": count,
-                    "ScannedCount": total_count,
-                });
-                if select == "COUNT" {
-                    resp["Items"] = json!([]);
-                    resp["Count"] = json!(total_count);
-                }
-                Ok(json_ok(resp))
+
+                // Opt 4: release the shard lock before serialization.
+                drop(table);
+
+                // Opt 1: serialize directly — no intermediate serde_json::Value tree.
+                let (out_items, out_count) = if select == "COUNT" {
+                    (Vec::new(), total_count)
+                } else {
+                    (items, count)
+                };
+                Ok(serialize_response(&QueryResp {
+                    items: &out_items,
+                    count: out_count,
+                    scanned_count: total_count,
+                }))
             }
 
             // ---------------------------------------------------------------
@@ -1228,27 +1286,35 @@ impl ServiceProvider for DynamoDbProvider {
                         true
                     }
                 });
+                // Collect owned items under the lock; Cow::into_owned() is free
+                // when already projected (Cow::Owned), or clones the borrow otherwise.
                 let items: Vec<Item> = if let Some(lim) = limit {
                     filtered
                         .take(lim)
-                        .map(|item| project_item(item, projection_expr, &attr_names))
+                        .map(|item| project_item(item, projection_expr, &attr_names).into_owned())
                         .collect()
                 } else {
                     filtered
-                        .map(|item| project_item(item, projection_expr, &attr_names))
+                        .map(|item| project_item(item, projection_expr, &attr_names).into_owned())
                         .collect()
                 };
 
                 let count = items.len();
-                let mut resp = json!({
-                    "Items": items,
-                    "Count": count,
-                    "ScannedCount": scanned_count,
-                });
-                if select == "COUNT" {
-                    resp["Items"] = json!([]);
-                }
-                Ok(json_ok(resp))
+
+                // Opt 4: release the shard lock before serialization.
+                drop(table);
+
+                // Opt 1: serialize directly — no intermediate serde_json::Value tree.
+                let (out_items, out_count) = if select == "COUNT" {
+                    (Vec::new(), count)
+                } else {
+                    (items, count)
+                };
+                Ok(serialize_response(&QueryResp {
+                    items: &out_items,
+                    count: out_count,
+                    scanned_count,
+                }))
             }
 
             // ---------------------------------------------------------------
@@ -1295,9 +1361,7 @@ impl ServiceProvider for DynamoDbProvider {
                                 for key_val in keys {
                                     let key: Item = key_val
                                         .as_object()
-                                        .map(|m| {
-                                            item_from_json_map(m)
-                                        })
+                                        .map(item_from_json_map)
                                         .unwrap_or_default();
                                     if let Some(item) = table.get_item(&key) {
                                         found.push(json!(project_item(
@@ -1399,7 +1463,7 @@ impl ServiceProvider for DynamoDbProvider {
                         let key: Item = get
                             .get("Key")
                             .and_then(|v| v.as_object())
-                            .map(|m| item_from_json_map(m))
+                            .map(item_from_json_map)
                             .unwrap_or_default();
                         let projection_expr =
                             get.get("ProjectionExpression").and_then(|v| v.as_str());
@@ -1413,7 +1477,8 @@ impl ServiceProvider for DynamoDbProvider {
                                     responses.push(json!({ "Item": project_item(item, projection_expr, &attr_names) }));
                                 }
                             },
-                        }                    } else {
+                        }
+                    } else {
                         responses.push(json!({}));
                     }
                 }
@@ -1451,9 +1516,7 @@ impl ServiceProvider for DynamoDbProvider {
                                     .get("Key")
                                     .or_else(|| op.get("Item"))
                                     .and_then(|v| v.as_object())
-                                    .map(|m| {
-                                        item_from_json_map(m)
-                                    })
+                                    .map(item_from_json_map)
                                     .unwrap_or_default();
 
                                 if let Some(table) = tables.get(table_name) {
@@ -1486,7 +1549,7 @@ impl ServiceProvider for DynamoDbProvider {
                         let item: Item = put
                             .get("Item")
                             .and_then(|v| v.as_object())
-                            .map(|m| item_from_json_map(m))
+                            .map(item_from_json_map)
                             .unwrap_or_default();
                         if let Some(mut table) = tables.get_mut(table_name) {
                             table.put_item(item);
@@ -1497,7 +1560,7 @@ impl ServiceProvider for DynamoDbProvider {
                         let key: Item = del
                             .get("Key")
                             .and_then(|v| v.as_object())
-                            .map(|m| item_from_json_map(m))
+                            .map(item_from_json_map)
                             .unwrap_or_default();
                         if let Some(mut table) = tables.get_mut(table_name) {
                             table.delete_item(&key);
@@ -1508,7 +1571,7 @@ impl ServiceProvider for DynamoDbProvider {
                         let key: Item = upd
                             .get("Key")
                             .and_then(|v| v.as_object())
-                            .map(|m| item_from_json_map(m))
+                            .map(item_from_json_map)
                             .unwrap_or_default();
                         let update_expr = upd.get("UpdateExpression").and_then(|v| v.as_str());
                         let attr_names = parse_expr_names(upd.get("ExpressionAttributeNames"));

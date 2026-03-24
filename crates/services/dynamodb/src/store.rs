@@ -116,8 +116,10 @@ pub fn av_from_json(v: &Value) -> AttributeValue {
         return AttributeValue::L(items);
     }
     if let Some(obj) = v.get("M").and_then(|x| x.as_object()) {
-        let map: HashMap<String, AttributeValue> =
-            obj.iter().map(|(k, v)| (k.clone(), av_from_json(v))).collect();
+        let map: HashMap<String, AttributeValue> = obj
+            .iter()
+            .map(|(k, v)| (k.clone(), av_from_json(v)))
+            .collect();
         return AttributeValue::M(map);
     }
     AttributeValue::Null
@@ -125,7 +127,9 @@ pub fn av_from_json(v: &Value) -> AttributeValue {
 
 /// Convert a `serde_json::Map` of wire-format attribute values into an `Item`.
 pub fn item_from_json_map(m: &serde_json::Map<String, Value>) -> Item {
-    m.iter().map(|(k, v)| (k.clone(), av_from_json(v))).collect()
+    m.iter()
+        .map(|(k, v)| (k.clone(), av_from_json(v)))
+        .collect()
 }
 
 pub type Item = HashMap<String, AttributeValue>;
@@ -247,25 +251,25 @@ impl MaterializedIndex {
 
     /// Remove an item's primary-key pair from this index.
     pub fn remove(&mut self, item: &Item, pk_hash: &str, pk_sort: &str) {
-        let Some(hv) = item.get(&self.hash_key_name).and_then(av_to_key_str) else {
+        let Some(hv) = item.get(&self.hash_key_name).and_then(av_to_key_str_ref) else {
             return;
         };
-        if let Some(bucket) = self.data.get_mut(&hv) {
+        if let Some(bucket) = self.data.get_mut(hv) {
             bucket.retain(|(h, s)| h != pk_hash || s != pk_sort);
             if bucket.is_empty() {
-                self.data.remove(&hv);
+                self.data.remove(hv);
             }
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum SortKeyValue {
-    S(String),
+#[derive(Debug, PartialEq)]
+pub enum SortKeyValue<'a> {
+    S(&'a str),
     N(f64),
 }
 
-impl PartialOrd for SortKeyValue {
+impl<'a> PartialOrd for SortKeyValue<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (SortKeyValue::S(a), SortKeyValue::S(b)) => a.partial_cmp(b),
@@ -454,12 +458,32 @@ impl Table {
         Some((hash_str, sort_str))
     }
 
+    /// Borrow partition + sort key strings directly from the item's `AttributeValue`s
+    /// without allocating.  Used on read paths (e.g. `get_item`) where owned
+    /// `String`s are not required.
+    pub fn extract_key_ref_from_item<'a>(&self, item: &'a Item) -> Option<(&'a str, &'a str)> {
+        let hk = self.hash_key_name()?;
+        let hv = item.get(hk)?;
+        let hash_str = av_to_key_str_ref(hv)?;
+        let sort_str = if let Some(rk) = self.range_key_name() {
+            let rv = item.get(rk)?;
+            av_to_key_str_ref(rv)?
+        } else {
+            ""
+        };
+        Some((hash_str, sort_str))
+    }
+
     pub fn put_item(&mut self, item: Item) -> Option<Item> {
         let (hk, sk) = self.extract_key_from_item(&item)?;
         let keys = self.make_key_map(&item);
 
         // Remove old item from all materialized indexes before replacing it.
-        let old = self.items.entry(hk.clone()).or_default().insert(sk.clone(), item.clone());
+        let old = self
+            .items
+            .entry(hk.clone())
+            .or_default()
+            .insert(sk.clone(), item.clone());
         if let Some(ref old_item) = old {
             for idx in self.index_data.values_mut() {
                 idx.remove(old_item, &hk, &sk);
@@ -479,8 +503,8 @@ impl Table {
     }
 
     pub fn get_item(&self, key: &Item) -> Option<&Item> {
-        let (hk, sk) = self.extract_key_from_item(key)?;
-        self.items.get(&hk)?.get(&sk)
+        let (hk, sk) = self.extract_key_ref_from_item(key)?;
+        self.items.get(hk)?.get(sk)
     }
 
     pub fn delete_item(&mut self, key: &Item) -> Option<Item> {
@@ -538,7 +562,11 @@ impl Table {
                         let ak = a.get(rk).and_then(av_sort_key);
                         let bk = b.get(rk).and_then(av_sort_key);
                         let ord = ak.partial_cmp(&bk).unwrap_or(std::cmp::Ordering::Equal);
-                        if scan_index_forward { ord } else { ord.reverse() }
+                        if scan_index_forward {
+                            ord
+                        } else {
+                            ord.reverse()
+                        }
                     });
                 }
                 return items;
@@ -552,8 +580,8 @@ impl Table {
                 .all_items()
                 .into_iter()
                 .filter(|item| {
-                    let item_hash = item.get(idx_hk).and_then(av_to_key_str);
-                    if item_hash.as_deref() != Some(hash_key_val) {
+                    let item_hash = item.get(idx_hk).and_then(av_to_key_str_ref);
+                    if item_hash != Some(hash_key_val) {
                         return false;
                     }
                     if let Some(rc) = range_condition
@@ -570,7 +598,11 @@ impl Table {
                     let ak = a.get(rk).and_then(av_sort_key);
                     let bk = b.get(rk).and_then(av_sort_key);
                     let ord = ak.partial_cmp(&bk).unwrap_or(std::cmp::Ordering::Equal);
-                    if scan_index_forward { ord } else { ord.reverse() }
+                    if scan_index_forward {
+                        ord
+                    } else {
+                        ord.reverse()
+                    }
                 });
             }
             return items;
@@ -846,9 +878,19 @@ pub fn av_to_key_str(v: &AttributeValue) -> Option<String> {
     }
 }
 
-pub fn av_sort_key(v: &AttributeValue) -> Option<SortKeyValue> {
+/// Borrow a string key from an `AttributeValue` without cloning.
+/// Use on read paths (lookups) where an owned `String` is not required.
+pub fn av_to_key_str_ref(v: &AttributeValue) -> Option<&str> {
     match v {
-        AttributeValue::S(s) => Some(SortKeyValue::S(s.clone())),
+        AttributeValue::S(s) => Some(s.as_str()),
+        AttributeValue::N(n) => Some(n.as_str()),
+        _ => None,
+    }
+}
+
+pub fn av_sort_key(v: &AttributeValue) -> Option<SortKeyValue<'_>> {
+    match v {
+        AttributeValue::S(s) => Some(SortKeyValue::S(s.as_str())),
         AttributeValue::N(n) => n.parse::<f64>().ok().map(SortKeyValue::N),
         _ => None,
     }
@@ -910,8 +952,16 @@ fn evaluate_expr(
             let attr_name = resolve_name(parts[0].trim(), names);
             let val = resolve_value(parts[1].trim(), values);
             if let Some(iv) = item.get(&attr_name) {
-                let is = if let AttributeValue::S(s) = iv { s.as_str() } else { "" };
-                let p = if let AttributeValue::S(s) = val { s.as_str() } else { "" };
+                let is = if let AttributeValue::S(s) = iv {
+                    s.as_str()
+                } else {
+                    ""
+                };
+                let p = if let AttributeValue::S(s) = val {
+                    s.as_str()
+                } else {
+                    ""
+                };
                 return is.starts_with(p);
             }
         }
@@ -924,8 +974,16 @@ fn evaluate_expr(
             let attr_name = resolve_name(parts[0].trim(), names);
             let val = resolve_value(parts[1].trim(), values);
             if let Some(iv) = item.get(&attr_name) {
-                let is = if let AttributeValue::S(s) = iv { s.as_str() } else { "" };
-                let substr = if let AttributeValue::S(s) = val { s.as_str() } else { "" };
+                let is = if let AttributeValue::S(s) = iv {
+                    s.as_str()
+                } else {
+                    ""
+                };
+                let substr = if let AttributeValue::S(s) = val {
+                    s.as_str()
+                } else {
+                    ""
+                };
                 return is.contains(substr);
             }
         }
@@ -938,16 +996,16 @@ fn evaluate_expr(
             let lv = resolve_item_value(item, lhs, names);
             let rv = resolve_value(rhs, values);
             return match *op {
-                "=" => av_compare(&lv, rv) == Some(std::cmp::Ordering::Equal),
-                "<>" => av_compare(&lv, rv) != Some(std::cmp::Ordering::Equal),
-                "<" => matches!(av_compare(&lv, rv), Some(std::cmp::Ordering::Less)),
+                "=" => av_compare(lv, rv) == Some(std::cmp::Ordering::Equal),
+                "<>" => av_compare(lv, rv) != Some(std::cmp::Ordering::Equal),
+                "<" => matches!(av_compare(lv, rv), Some(std::cmp::Ordering::Less)),
                 "<=" => matches!(
-                    av_compare(&lv, rv),
+                    av_compare(lv, rv),
                     Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
                 ),
-                ">" => matches!(av_compare(&lv, rv), Some(std::cmp::Ordering::Greater)),
+                ">" => matches!(av_compare(lv, rv), Some(std::cmp::Ordering::Greater)),
                 ">=" => matches!(
-                    av_compare(&lv, rv),
+                    av_compare(lv, rv),
                     Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
                 ),
                 _ => false,
@@ -1078,10 +1136,10 @@ fn apply_add_clause(
             let name = resolve_name(tokens[0].trim(), names);
             let delta = resolve_value(tokens[1].trim(), values);
             if let Some(existing) = item.get_mut(&name) {
-                if let (AttributeValue::N(cur_s), AttributeValue::N(d_s)) = (&*existing, delta) {
-                    if let (Ok(cur), Ok(d)) = (cur_s.parse::<f64>(), d_s.parse::<f64>()) {
-                        *existing = AttributeValue::N((cur + d).to_string());
-                    }
+                if let (AttributeValue::N(cur_s), AttributeValue::N(d_s)) = (&*existing, delta)
+                    && let (Ok(cur), Ok(d)) = (cur_s.parse::<f64>(), d_s.parse::<f64>())
+                {
+                    *existing = AttributeValue::N((cur + d).to_string());
                 }
             } else {
                 item.insert(name, delta.clone());
