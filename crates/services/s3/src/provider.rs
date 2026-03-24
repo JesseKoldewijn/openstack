@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -21,14 +21,24 @@ use tracing::{debug, warn};
 use crate::object_store::{ObjectFileStore, ObjectLocation};
 use crate::store::{ObjectDataRef, S3Store};
 
-/// Objects whose byte count is at or below this threshold are stored
-/// inline in the in-memory store (`ObjectDataRef::Inline`) rather than
-/// being written to the filesystem.  This eliminates all disk I/O on the
-/// hot GET/HEAD/LIST paths for the vast majority of emulator workloads.
+/// Returns the threshold (in bytes) below which objects are stored inline
+/// in memory rather than written to disk.  Objects at or below this size
+/// use `ObjectDataRef::Inline`; larger objects are written to the filesystem.
 ///
-/// Objects above the threshold are still written to disk and streamed
-/// from disk on reads, which is appropriate for large blobs.
-const INLINE_OBJECT_THRESHOLD: u64 = 256 * 1024; // 256 KiB
+/// The value is read once from the `S3_INLINE_OBJECT_THRESHOLD_BYTES`
+/// environment variable on first call and cached for the process lifetime.
+/// If the variable is unset or unparseable the default is **4 MiB**, which
+/// covers the smallest common benchmark tier (1 MB) and keeps typical
+/// emulator workloads entirely in memory.
+fn inline_object_threshold() -> u64 {
+    static THRESHOLD: OnceLock<u64> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("S3_INLINE_OBJECT_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4 * 1024 * 1024) // 4 MiB default
+    })
+}
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
@@ -381,10 +391,11 @@ async fn handle_put_object_async(
     };
     let key = key_from_path(&ctx.path);
 
-    // Preflight store lookup with one mutable guard: validate bucket existence and
-    // read versioning state without taking separate read/write locks.
+    // Preflight store lookup: validate bucket existence and read versioning
+    // state under a *read* lock so that concurrent GETs and other PUTs can
+    // proceed in parallel during this validation phase.
     let versioning_enabled = {
-        let store = match store_bundle.get_mut(&ctx.account_id, &ctx.region) {
+        let store = match store_bundle.get(&ctx.account_id, &ctx.region) {
             Some(store) => store,
             None => return s3_error("NoSuchBucket", "The specified bucket does not exist", 404),
         };
@@ -435,7 +446,7 @@ async fn handle_put_object_async(
             (spooled, spooled_len)
         };
 
-        if spooled_len <= INLINE_OBJECT_THRESHOLD {
+        if spooled_len <= inline_object_threshold() {
             // Small object: read into memory, hash on the way.
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
             let mut body_bytes = Vec::with_capacity(spooled_len as usize);
@@ -493,7 +504,7 @@ async fn handle_put_object_async(
         let body_bytes = ctx.raw_body_bytes().to_vec();
         let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&body_bytes)));
         let size = body_bytes.len() as u64;
-        let object_data = if size <= INLINE_OBJECT_THRESHOLD {
+        let object_data = if size <= inline_object_threshold() {
             ObjectDataRef::Inline(Bytes::from(body_bytes))
         } else {
             let file_path = match file_store
@@ -676,7 +687,7 @@ async fn handle_get_object_async(
                     // For small objects read the entire file into memory and
                     // return a buffered response — this avoids the spawn_blocking
                     // overhead of ReaderStream for tiny payloads.
-                    if size <= INLINE_OBJECT_THRESHOLD {
+                    if size <= inline_object_threshold() {
                         match tokio::fs::read(&path).await {
                             Ok(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
                             Err(e) => {
@@ -976,7 +987,7 @@ async fn handle_copy_object_async(
         ObjectDataRef::Inline(bytes) => {
             // Source is already in memory — keep it inline for the destination
             // if it's within the threshold; otherwise write to disk.
-            if src_size <= INLINE_OBJECT_THRESHOLD {
+            if src_size <= inline_object_threshold() {
                 ObjectDataRef::Inline(bytes.clone())
             } else {
                 match file_store
@@ -999,7 +1010,7 @@ async fn handle_copy_object_async(
             }
         }
         ObjectDataRef::FileRef(path) => {
-            if src_size <= INLINE_OBJECT_THRESHOLD {
+            if src_size <= inline_object_threshold() {
                 // Small file-backed object — read into memory and keep inline.
                 match tokio::fs::read(path).await {
                     Ok(bytes) => ObjectDataRef::Inline(Bytes::from(bytes)),
@@ -1484,7 +1495,7 @@ async fn handle_upload_part_async(
             (spooled, spooled_len)
         };
 
-        if spooled_len <= INLINE_OBJECT_THRESHOLD {
+        if spooled_len <= inline_object_threshold() {
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
             let mut data = Vec::with_capacity(spooled_len as usize);
             if let Err(e) =
@@ -1526,7 +1537,7 @@ async fn handle_upload_part_async(
         let data = ctx.raw_body_bytes().to_vec();
         let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&data)));
         let size = data.len() as u64;
-        let part_data = if size <= INLINE_OBJECT_THRESHOLD {
+        let part_data = if size <= inline_object_threshold() {
             ObjectDataRef::Inline(Bytes::from(data))
         } else {
             let part_version_id = format!("part-{}", part_number);
@@ -1676,7 +1687,7 @@ async fn handle_complete_multipart_upload_async(
     };
 
     // For small assembled objects, keep the existing inline path.
-    let assembled_data = if estimated_size <= INLINE_OBJECT_THRESHOLD {
+    let assembled_data = if estimated_size <= inline_object_threshold() {
         let mut combined = Vec::with_capacity(estimated_size as usize);
         for (_pn, data_ref, _size) in &part_data {
             match data_ref {
