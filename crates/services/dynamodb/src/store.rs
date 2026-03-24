@@ -1079,7 +1079,7 @@ pub fn apply_update_expression(
             rest = rem.trim();
         } else if rest.starts_with("DELETE ") {
             let (clause, rem) = extract_clause(&rest[7..]);
-            apply_delete_clause(item, &clause, attr_names);
+            apply_delete_clause(item, &clause, attr_names, attr_values);
             rest = rem.trim();
         } else {
             break;
@@ -1136,23 +1136,89 @@ fn apply_add_clause(
             let name = resolve_name(tokens[0].trim(), names);
             let delta = resolve_value(tokens[1].trim(), values);
             if let Some(existing) = item.get_mut(&name) {
-                if let (AttributeValue::N(cur_s), AttributeValue::N(d_s)) = (&*existing, delta)
-                    && let (Ok(cur), Ok(d)) = (cur_s.parse::<f64>(), d_s.parse::<f64>())
-                {
-                    *existing = AttributeValue::N((cur + d).to_string());
+                match (existing, delta) {
+                    // Numeric addition
+                    (AttributeValue::N(cur_s), AttributeValue::N(d_s)) => {
+                        if let (Ok(cur), Ok(d)) = (cur_s.parse::<f64>(), d_s.parse::<f64>()) {
+                            *cur_s = (cur + d).to_string();
+                        }
+                    }
+                    // Set union — SS
+                    (AttributeValue::Ss(cur), AttributeValue::Ss(delta_set)) => {
+                        for v in delta_set {
+                            if !cur.contains(v) {
+                                cur.push(v.clone());
+                            }
+                        }
+                    }
+                    // Set union — NS
+                    (AttributeValue::Ns(cur), AttributeValue::Ns(delta_set)) => {
+                        for v in delta_set {
+                            if !cur.contains(v) {
+                                cur.push(v.clone());
+                            }
+                        }
+                    }
+                    // Set union — BS
+                    (AttributeValue::Bs(cur), AttributeValue::Bs(delta_set)) => {
+                        for v in delta_set {
+                            if !cur.contains(v) {
+                                cur.push(v.clone());
+                            }
+                        }
+                    }
+                    _ => {} // type mismatch — no-op, matching real DynamoDB behaviour
                 }
             } else {
+                // Attribute absent — insert the delta value directly.
                 item.insert(name, delta.clone());
             }
         }
     }
 }
 
-fn apply_delete_clause(item: &mut Item, clause: &str, names: &HashMap<String, String>) {
+fn apply_delete_clause(
+    item: &mut Item,
+    clause: &str,
+    names: &HashMap<String, String>,
+    values: &HashMap<String, AttributeValue>,
+) {
     for part in clause.split(',') {
         let tokens: Vec<&str> = part.trim().splitn(2, ' ').collect();
-        if !tokens.is_empty() {
-            let name = resolve_name(tokens[0].trim(), names);
+        if tokens.is_empty() {
+            continue;
+        }
+        let name = resolve_name(tokens[0].trim(), names);
+        if tokens.len() == 2 {
+            // Second token is a value reference — perform set element removal.
+            let delta = resolve_value(tokens[1].trim(), values);
+            if let Some(existing) = item.get_mut(&name) {
+                match (existing, delta) {
+                    (AttributeValue::Ss(cur), AttributeValue::Ss(to_remove)) => {
+                        cur.retain(|v| !to_remove.contains(v));
+                        // DynamoDB removes the attribute when the set becomes empty.
+                    }
+                    (AttributeValue::Ns(cur), AttributeValue::Ns(to_remove)) => {
+                        cur.retain(|v| !to_remove.contains(v));
+                    }
+                    (AttributeValue::Bs(cur), AttributeValue::Bs(to_remove)) => {
+                        cur.retain(|v| !to_remove.contains(v));
+                    }
+                    _ => {} // type mismatch — no-op
+                }
+                // Remove the attribute if the set is now empty.
+                let is_empty = match item.get(&name) {
+                    Some(AttributeValue::Ss(v)) => v.is_empty(),
+                    Some(AttributeValue::Ns(v)) => v.is_empty(),
+                    Some(AttributeValue::Bs(v)) => v.is_empty(),
+                    _ => false,
+                };
+                if is_empty {
+                    item.remove(&name);
+                }
+            }
+        } else {
+            // No value token — remove the whole attribute (legacy / non-set usage).
             item.remove(&name);
         }
     }

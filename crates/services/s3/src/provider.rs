@@ -1163,15 +1163,26 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     }
 
     let truncated = content_items.len() + common_prefixes.len() > max_keys;
-    content_items.truncate(max_keys.saturating_sub(common_prefixes.len()));
+    // Truncate common_prefixes first (BTreeSet order = sorted), then
+    // give the remaining MaxKeys budget to content_items.
+    let mut cp_vec: Vec<String> = common_prefixes.into_iter().collect();
+    if cp_vec.len() > max_keys {
+        cp_vec.truncate(max_keys);
+    }
+    let remaining = max_keys.saturating_sub(cp_vec.len());
+    content_items.truncate(remaining);
 
     let next_token = if truncated {
-        content_items.last().map(|(k, ..)| k.clone())
+        // Prefer the last content key; fall back to the last common prefix.
+        content_items
+            .last()
+            .map(|(k, ..)| k.clone())
+            .or_else(|| cp_vec.last().cloned())
     } else {
         None
     };
 
-    let key_count = content_items.len() + common_prefixes.len();
+    let key_count = content_items.len() + cp_vec.len();
 
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -1212,7 +1223,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
         .unwrap();
     }
 
-    for cp in &common_prefixes {
+    for cp in &cp_vec {
         write!(
             xml,
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
@@ -1284,11 +1295,18 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     }
 
     let truncated = content_items.len() + common_prefixes.len() > max_keys;
-    content_items.truncate(max_keys.saturating_sub(common_prefixes.len()));
+    // Truncate common_prefixes first, then give remaining budget to content_items.
+    let mut cp_vec1: Vec<String> = common_prefixes.into_iter().collect();
+    if cp_vec1.len() > max_keys {
+        cp_vec1.truncate(max_keys);
+    }
+    let remaining1 = max_keys.saturating_sub(cp_vec1.len());
+    content_items.truncate(remaining1);
     let next_marker = if truncated {
         content_items
             .last()
             .map(|(k, ..)| k.clone())
+            .or_else(|| cp_vec1.last().cloned())
             .unwrap_or_default()
     } else {
         String::new()
@@ -1327,7 +1345,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
         .unwrap();
     }
 
-    for cp in &common_prefixes {
+    for cp in &cp_vec1 {
         write!(
             xml,
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",

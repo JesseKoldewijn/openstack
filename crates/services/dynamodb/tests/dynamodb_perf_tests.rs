@@ -496,6 +496,37 @@ async fn perf_scan_early_terminate() {
         filtered_count, 5000,
         "FilterExpression should return 5000 even items, got {filtered_count}"
     );
+
+    // Semantic early-termination: Limit=5 with FilterExpression.
+    // ScannedCount must equal the Limit (items examined, not items returned),
+    // and Count must be <= Limit. This proves the iterator stopped after reading
+    // exactly 5 items rather than scanning all 10,000.
+    let sem_resp = provider
+        .dispatch(&make_ctx(
+            "Scan",
+            json!({
+                "TableName": "EarlyStop",
+                "FilterExpression": "parity = :p",
+                "ExpressionAttributeValues": { ":p": { "S": "even" } },
+                "Limit": 5
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sem_resp.status_code, 200);
+    let sb = body(&sem_resp);
+    let sem_scanned = sb["ScannedCount"]
+        .as_u64()
+        .expect("ScannedCount must be present");
+    let sem_count = sb["Count"].as_u64().expect("Count must be present");
+    assert_eq!(
+        sem_scanned, 5,
+        "ScannedCount should be exactly 5 (Limit caps items examined before filter), got {sem_scanned}"
+    );
+    assert!(
+        sem_count <= 5,
+        "Count should be <= Limit=5, got {sem_count}"
+    );
 }
 
 // ---------------------------------------------------------------------------

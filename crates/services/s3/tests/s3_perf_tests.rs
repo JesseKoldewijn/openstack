@@ -298,6 +298,40 @@ async fn perf_list_objects_prefix_and_pagination() {
         10,
         "first page should contain exactly 10 keys"
     );
+
+    // Round-trip the continuation token: extract it from page 1 and use it
+    // to request page 2, verifying we get the next batch of keys.
+    let token = body2
+        .split("<NextContinuationToken>")
+        .nth(1)
+        .and_then(|s| s.split("</NextContinuationToken>").next())
+        .expect("NextContinuationToken must be present in truncated response");
+    let mut qp3 = std::collections::HashMap::new();
+    qp3.insert("list-type".to_string(), "2".to_string());
+    qp3.insert("prefix".to_string(), "alpha/".to_string());
+    qp3.insert("max-keys".to_string(), "10".to_string());
+    qp3.insert("continuation-token".to_string(), token.to_string());
+    let ctx3 = make_ctx_with_query("GET", "/prefix-bucket", b"", qp3);
+    let resp3 = provider.dispatch(&ctx3).await.unwrap();
+    assert_eq!(resp3.status_code, 200, "page 2 list failed");
+    let body3 = std::str::from_utf8(resp3.body.as_bytes()).unwrap();
+    let page2_keys: Vec<&str> = body3
+        .split("<Key>")
+        .skip(1)
+        .filter_map(|s| s.split("</Key>").next())
+        .collect();
+    assert!(
+        !page2_keys.is_empty(),
+        "page 2 should contain at least one key (continuation token not honoured)"
+    );
+    // Every page-2 key must be lexicographically greater than every page-1 key.
+    let last_page1 = page1_keys.last().copied().unwrap();
+    for k in &page2_keys {
+        assert!(
+            *k > last_page1,
+            "page 2 key {k:?} is not after last page-1 key {last_page1:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

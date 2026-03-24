@@ -11,6 +11,7 @@ use openstack_service_framework::traits::{
 use openstack_state::AccountRegionBundle;
 use serde::Serialize;
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::store::{
@@ -22,12 +23,16 @@ use crate::store::{
 
 pub struct DynamoDbProvider {
     store: Arc<AccountRegionBundle<DynamoDbStore>>,
+    /// Serialises TransactWriteItems operations so that the validate→apply
+    /// two-pass is not interleaved with concurrent transactions.
+    txn_lock: Mutex<()>,
 }
 
 impl DynamoDbProvider {
     pub fn new() -> Self {
         Self {
             store: Arc::new(AccountRegionBundle::new()),
+            txn_lock: Mutex::new(()),
         }
     }
 
@@ -1147,31 +1152,38 @@ impl ServiceProvider for DynamoDbProvider {
                     Some(t) => t,
                 };
 
-                // Determine range key for index
+                // Determine range key for index — reject unknown IndexName up-front.
                 let range_key_name = if let Some(idx) = index_name {
-                    table
+                    let gsi = table
                         .global_secondary_indexes
                         .iter()
-                        .find(|g| g.index_name == idx)
-                        .and_then(|g| {
-                            g.key_schema
+                        .find(|g| g.index_name == idx);
+                    let lsi = table
+                        .local_secondary_indexes
+                        .iter()
+                        .find(|l| l.index_name == idx);
+                    if gsi.is_none() && lsi.is_none() {
+                        return Ok(json_error(
+                            "ValidationException",
+                            &format!("The table does not have the specified index: {idx}"),
+                            400,
+                        ));
+                    }
+                    gsi.and_then(|g| {
+                        g.key_schema
+                            .iter()
+                            .find(|k| k.key_type == KeyType::RANGE)
+                            .map(|k| k.attribute_name.clone())
+                    })
+                    .or_else(|| {
+                        lsi.and_then(|l| {
+                            l.key_schema
                                 .iter()
                                 .find(|k| k.key_type == KeyType::RANGE)
                                 .map(|k| k.attribute_name.clone())
                         })
-                        .or_else(|| {
-                            table
-                                .local_secondary_indexes
-                                .iter()
-                                .find(|l| l.index_name == idx)
-                                .and_then(|l| {
-                                    l.key_schema
-                                        .iter()
-                                        .find(|k| k.key_type == KeyType::RANGE)
-                                        .map(|k| k.attribute_name.clone())
-                                })
-                        })
-                        .unwrap_or_default()
+                    })
+                    .unwrap_or_default()
                 } else {
                     table.range_key_name().unwrap_or("").to_string()
                 };
@@ -1190,10 +1202,21 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
+                // Apply Limit to items *examined* (DynamoDB semantics), then filter.
+                // scanned_count = items read before FilterExpression; count = items returned.
+                let raw_matches: Vec<&Item> = {
+                    let all = table.query(&hash_val, range_cond.as_ref(), index_name, scan_forward);
+                    if let Some(lim) = limit {
+                        all.into_iter().take(lim).collect()
+                    } else {
+                        all.into_iter().collect()
+                    }
+                };
+                let scanned_count = raw_matches.len();
+
                 // Collect owned items under the lock; Cow::into_owned() moves
                 // already-projected items (Cow::Owned) without extra allocation.
-                let mut items: Vec<Item> = table
-                    .query(&hash_val, range_cond.as_ref(), index_name, scan_forward)
+                let items: Vec<Item> = raw_matches
                     .into_iter()
                     .filter(|item| {
                         if let Some(fe) = filter_expr {
@@ -1205,10 +1228,6 @@ impl ServiceProvider for DynamoDbProvider {
                     .map(|item| project_item(item, projection_expr, &attr_names).into_owned())
                     .collect();
 
-                let total_count = items.len();
-                if let Some(lim) = limit {
-                    items.truncate(lim);
-                }
                 let count = items.len();
 
                 // Opt 4: release the shard lock before serialization.
@@ -1216,14 +1235,14 @@ impl ServiceProvider for DynamoDbProvider {
 
                 // Opt 1: serialize directly — no intermediate serde_json::Value tree.
                 let (out_items, out_count) = if select == "COUNT" {
-                    (Vec::new(), total_count)
+                    (Vec::new(), count)
                 } else {
                     (items, count)
                 };
                 Ok(serialize_response(&QueryResp {
                     items: &out_items,
                     count: out_count,
-                    scanned_count: total_count,
+                    scanned_count,
                 }))
             }
 
@@ -1300,28 +1319,29 @@ impl ServiceProvider for DynamoDbProvider {
                 } else {
                     all_items
                 };
-                let scanned_count = pre_filter.len();
-                // Apply filter then early-terminate at Limit — avoids collecting
-                // items beyond the limit when a small Limit is requested.
-                let filtered = pre_filter.into_iter().filter(|item| {
-                    if let Some(fe) = filter_expr {
-                        evaluate_filter(item, fe, &attr_names, &attr_values)
-                    } else {
-                        true
-                    }
-                });
+                // Apply Limit to items *examined* before the filter (DynamoDB semantics).
+                // scanned_count = items read from the index/table (capped by Limit).
+                let examined: Vec<&Item> = if let Some(lim) = limit {
+                    pre_filter.into_iter().take(lim).collect()
+                } else {
+                    pre_filter
+                };
+                let scanned_count = examined.len();
+
+                // Apply FilterExpression after the limit-based examination cap.
                 // Collect owned items under the lock; Cow::into_owned() is free
                 // when already projected (Cow::Owned), or clones the borrow otherwise.
-                let items: Vec<Item> = if let Some(lim) = limit {
-                    filtered
-                        .take(lim)
-                        .map(|item| project_item(item, projection_expr, &attr_names).into_owned())
-                        .collect()
-                } else {
-                    filtered
-                        .map(|item| project_item(item, projection_expr, &attr_names).into_owned())
-                        .collect()
-                };
+                let items: Vec<Item> = examined
+                    .into_iter()
+                    .filter(|item| {
+                        if let Some(fe) = filter_expr {
+                            evaluate_filter(item, fe, &attr_names, &attr_values)
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|item| project_item(item, projection_expr, &attr_names).into_owned())
+                    .collect();
 
                 let count = items.len();
 
@@ -1524,6 +1544,30 @@ impl ServiceProvider for DynamoDbProvider {
 
                 let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
 
+                // Acquire the transaction lock before any reads so the
+                // validate→apply two-pass is not interleaved with concurrent
+                // TransactWriteItems calls (B8 atomicity fix).
+                let _txn_guard = self.txn_lock.lock().await;
+
+                // B9: fail fast if any referenced table does not exist.
+                for ti in &transact_items {
+                    for op_name in &["Put", "Delete", "Update", "ConditionCheck"] {
+                        if let Some(op) = ti.get(op_name) {
+                            let table_name =
+                                op.get("TableName").and_then(|v| v.as_str()).unwrap_or("");
+                            if tables.get(table_name).is_none() {
+                                return Ok(json_error(
+                                    "TransactionCanceledException",
+                                    &format!(
+                                        "Transaction cancelled: table {table_name} does not exist [ResourceNotFoundException]"
+                                    ),
+                                    400,
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 // First pass: validate all conditions
                 for ti in &transact_items {
                     for op_name in &["Put", "Delete", "Update", "ConditionCheck"] {
@@ -1543,22 +1587,22 @@ impl ServiceProvider for DynamoDbProvider {
                                     .map(item_from_json_map)
                                     .unwrap_or_default();
 
-                                if let Some(table) = tables.get(table_name) {
-                                    let existing = table.get_item(&key).cloned();
-                                    if check_condition(
-                                        existing.as_ref(),
-                                        cond,
-                                        &attr_names,
-                                        &attr_values,
-                                    )
-                                    .is_err()
-                                    {
-                                        return Ok(json_error(
-                                            "TransactionCanceledException",
-                                            "Transaction cancelled, please refer cancellation reasons for specific reasons [ConditionalCheckFailed]",
-                                            400,
-                                        ));
-                                    }
+                                // Table existence already validated above; unwrap is safe.
+                                let table = tables.get(table_name).unwrap();
+                                let existing = table.get_item(&key).cloned();
+                                if check_condition(
+                                    existing.as_ref(),
+                                    cond,
+                                    &attr_names,
+                                    &attr_values,
+                                )
+                                .is_err()
+                                {
+                                    return Ok(json_error(
+                                        "TransactionCanceledException",
+                                        "Transaction cancelled, please refer cancellation reasons for specific reasons [ConditionalCheckFailed]",
+                                        400,
+                                    ));
                                 }
                             }
                         }
