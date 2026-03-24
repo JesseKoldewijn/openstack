@@ -870,7 +870,8 @@ fn build_request_context(
     let account_id = access_key_to_account_id(access_key);
 
     // Determine the target service
-    let service = detect_service(&path, &query_params, &headers, body, service_from_auth).into_owned();
+    let service =
+        detect_service(&path, &query_params, &headers, body, service_from_auth).into_owned();
 
     // Validate / normalize region
     let region = if config.allow_nonstandard_regions || is_valid_region(region) {

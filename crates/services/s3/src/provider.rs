@@ -1,6 +1,6 @@
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
 use std::collections::VecDeque;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
@@ -1135,12 +1135,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
             if !obj.key.starts_with(&prefix) {
                 return None;
             }
-            Some((
-                obj.key.clone(),
-                v.last_modified,
-                v.etag.clone(),
-                v.size,
-            ))
+            Some((obj.key.clone(), v.last_modified, v.etag.clone(), v.size))
         })
         .collect();
 
@@ -1291,7 +1286,10 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     let truncated = content_items.len() + common_prefixes.len() > max_keys;
     content_items.truncate(max_keys.saturating_sub(common_prefixes.len()));
     let next_marker = if truncated {
-        content_items.last().map(|(k, ..)| k.clone()).unwrap_or_default()
+        content_items
+            .last()
+            .map(|(k, ..)| k.clone())
+            .unwrap_or_default()
     } else {
         String::new()
     };

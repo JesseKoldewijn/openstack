@@ -12,7 +12,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use openstack_dynamodb::DynamoDbProvider;
 use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // Helpers (duplicated from dynamodb_tests.rs — test crates can't share code)
@@ -158,8 +158,9 @@ async fn perf_btreemap_sort_key_order() {
 // Query on a GSI with N=10,000 items in the table, but only 1 item matches
 // the query. The materialized index gives O(1) hash lookup; a full-table scan
 // would be 10,000× slower. We assert:
-//   a) correct results (1 item returned)
-//   b) latency < 500 ms in debug mode (catastrophically slow if scanning)
+//   a) correct results (1 needle item returned)
+//   b) the haystack group has the expected count
+//   c) latency < 500 ms in debug mode (catastrophically slow if scanning)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -208,7 +209,7 @@ async fn perf_gsi_materialized_fast_path() {
         assert_eq!(resp.status_code, 200);
     }
 
-    // Time the GSI query.
+    // Time the GSI query for "needle".
     // Threshold: 500 ms is extremely generous for a single hash-lookup in debug
     // mode. A full table scan of 10,000 items routinely takes >5 s on slow CI,
     // so this guards against the O(N) regression while allowing ample slack.
@@ -232,21 +233,44 @@ async fn perf_gsi_materialized_fast_path() {
     assert_eq!(
         b["Count"].as_u64(),
         Some(1),
-        "GSI query should return exactly 1 item"
+        "GSI query should return exactly 1 needle item"
     );
     assert!(
         elapsed.as_millis() < 500,
         "GSI query took {}ms — expected <500ms; materialized index fast path may be broken",
         elapsed.as_millis()
     );
+
+    // Verify the haystack group has the expected count (n - 1 = 9999).
+    let hay_resp = provider
+        .dispatch(&make_ctx(
+            "Query",
+            json!({
+                "TableName": "GsiPerf",
+                "IndexName": "category-index",
+                "KeyConditionExpression": "category = :cat",
+                "ExpressionAttributeValues": { ":cat": { "S": "haystack" } }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(hay_resp.status_code, 200);
+    let hb = body(&hay_resp);
+    assert_eq!(
+        hb["Count"].as_u64(),
+        Some((n - 1) as u64),
+        "haystack group should have {} items",
+        n - 1
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Perf test 3 — VecDeque stream record eviction (Tier 1.1)
+// Perf test 3 — VecDeque stream record eviction + ListStreams/DescribeStream
+//              (Tier 1.1)
 //
 // After inserting >1,000 items into a stream-enabled table the buffer must
 // stay at ≤1,000 records and the oldest records must have been evicted (FIFO).
-// This validates the VecDeque cap and pop_front behaviour.
+// We also call ListStreams and DescribeStream to exercise the full stream API.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -288,7 +312,7 @@ async fn perf_vecdeque_stream_eviction() {
         assert_eq!(resp.status_code, 200);
     }
 
-    // Fetch the stream ARN.
+    // Fetch the stream ARN from DescribeTable.
     let desc_resp = provider
         .dispatch(&make_ctx(
             "DescribeTable",
@@ -301,6 +325,39 @@ async fn perf_vecdeque_stream_eviction() {
         .as_str()
         .expect("LatestStreamArn")
         .to_string();
+
+    // Verify ListStreams returns this stream.
+    let ls_resp = provider
+        .dispatch(&make_ctx(
+            "ListStreams",
+            json!({ "TableName": "StreamEvict" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ls_resp.status_code, 200);
+    let ls_body = body(&ls_resp);
+    let streams = ls_body["Streams"].as_array().expect("Streams array");
+    assert_eq!(
+        streams.len(),
+        1,
+        "ListStreams should return exactly 1 stream"
+    );
+
+    // DescribeStream must report the stream as ENABLED.
+    let ds_resp = provider
+        .dispatch(&make_ctx(
+            "DescribeStream",
+            json!({ "StreamArn": stream_arn }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ds_resp.status_code, 200);
+    let ds_body = body(&ds_resp);
+    assert_eq!(
+        ds_body["StreamDescription"]["StreamStatus"].as_str(),
+        Some("ENABLED"),
+        "DescribeStream StreamStatus mismatch"
+    );
 
     // Get shard iterator from TRIM_HORIZON (oldest available record).
     let si_resp = provider
@@ -363,11 +420,12 @@ async fn perf_vecdeque_stream_eviction() {
 }
 
 // ---------------------------------------------------------------------------
-// Perf test 4 — Scan early-terminate with Limit (Tier 2.4)
+// Perf test 4 — Scan early-terminate with Limit + FilterExpression (Tier 2.4)
 //
 // Scan with Limit=1 on a 10,000-item table should complete sub-linearly
 // because the implementation uses `.take(limit)` to short-circuit iteration.
 // Threshold: 300 ms in debug mode. A full scan takes seconds on slow CI.
+// We also verify FilterExpression works over the full dataset.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -382,7 +440,10 @@ async fn perf_scan_early_terminate() {
                 "PutItem",
                 json!({
                     "TableName": "EarlyStop",
-                    "Item": { "pk": { "S": format!("item-{i:05}") } }
+                    "Item": {
+                        "pk": { "S": format!("item-{i:05}") },
+                        "parity": { "S": if i % 2 == 0 { "even" } else { "odd" } }
+                    }
                 }),
             ))
             .await
@@ -415,15 +476,35 @@ async fn perf_scan_early_terminate() {
         "Scan Limit=1 took {}ms — expected <300ms; early-terminate (.take()) may be broken",
         elapsed.as_millis()
     );
+
+    // FilterExpression on the full dataset — all even items (5000 of 10,000).
+    let filter_resp = provider
+        .dispatch(&make_ctx(
+            "Scan",
+            json!({
+                "TableName": "EarlyStop",
+                "FilterExpression": "parity = :p",
+                "ExpressionAttributeValues": { ":p": { "S": "even" } }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(filter_resp.status_code, 200);
+    let fb = body(&filter_resp);
+    let filtered_count = fb["Count"].as_u64().expect("Count");
+    assert_eq!(
+        filtered_count, 5000,
+        "FilterExpression should return 5000 even items, got {filtered_count}"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Perf test 5 — Typed AttributeValue wire-format parity (Tier 3.3)
+// Perf test 5 — Typed AttributeValue wire-format parity + UpdateItem/BatchGetItem
+//              (Tier 3.3)
 //
 // Items containing all 10 DynamoDB attribute types round-trip through
-// PutItem/GetItem with byte-exact JSON wire format. A failure here means the
-// typed AttributeValue enum's Serialize impl diverges from the DynamoDB wire
-// format (e.g., "Bool" instead of "BOOL").
+// PutItem/GetItem with byte-exact JSON wire format. We also call UpdateItem
+// and BatchGetItem to cover more of the wire surface.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -526,15 +607,76 @@ async fn perf_attribute_value_wire_parity() {
         Some("7"),
         "M inner_n round-trip"
     );
+
+    // UpdateItem — change s_attr and verify round-trip
+    let upd_resp = provider
+        .dispatch(&make_ctx(
+            "UpdateItem",
+            json!({
+                "TableName": "WireParity",
+                "Key": { "pk": { "S": "test-item" } },
+                "UpdateExpression": "SET s_attr = :new",
+                "ExpressionAttributeValues": { ":new": { "S": "updated" } },
+                "ReturnValues": "ALL_NEW"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(upd_resp.status_code, 200);
+    let ub = body(&upd_resp);
+    assert_eq!(
+        ub["Attributes"]["s_attr"]["S"].as_str(),
+        Some("updated"),
+        "UpdateItem S round-trip"
+    );
+    // Other attributes must survive the partial update intact
+    assert_eq!(
+        ub["Attributes"]["n_attr"]["N"].as_str(),
+        Some("42.5"),
+        "N survived UpdateItem"
+    );
+
+    // BatchGetItem — retrieve test-item alongside a missing key
+    let bg_resp = provider
+        .dispatch(&make_ctx(
+            "BatchGetItem",
+            json!({
+                "RequestItems": {
+                    "WireParity": {
+                        "Keys": [
+                            { "pk": { "S": "test-item" } },
+                            { "pk": { "S": "no-such-key" } }
+                        ]
+                    }
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bg_resp.status_code, 200);
+    let bgb = body(&bg_resp);
+    let found = bgb["Responses"]["WireParity"]
+        .as_array()
+        .expect("BatchGetItem Responses array");
+    assert_eq!(
+        found.len(),
+        1,
+        "BatchGetItem should return 1 item (missing key not included)"
+    );
+    assert_eq!(
+        found[0]["s_attr"]["S"].as_str(),
+        Some("updated"),
+        "BatchGetItem s_attr after UpdateItem"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Perf test 6 — Per-table locking: concurrent PutItem on different tables
-//              does not deadlock or lose writes (Tier 3.1)
+// Perf test 6 — Per-table locking: concurrent PutItem on different tables +
+//              DeleteItem per table (Tier 3.1)
 //
 // We spawn N concurrent tasks, each writing to its own table. All writes must
-// complete successfully. A deadlock would cause the test to hang (tokio has a
-// timeout via the runtime); a data-race would produce wrong item counts.
+// complete successfully. Then we delete one item per table concurrently to
+// validate DeleteItem under contention.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -598,19 +740,60 @@ async fn perf_per_table_concurrent_writes() {
             "ConcTable{t} expected {writes_per_table} items after concurrent writes"
         );
     }
+
+    // Concurrently delete one item from each table — validates DeleteItem under
+    // concurrent per-table locking (no deadlock, no lost deletes).
+    let mut del_handles = Vec::with_capacity(n_tables);
+    for t in 0..n_tables {
+        let p = Arc::clone(&provider);
+        del_handles.push(tokio::spawn(async move {
+            let resp = p
+                .dispatch(&make_ctx(
+                    "DeleteItem",
+                    json!({
+                        "TableName": format!("ConcTable{t}"),
+                        "Key": { "pk": { "S": "item-000" } }
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status_code, 200, "DeleteItem from ConcTable{t} failed");
+        }));
+    }
+    for handle in del_handles {
+        handle.await.expect("concurrent delete task panicked");
+    }
+
+    // Each table should now have writes_per_table - 1 items.
+    for t in 0..n_tables {
+        let resp = provider
+            .dispatch(&make_ctx(
+                "Scan",
+                json!({ "TableName": format!("ConcTable{t}") }),
+            ))
+            .await
+            .unwrap();
+        let b = body(&resp);
+        assert_eq!(
+            b["Count"].as_u64(),
+            Some((writes_per_table - 1) as u64),
+            "ConcTable{t} expected {} items after concurrent deletes",
+            writes_per_table - 1
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Perf test 7 — UpdateTable GSI back-fill (Tier 3.2 + add_gsi)
+// Perf test 7 — UpdateTable GSI back-fill + TransactWriteItems/TransactGetItems
+//              (Tier 3.2 + add_gsi)
 //
 // Adding a GSI to an existing table via UpdateTable must immediately back-fill
-// all existing items into the index so that queries through the new GSI return
-// the correct results without a rescan. A failure means add_gsi() does not
-// iterate existing items when building the MaterializedIndex.
+// all existing items into the index. We also validate TransactWriteItems and
+// TransactGetItems over the back-filled data.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn perf_update_table_gsi_backfill() {
+async fn perf_update_table_gsi_backfill_and_transactions() {
     let provider = DynamoDbProvider::new();
     create_pk_table(&provider, "BackFill").await;
 
@@ -693,4 +876,229 @@ async fn perf_update_table_gsi_backfill() {
             b["Count"]
         );
     }
+
+    // TransactWriteItems — atomically add a new item and update an existing one.
+    let txn_resp = provider
+        .dispatch(&make_ctx(
+            "TransactWriteItems",
+            json!({
+                "TransactItems": [
+                    {
+                        "Put": {
+                            "TableName": "BackFill",
+                            "Item": {
+                                "pk": { "S": "item-txn" },
+                                "group": { "S": "group-A" }
+                            }
+                        }
+                    },
+                    {
+                        "Update": {
+                            "TableName": "BackFill",
+                            "Key": { "pk": { "S": "item-0000" } },
+                            "UpdateExpression": "SET #g = :new_group",
+                            "ExpressionAttributeNames": { "#g": "group" },
+                            "ExpressionAttributeValues": { ":new_group": { "S": "group-C" } }
+                        }
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        txn_resp.status_code,
+        200,
+        "TransactWriteItems failed: {}",
+        String::from_utf8_lossy(txn_resp.body.as_bytes())
+    );
+
+    // TransactGetItems — read back the two items touched by the transaction.
+    let tg_resp = provider
+        .dispatch(&make_ctx(
+            "TransactGetItems",
+            json!({
+                "TransactItems": [
+                    { "Get": { "TableName": "BackFill", "Key": { "pk": { "S": "item-txn" } } } },
+                    { "Get": { "TableName": "BackFill", "Key": { "pk": { "S": "item-0000" } } } },
+                    { "Get": { "TableName": "BackFill", "Key": { "pk": { "S": "no-such" } } } }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tg_resp.status_code, 200);
+    let tgb = body(&tg_resp);
+    let responses = tgb["Responses"]
+        .as_array()
+        .expect("TransactGetItems Responses");
+    assert_eq!(
+        responses.len(),
+        3,
+        "TransactGetItems must return 3 responses"
+    );
+    assert_eq!(
+        responses[0]["Item"]["group"]["S"].as_str(),
+        Some("group-A"),
+        "item-txn group"
+    );
+    assert_eq!(
+        responses[1]["Item"]["group"]["S"].as_str(),
+        Some("group-C"),
+        "item-0000 moved to group-C by TransactWriteItems"
+    );
+    // Third response — empty object for missing item
+    assert!(
+        responses[2].get("Item").is_none() || responses[2]["Item"].is_null(),
+        "missing item should produce empty response"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Perf test 8 — Condition expressions and BatchWriteItem
+//              (ConditionalCheckFailedException + BatchWriteItem PutRequest /
+//               DeleteRequest)
+//
+// Validates:
+//   a) Conditional PutItem succeeds when condition is met
+//   b) Conditional PutItem returns ConditionalCheckFailedException when not met
+//   c) BatchWriteItem inserts and deletes items correctly
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_condition_expressions_and_batch_write() {
+    let provider = DynamoDbProvider::new();
+    create_pk_table(&provider, "CondBatch").await;
+
+    // Unconditional seed insert.
+    let seed_resp = provider
+        .dispatch(&make_ctx(
+            "PutItem",
+            json!({
+                "TableName": "CondBatch",
+                "Item": { "pk": { "S": "seed" }, "val": { "N": "10" } }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(seed_resp.status_code, 200);
+
+    // Conditional PutItem: condition "attribute_not_exists(pk)" on "seed" — must
+    // FAIL because the item already exists.
+    let cond_fail_resp = provider
+        .dispatch(&make_ctx(
+            "PutItem",
+            json!({
+                "TableName": "CondBatch",
+                "Item": { "pk": { "S": "seed" }, "val": { "N": "999" } },
+                "ConditionExpression": "attribute_not_exists(pk)"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        cond_fail_resp.status_code,
+        400,
+        "Conditional PutItem should fail with 400; body: {}",
+        String::from_utf8_lossy(cond_fail_resp.body.as_bytes())
+    );
+    let cfb = body(&cond_fail_resp);
+    assert!(
+        cfb["__type"]
+            .as_str()
+            .unwrap_or("")
+            .contains("ConditionalCheckFailedException"),
+        "expected ConditionalCheckFailedException, got: {:?}",
+        cfb["__type"]
+    );
+
+    // Verify the seed item was NOT overwritten by the failed conditional write.
+    let verify_resp = provider
+        .dispatch(&make_ctx(
+            "GetItem",
+            json!({ "TableName": "CondBatch", "Key": { "pk": { "S": "seed" } } }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(verify_resp.status_code, 200);
+    let vb = body(&verify_resp);
+    assert_eq!(
+        vb["Item"]["val"]["N"].as_str(),
+        Some("10"),
+        "seed val must be unchanged after failed conditional PutItem"
+    );
+
+    // Conditional PutItem: condition "attribute_not_exists(pk)" on "new-item" —
+    // must SUCCEED because the item does not exist yet.
+    let cond_ok_resp = provider
+        .dispatch(&make_ctx(
+            "PutItem",
+            json!({
+                "TableName": "CondBatch",
+                "Item": { "pk": { "S": "new-item" }, "val": { "N": "42" } },
+                "ConditionExpression": "attribute_not_exists(pk)"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        cond_ok_resp.status_code, 200,
+        "Conditional PutItem (new item) should succeed"
+    );
+
+    // BatchWriteItem: insert 5 more items + delete "seed".
+    let batch_resp = provider
+        .dispatch(&make_ctx(
+            "BatchWriteItem",
+            json!({
+                "RequestItems": {
+                    "CondBatch": [
+                        { "PutRequest": { "Item": { "pk": { "S": "batch-0" }, "val": { "N": "0" } } } },
+                        { "PutRequest": { "Item": { "pk": { "S": "batch-1" }, "val": { "N": "1" } } } },
+                        { "PutRequest": { "Item": { "pk": { "S": "batch-2" }, "val": { "N": "2" } } } },
+                        { "PutRequest": { "Item": { "pk": { "S": "batch-3" }, "val": { "N": "3" } } } },
+                        { "PutRequest": { "Item": { "pk": { "S": "batch-4" }, "val": { "N": "4" } } } },
+                        { "DeleteRequest": { "Key": { "pk": { "S": "seed" } } } }
+                    ]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        batch_resp.status_code,
+        200,
+        "BatchWriteItem failed: {}",
+        String::from_utf8_lossy(batch_resp.body.as_bytes())
+    );
+
+    // Scan to verify final item count: new-item + batch-0..4 = 6 items.
+    // "seed" was deleted; the conditional failure did not insert a duplicate.
+    let scan_resp = provider
+        .dispatch(&make_ctx("Scan", json!({ "TableName": "CondBatch" })))
+        .await
+        .unwrap();
+    assert_eq!(scan_resp.status_code, 200);
+    let sb = body(&scan_resp);
+    assert_eq!(
+        sb["Count"].as_u64(),
+        Some(6),
+        "CondBatch should have 6 items after batch write; got {}",
+        sb["Count"]
+    );
+
+    // Verify "seed" is gone.
+    let gone_resp = provider
+        .dispatch(&make_ctx(
+            "GetItem",
+            json!({ "TableName": "CondBatch", "Key": { "pk": { "S": "seed" } } }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(gone_resp.status_code, 200);
+    let gb = body(&gone_resp);
+    assert!(
+        gb.get("Item").is_none() || gb["Item"].is_null(),
+        "seed item should be absent after BatchWriteItem DeleteRequest"
+    );
 }
