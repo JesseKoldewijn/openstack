@@ -442,7 +442,12 @@ impl ObjectFileStore {
         self.ensure_dir_exists(&dst_dir).await?;
         let dst = dst_dir.join(dst.version_id);
 
-        fs::copy(&src, &dst).await?;
+        // Prefer a hard link (O(1), no data copy) and fall back to a full
+        // byte copy if the source and destination are on different
+        // filesystems or the filesystem does not support hard links.
+        if fs::hard_link(&src, &dst).await.is_err() {
+            fs::copy(&src, &dst).await?;
+        }
 
         debug!(
             src = %src.display(),

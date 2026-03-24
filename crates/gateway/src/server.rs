@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
@@ -869,7 +870,7 @@ fn build_request_context(
     let account_id = access_key_to_account_id(access_key);
 
     // Determine the target service
-    let service = detect_service(&path, &query_params, &headers, body, service_from_auth);
+    let service = detect_service(&path, &query_params, &headers, body, service_from_auth).into_owned();
 
     // Validate / normalize region
     let region = if config.allow_nonstandard_regions || is_valid_region(region) {
@@ -922,7 +923,7 @@ fn detect_service(
     headers: &HeaderMap,
     body: &Bytes,
     service_from_auth: Option<&str>,
-) -> String {
+) -> Cow<'static, str> {
     // 1. Authorization header credential scope (highest priority)
     if let Some(svc) = service_from_auth {
         return normalize_service_name(svc);
@@ -939,10 +940,6 @@ fn detect_service(
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
                 && is_known_service(&potential_service)
             {
-                // Known service names have a static equivalent — use it.
-                if let Some(s) = known_service_static(&potential_service) {
-                    return s.to_string();
-                }
                 return potential_service;
             }
         }
@@ -954,49 +951,49 @@ fn detect_service(
         && body.is_empty()
         && !headers.contains_key("x-amz-target")
     {
-        return "s3".to_string();
+        return Cow::Borrowed("s3");
     }
 
     if let Some(target) = headers.get("x-amz-target").and_then(|v| v.to_str().ok())
         && let Some(svc) = service_from_target(target)
     {
-        return svc.to_string();
+        return Cow::Borrowed(svc);
     }
 
     // 4. Query protocol Action (POST form body or query string)
     if let Some(svc) = service_from_query_action(query_params, body) {
-        return svc.to_string();
+        return Cow::Borrowed(svc);
     }
 
     // 5. URL path patterns
     if let Some(svc) = service_from_path(path) {
-        return svc.to_string();
+        return Cow::Borrowed(svc);
     }
 
     // 6. S3 path-style heuristic for unsigned endpoint-url calls
     let trimmed = path.trim_start_matches('/');
     if !trimmed.is_empty() {
-        return "s3".to_string();
+        return Cow::Borrowed("s3");
     }
 
-    "unknown".to_string()
+    Cow::Borrowed("unknown")
 }
 
-fn normalize_service_name(service: &str) -> String {
+fn normalize_service_name(service: &str) -> Cow<'static, str> {
     if service.eq_ignore_ascii_case("es") {
-        return "opensearch".to_string();
+        return Cow::Borrowed("opensearch");
     }
     // AWS SDKs always send lowercase service names in credentials, so the
     // common path avoids `to_ascii_lowercase`'s character-by-character scan.
     if service.bytes().all(|b| !b.is_ascii_uppercase()) {
         // Try to resolve to a known static string to avoid allocating.
         if let Some(s) = known_service_static(service) {
-            s.to_string()
+            Cow::Borrowed(s)
         } else {
-            service.to_string()
+            Cow::Owned(service.to_string())
         }
     } else {
-        service.to_ascii_lowercase()
+        Cow::Owned(service.to_ascii_lowercase())
     }
 }
 

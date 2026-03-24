@@ -1,6 +1,7 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,6 +64,8 @@ impl<R: std::io::Read> std::io::Read for Md5Read<R> {
 
 enum MultipartPartReader {
     Inline(std::io::Cursor<Bytes>),
+    /// File not yet opened — opened lazily on first read.
+    PendingFile(PathBuf),
     File(std::fs::File),
 }
 
@@ -70,6 +73,12 @@ impl std::io::Read for MultipartPartReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Inline(reader) => std::io::Read::read(reader, buf),
+            Self::PendingFile(path) => {
+                let mut file = std::fs::File::open(path)?;
+                let n = std::io::Read::read(&mut file, buf)?;
+                *self = Self::File(file);
+                Ok(n)
+            }
             Self::File(reader) => std::io::Read::read(reader, buf),
         }
     }
@@ -88,7 +97,10 @@ impl MultipartRead {
                     readers.push_back(MultipartPartReader::Inline(std::io::Cursor::new(bytes)));
                 }
                 ObjectDataRef::FileRef(path) => {
-                    readers.push_back(MultipartPartReader::File(std::fs::File::open(path)?));
+                    // Store the path; the file is opened lazily on first read
+                    // to avoid holding open file descriptors for all parts
+                    // before any data is consumed.
+                    readers.push_back(MultipartPartReader::PendingFile(path));
                 }
             }
         }
@@ -309,11 +321,13 @@ fn handle_list_buckets(store: &S3Store, _ctx: &RequestContext) -> DispatchRespon
     let mut buckets: Vec<_> = store.buckets.values().collect();
     buckets.sort_by_key(|b| &b.name);
     for b in buckets {
-        xml.push_str(&format!(
+        write!(
+            xml,
             "<Bucket><Name>{}</Name><CreationDate>{}</CreationDate></Bucket>",
             xml_escape(&b.name),
             b.creation_date.format("%Y-%m-%dT%H:%M:%S.000Z")
-        ));
+        )
+        .unwrap();
     }
     xml.push_str("</Buckets></ListAllMyBucketsResult>");
     xml_ok(&xml)
@@ -853,11 +867,13 @@ async fn handle_delete_objects_async(
                 {
                     files_to_delete.push(path.clone());
                 }
-                deleted_xml.push_str(&format!(
+                write!(
+                    deleted_xml,
                     "<Deleted><Key>{}</Key><VersionId>{}</VersionId></Deleted>",
                     xml_escape(key),
                     xml_escape(vid)
-                ));
+                )
+                .unwrap();
             } else {
                 if let Some(removed) = store.delete_object(&bucket, key)
                     && !removed.delete_marker
@@ -865,10 +881,12 @@ async fn handle_delete_objects_async(
                 {
                     files_to_delete.push(path.clone());
                 }
-                deleted_xml.push_str(&format!(
+                write!(
+                    deleted_xml,
                     "<Deleted><Key>{}</Key></Deleted>",
                     xml_escape(key)
-                ));
+                )
+                .unwrap();
             }
         }
     }
@@ -1106,56 +1124,59 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     let continuation_token = ctx.query_params.get("continuation-token").cloned();
     let start_after = ctx.query_params.get("start-after").cloned();
 
-    // Collect and sort all current (non-delete-marker) objects with matching prefix
-    let mut all_keys: Vec<String> = store
+    // Single-pass: collect (key, last_modified, etag, size) for all matching objects.
+    // list_objects() returns in sorted key order (BTreeMap), so no sort needed.
+    type ObjMeta = (String, chrono::DateTime<chrono::Utc>, String, u64);
+    let mut all_items: Vec<ObjMeta> = store
         .list_objects(&bucket)
         .into_iter()
         .filter_map(|obj| {
-            if obj.current().is_some() && obj.key.starts_with(&prefix) {
-                Some(obj.key.clone())
-            } else {
-                None
+            let v = obj.current()?;
+            if !obj.key.starts_with(&prefix) {
+                return None;
             }
+            Some((
+                obj.key.clone(),
+                v.last_modified,
+                v.etag.clone(),
+                v.size,
+            ))
         })
         .collect();
-    all_keys.sort();
 
     // Apply start_after / continuation_token
     let skip_after = continuation_token.as_deref().or(start_after.as_deref());
     if let Some(skip) = skip_after {
-        all_keys.retain(|k| k.as_str() > skip);
+        all_items.retain(|(k, ..)| k.as_str() > skip);
     }
 
     // Common prefix (delimiter) handling
-    let mut common_prefixes: Vec<String> = Vec::new();
-    let mut content_keys: Vec<String> = Vec::new();
+    let mut common_prefixes: BTreeSet<String> = BTreeSet::new();
+    let mut content_items: Vec<ObjMeta> = Vec::new();
 
     if delimiter.is_empty() {
-        content_keys = std::mem::take(&mut all_keys);
+        content_items = std::mem::take(&mut all_items);
     } else {
-        for key in &all_keys {
-            let suffix = &key[prefix.len()..];
+        for item in &all_items {
+            let suffix = &item.0[prefix.len()..];
             if let Some(pos) = suffix.find(&*delimiter) {
-                let cp = format!("{}{}{}", prefix, &suffix[..pos], delimiter);
-                if !common_prefixes.contains(&cp) {
-                    common_prefixes.push(cp);
-                }
+                common_prefixes.insert(format!("{}{}{}", prefix, &suffix[..pos], delimiter));
             } else {
-                content_keys.push(key.clone());
+                content_items.push(item.clone());
             }
         }
     }
 
-    let truncated = content_keys.len() + common_prefixes.len() > max_keys;
-    content_keys.truncate(max_keys.saturating_sub(common_prefixes.len()));
+    let truncated = content_items.len() + common_prefixes.len() > max_keys;
+    content_items.truncate(max_keys.saturating_sub(common_prefixes.len()));
 
     let next_token = if truncated {
-        content_keys.last().cloned()
+        content_items.last().map(|(k, ..)| k.clone())
     } else {
         None
     };
 
-    let key_count = content_keys.len() + common_prefixes.len();
+    let key_count = content_items.len() + common_prefixes.len();
 
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -1170,35 +1191,39 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     );
 
     if let Some(ref t) = next_token {
-        xml.push_str(&format!(
+        write!(
+            xml,
             "<NextContinuationToken>{}</NextContinuationToken>",
             xml_escape(t)
-        ));
+        )
+        .unwrap();
     }
 
-    for key in &content_keys {
-        if let Some(v) = store.get_object(&bucket, key) {
-            xml.push_str(&format!(
-                "<Contents>\
+    for (key, lm, etag, size) in &content_items {
+        write!(
+            xml,
+            "<Contents>\
 <Key>{key}</Key>\
 <LastModified>{lm}</LastModified>\
 <ETag>{etag}</ETag>\
 <Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Contents>",
-                key = xml_escape(key),
-                lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                etag = xml_escape(&v.etag),
-                size = v.size,
-            ));
-        }
+            key = xml_escape(key),
+            lm = lm.format("%Y-%m-%dT%H:%M:%S.000Z"),
+            etag = xml_escape(etag),
+            size = size,
+        )
+        .unwrap();
     }
 
     for cp in &common_prefixes {
-        xml.push_str(&format!(
+        write!(
+            xml,
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
             xml_escape(cp)
-        ));
+        )
+        .unwrap();
     }
 
     xml.push_str("</ListBucketResult>");
@@ -1230,44 +1255,43 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
         .min(1000);
     let marker = ctx.query_params.get("marker").cloned().unwrap_or_default();
 
-    let mut all_keys: Vec<String> = store
+    // Single-pass: collect (key, last_modified, etag, size) for all matching objects.
+    // list_objects() returns in sorted key order (BTreeMap), so no sort needed.
+    type ObjMeta1 = (String, chrono::DateTime<chrono::Utc>, String, u64);
+    let mut all_items: Vec<ObjMeta1> = store
         .list_objects(&bucket)
         .into_iter()
         .filter_map(|obj| {
-            if obj.current().is_some() && obj.key.starts_with(&prefix) {
-                Some(obj.key.clone())
-            } else {
-                None
+            let v = obj.current()?;
+            if !obj.key.starts_with(&prefix) {
+                return None;
             }
+            Some((obj.key.clone(), v.last_modified, v.etag.clone(), v.size))
         })
         .collect();
-    all_keys.sort();
     if !marker.is_empty() {
-        all_keys.retain(|k| k.as_str() > marker.as_str());
+        all_items.retain(|(k, ..)| k.as_str() > marker.as_str());
     }
 
-    let mut common_prefixes: Vec<String> = Vec::new();
-    let mut content_keys: Vec<String> = Vec::new();
+    let mut common_prefixes: BTreeSet<String> = BTreeSet::new();
+    let mut content_items: Vec<ObjMeta1> = Vec::new();
     if delimiter.is_empty() {
-        content_keys = std::mem::take(&mut all_keys);
+        content_items = std::mem::take(&mut all_items);
     } else {
-        for key in &all_keys {
-            let suffix = &key[prefix.len()..];
+        for item in &all_items {
+            let suffix = &item.0[prefix.len()..];
             if let Some(pos) = suffix.find(&*delimiter) {
-                let cp = format!("{}{}{}", prefix, &suffix[..pos], delimiter);
-                if !common_prefixes.contains(&cp) {
-                    common_prefixes.push(cp);
-                }
+                common_prefixes.insert(format!("{}{}{}", prefix, &suffix[..pos], delimiter));
             } else {
-                content_keys.push(key.clone());
+                content_items.push(item.clone());
             }
         }
     }
 
-    let truncated = content_keys.len() + common_prefixes.len() > max_keys;
-    content_keys.truncate(max_keys.saturating_sub(common_prefixes.len()));
+    let truncated = content_items.len() + common_prefixes.len() > max_keys;
+    content_items.truncate(max_keys.saturating_sub(common_prefixes.len()));
     let next_marker = if truncated {
-        content_keys.last().cloned().unwrap_or_default()
+        content_items.last().map(|(k, ..)| k.clone()).unwrap_or_default()
     } else {
         String::new()
     };
@@ -1284,35 +1308,34 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     );
 
     if truncated && !next_marker.is_empty() {
-        xml.push_str(&format!(
-            "<NextMarker>{}</NextMarker>",
-            xml_escape(&next_marker)
-        ));
+        write!(xml, "<NextMarker>{}</NextMarker>", xml_escape(&next_marker)).unwrap();
     }
 
-    for key in &content_keys {
-        if let Some(v) = store.get_object(&bucket, key) {
-            xml.push_str(&format!(
-                "<Contents>\
+    for (key, lm, etag, size) in &content_items {
+        write!(
+            xml,
+            "<Contents>\
 <Key>{key}</Key>\
 <LastModified>{lm}</LastModified>\
 <ETag>{etag}</ETag>\
 <Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Contents>",
-                key = xml_escape(key),
-                lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                etag = xml_escape(&v.etag),
-                size = v.size,
-            ));
-        }
+            key = xml_escape(key),
+            lm = lm.format("%Y-%m-%dT%H:%M:%S.000Z"),
+            etag = xml_escape(etag),
+            size = size,
+        )
+        .unwrap();
     }
 
     for cp in &common_prefixes {
-        xml.push_str(&format!(
+        write!(
+            xml,
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
             xml_escape(cp)
-        ));
+        )
+        .unwrap();
     }
 
     xml.push_str("</ListBucketResult>");
@@ -1687,12 +1710,17 @@ async fn handle_complete_multipart_upload_async(
             }
         };
 
-        // Clean up part files after successful assembly.
+        // Clean up part files after successful assembly — spawn all removals
+        // concurrently so that many parts are deleted in parallel rather than
+        // one-at-a-time.
+        let mut cleanup_set = tokio::task::JoinSet::new();
         for (_pn, data_ref, _size) in &part_data {
             if let ObjectDataRef::FileRef(path) = data_ref {
-                let _ = tokio::fs::remove_file(path).await;
+                let path = path.clone();
+                cleanup_set.spawn(async move { tokio::fs::remove_file(path).await });
             }
         }
+        while cleanup_set.join_next().await.is_some() {}
 
         let etag = if multipart_etag.is_empty() {
             format!("\"{}\"", hex::encode(digest))
@@ -1798,7 +1826,8 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
     );
 
     for u in uploads {
-        xml.push_str(&format!(
+        write!(
+            xml,
             "<Upload>\
 <Key>{key}</Key>\
 <UploadId>{id}</UploadId>\
@@ -1807,7 +1836,8 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
             key = xml_escape(&u.key),
             id = xml_escape(&u.upload_id),
             initiated = u.initiated.format("%Y-%m-%dT%H:%M:%S.000Z"),
-        ));
+        )
+        .unwrap();
     }
 
     xml.push_str("</ListMultipartUploadsResult>");
@@ -2001,9 +2031,12 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
     }
 
     let prefix = ctx.query_params.get("prefix").cloned().unwrap_or_default();
-    let mut objects = store.list_objects(&bucket);
-    objects.retain(|o| o.key.starts_with(&prefix));
-    objects.sort_by_key(|o| o.key.clone());
+    // list_objects() returns objects in sorted key order (BTreeMap).
+    let objects: Vec<_> = store
+        .list_objects(&bucket)
+        .into_iter()
+        .filter(|o| o.key.starts_with(&prefix))
+        .collect();
 
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -2021,7 +2054,8 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
                 .map(|fv| fv.version_id == v.version_id)
                 .unwrap_or(false);
             if v.delete_marker {
-                xml.push_str(&format!(
+                write!(
+                    xml,
                     "<DeleteMarker>\
 <Key>{key}</Key><VersionId>{vid}</VersionId>\
 <IsLatest>{latest}</IsLatest>\
@@ -2031,9 +2065,11 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
                     vid = xml_escape(&v.version_id),
                     latest = is_latest,
                     lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                ));
+                )
+                .unwrap();
             } else {
-                xml.push_str(&format!(
+                write!(
+                    xml,
                     "<Version>\
 <Key>{key}</Key><VersionId>{vid}</VersionId>\
 <IsLatest>{latest}</IsLatest>\
@@ -2047,7 +2083,8 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
                     lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
                     etag = xml_escape(&v.etag),
                     size = v.size,
-                ));
+                )
+                .unwrap();
             }
         }
     }
@@ -2100,12 +2137,22 @@ fn handle_put_bucket_notification(store: &mut S3Store, ctx: &RequestContext) -> 
 // ---------------------------------------------------------------------------
 
 /// Naive XML text extractor: finds first occurrence of <tag>text</tag>
+fn unescape_xml(s: &str) -> String {
+    // Replace the five predefined XML entities.  Order matters: &amp; must be
+    // last so we don't double-expand entities like `&amp;lt;`.
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
 fn extract_xml_text(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)?;
-    Some(xml[start..start + end].trim().to_string())
+    Some(unescape_xml(xml[start..start + end].trim()))
 }
 
 fn parse_copy_source(source: &str) -> (String, String) {
@@ -2185,7 +2232,7 @@ impl ServiceProvider for S3Provider {
         let op = derive_s3_operation(ctx);
 
         // For read operations we use get() (read lock); mutations use get_or_create() (write lock).
-        let response = match op.as_str() {
+        let response = match op.as_ref() {
             // ---- Bucket ops ----
             "ListBuckets" => {
                 if let Some(store) = self.store.get(&ctx.account_id, &ctx.region) {
@@ -2387,7 +2434,7 @@ impl ServiceProvider for S3Provider {
             "PresignedGetObject" => handle_get_object_async(&self.store, ctx).await,
             _ => {
                 warn!(service = "s3", operation = %op, "S3 operation not implemented");
-                return Err(DispatchError::NotImplemented(op));
+                return Err(DispatchError::NotImplemented(op.into_owned()));
             }
         };
 
@@ -2406,7 +2453,7 @@ impl ServiceProvider for S3Provider {
 // Operation derivation from HTTP method + path + query params
 // ---------------------------------------------------------------------------
 
-fn derive_s3_operation(ctx: &RequestContext) -> String {
+fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
     let method = ctx.method.to_uppercase();
     let has_key = !key_from_path(&ctx.path).is_empty();
     let has_bucket = bucket_from_path(&ctx.path).is_some();
@@ -2428,95 +2475,95 @@ fn derive_s3_operation(ctx: &RequestContext) -> String {
     let has_copy_source = ctx.headers.contains_key("x-amz-copy-source");
 
     match (method.as_str(), has_bucket, has_key) {
-        ("GET", false, _) => "ListBuckets".to_string(),
+        ("GET", false, _) => Cow::Borrowed("ListBuckets"),
         ("GET", true, false) => {
             if has_location {
-                "GetBucketLocation".to_string()
+                Cow::Borrowed("GetBucketLocation")
             } else if has_acl {
-                "GetBucketAcl".to_string()
+                Cow::Borrowed("GetBucketAcl")
             } else if has_policy {
-                "GetBucketPolicy".to_string()
+                Cow::Borrowed("GetBucketPolicy")
             } else if has_versioning {
-                "GetBucketVersioning".to_string()
+                Cow::Borrowed("GetBucketVersioning")
             } else if has_versions {
-                "ListObjectVersions".to_string()
+                Cow::Borrowed("ListObjectVersions")
             } else if has_notification {
-                "GetBucketNotificationConfiguration".to_string()
+                Cow::Borrowed("GetBucketNotificationConfiguration")
             } else if has_uploads {
-                "ListMultipartUploads".to_string()
+                Cow::Borrowed("ListMultipartUploads")
             } else if has_list_type_2 {
-                "ListObjectsV2".to_string()
+                Cow::Borrowed("ListObjectsV2")
             } else {
-                "ListObjects".to_string()
+                Cow::Borrowed("ListObjects")
             }
         }
         ("GET", true, true) => {
             if has_acl {
-                "GetObjectAcl".to_string()
+                Cow::Borrowed("GetObjectAcl")
             } else if has_x_amz_sig {
-                "PresignedGetObject".to_string()
+                Cow::Borrowed("PresignedGetObject")
             } else {
-                "GetObject".to_string()
+                Cow::Borrowed("GetObject")
             }
         }
-        ("HEAD", true, false) => "HeadBucket".to_string(),
-        ("HEAD", true, true) => "HeadObject".to_string(),
+        ("HEAD", true, false) => Cow::Borrowed("HeadBucket"),
+        ("HEAD", true, true) => Cow::Borrowed("HeadObject"),
         ("PUT", true, false) => {
             if has_acl {
-                "PutBucketAcl".to_string()
+                Cow::Borrowed("PutBucketAcl")
             } else if has_policy {
-                "PutBucketPolicy".to_string()
+                Cow::Borrowed("PutBucketPolicy")
             } else if has_versioning {
-                "PutBucketVersioning".to_string()
+                Cow::Borrowed("PutBucketVersioning")
             } else if has_notification {
-                "PutBucketNotificationConfiguration".to_string()
+                Cow::Borrowed("PutBucketNotificationConfiguration")
             } else {
-                "CreateBucket".to_string()
+                Cow::Borrowed("CreateBucket")
             }
         }
         ("PUT", true, true) => {
             if has_copy_source {
-                "CopyObject".to_string()
+                Cow::Borrowed("CopyObject")
             } else if has_upload_id && has_part_number {
-                "UploadPart".to_string()
+                Cow::Borrowed("UploadPart")
             } else if has_acl {
-                "PutObjectAcl".to_string()
+                Cow::Borrowed("PutObjectAcl")
             } else {
-                "PutObject".to_string()
+                Cow::Borrowed("PutObject")
             }
         }
         ("DELETE", true, false) => {
             if has_policy {
-                "DeleteBucketPolicy".to_string()
+                Cow::Borrowed("DeleteBucketPolicy")
             } else {
-                "DeleteBucket".to_string()
+                Cow::Borrowed("DeleteBucket")
             }
         }
         ("DELETE", true, true) => {
             if has_upload_id {
-                "AbortMultipartUpload".to_string()
+                Cow::Borrowed("AbortMultipartUpload")
             } else {
-                "DeleteObject".to_string()
+                Cow::Borrowed("DeleteObject")
             }
         }
         ("POST", true, false) => {
             if has_delete {
-                "DeleteObjects".to_string()
+                Cow::Borrowed("DeleteObjects")
             } else if has_uploads {
-                "CreateMultipartUpload".to_string()
+                Cow::Borrowed("CreateMultipartUpload")
             } else {
-                "DeleteObjects".to_string()
+                Cow::Borrowed("DeleteObjects")
             }
         }
         ("POST", true, true) => {
             if has_upload_id {
-                "CompleteMultipartUpload".to_string()
+                Cow::Borrowed("CompleteMultipartUpload")
             } else if has_uploads {
-                "CreateMultipartUpload".to_string()
+                Cow::Borrowed("CreateMultipartUpload")
             } else {
-                "PostObject".to_string()
+                Cow::Borrowed("PostObject")
             }
         }
-        _ => format!("Unknown({method})"),
+        _ => Cow::Owned(format!("Unknown({method})")),
     }
 }

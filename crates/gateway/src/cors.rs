@@ -6,7 +6,8 @@ pub struct CorsHandler {
     disable_headers: bool,
     #[allow(dead_code)]
     allowed_origins: Vec<String>,
-    allowed_headers: Vec<String>,
+    /// Pre-computed `HeaderValue` for `access-control-allow-headers`.
+    allowed_headers_value: HeaderValue,
 }
 
 impl CorsHandler {
@@ -22,10 +23,13 @@ impl CorsHandler {
         ];
         allowed_headers.extend(config.cors.extra_allowed_headers.clone());
 
+        let allowed_headers_value = HeaderValue::from_str(&allowed_headers.join(","))
+            .unwrap_or(HeaderValue::from_static("*"));
+
         Self {
             disable_headers: config.cors.disable_cors_headers,
             allowed_origins: config.cors.extra_allowed_origins.clone(),
-            allowed_headers,
+            allowed_headers_value,
         }
     }
 
@@ -46,8 +50,7 @@ impl CorsHandler {
         );
         let _ = headers.insert(
             "access-control-allow-headers",
-            HeaderValue::from_str(&self.allowed_headers.join(","))
-                .unwrap_or(HeaderValue::from_static("*")),
+            self.allowed_headers_value.clone(),
         );
         let _ = headers.insert(
             "access-control-expose-headers",

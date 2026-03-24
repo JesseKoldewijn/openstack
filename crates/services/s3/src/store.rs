@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use bytes::Bytes;
@@ -313,8 +313,8 @@ pub struct NotificationConfig {
 pub struct S3Store {
     /// bucket_name → Bucket
     pub buckets: HashMap<String, Bucket>,
-    /// bucket_name → key → S3Object
-    pub objects: HashMap<String, HashMap<String, S3Object>>,
+    /// bucket_name → key → S3Object  (BTreeMap keeps keys sorted for O(1) listing)
+    pub objects: HashMap<String, BTreeMap<String, S3Object>>,
     /// upload_id → MultipartUpload
     pub multipart_uploads: HashMap<String, MultipartUpload>,
 }
