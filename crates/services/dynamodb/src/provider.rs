@@ -932,7 +932,9 @@ impl ServiceProvider for DynamoDbProvider {
                     None => serialize_response(&GetItemResp { item: None }),
                     Some(item) => {
                         let out = project_item(item, projection, &attr_names);
-                        serialize_response(&GetItemResp { item: Some(&*out) })
+                        serialize_response(&GetItemResp {
+                            item: Some(out.as_ref()),
+                        })
                     }
                 };
                 // Opt 4: explicitly drop the shard lock before returning.
