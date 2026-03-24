@@ -442,6 +442,13 @@ impl ObjectFileStore {
         self.ensure_dir_exists(&dst_dir).await?;
         let dst = dst_dir.join(dst.version_id);
 
+        // Short-circuit when copying an object to itself (same-key copy in a
+        // non-versioned bucket produces identical src/dst paths).  Both
+        // hard_link and fs::copy would either fail or truncate the file.
+        if src == dst {
+            return Ok(dst);
+        }
+
         // Prefer a hard link (O(1), no data copy) and fall back to a full
         // byte copy if the source and destination are on different
         // filesystems or the filesystem does not support hard links.

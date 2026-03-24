@@ -641,7 +641,7 @@ impl ServiceProvider for DynamoDbProvider {
 
                 // Clone the Arc immediately so the outer shard lock is released
                 // before we do any work on the inner table map.
-                let tables = {
+                let desc = {
                     let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                     if store.get_table(&name).is_some() {
                         return Ok(json_error(
@@ -660,10 +660,20 @@ impl ServiceProvider for DynamoDbProvider {
                         lsis,
                         stream_spec,
                     );
-                    store.tables_ref()
+                    // Build the description while still holding the shard lock so
+                    // a concurrent DeleteTable cannot remove the entry underneath us.
+                    match store.get_table(&name) {
+                        Some(t) => table_description(&t),
+                        None => {
+                            return Ok(json_error(
+                                "InternalFailure",
+                                "Table was created but could not be retrieved",
+                                500,
+                            ));
+                        }
+                    }
                     // outer RefMut (shard lock) released here
                 };
-                let desc = table_description(&tables.get(&name).unwrap());
                 Ok(json_ok(json!({ "TableDescription": desc })))
             }
 
@@ -1266,7 +1276,19 @@ impl ServiceProvider for DynamoDbProvider {
                 // When scanning a secondary index, only items that have the
                 // index's hash key attribute present are included (mirroring
                 // DynamoDB sparse-index semantics).
-                let index_hk: Option<&str> = index_name.and_then(|idx| table.index_hash_key(idx));
+                let index_hk: Option<&str> = match index_name {
+                    None => None,
+                    Some(idx) => match table.index_hash_key(idx) {
+                        Some(hk) => Some(hk),
+                        None => {
+                            return Ok(json_error(
+                                "ValidationException",
+                                &format!("The table does not have the specified index: {idx}"),
+                                400,
+                            ));
+                        }
+                    },
+                };
                 let all_items: Vec<&Item> = table.all_items();
 
                 // scanned_count = items considered before filter (after index pruning)

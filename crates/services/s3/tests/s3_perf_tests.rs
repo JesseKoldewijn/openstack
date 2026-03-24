@@ -8,7 +8,7 @@
 /// Run with: `cargo test -p openstack-s3`
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use openstack_s3::provider::S3Provider;
@@ -103,12 +103,11 @@ fn make_ctx_spooled(method: &str, path: &str, data: Vec<u8>, threshold: usize) -
     }
 }
 
-async fn new_provider() -> S3Provider {
+async fn new_provider() -> (tempfile::TempDir, S3Provider) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.keep();
-    let provider = S3Provider::new(path);
+    let provider = S3Provider::new(dir.path().to_path_buf());
     provider.start().await.unwrap();
-    provider
+    (dir, provider)
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +121,7 @@ async fn new_provider() -> S3Provider {
 
 #[tokio::test]
 async fn perf_btreemap_key_ordering() {
-    let provider = new_provider().await;
+    let (_dir, provider) = new_provider().await;
 
     let ctx = make_ctx("PUT", "/order-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
@@ -173,7 +172,7 @@ async fn perf_btreemap_key_ordering() {
 
 #[tokio::test]
 async fn perf_list_objects_max_keys_early_terminate() {
-    let provider = new_provider().await;
+    let (_dir, provider) = new_provider().await;
 
     let ctx = make_ctx("PUT", "/maxk-perf-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
@@ -226,7 +225,7 @@ async fn perf_list_objects_max_keys_early_terminate() {
 
 #[tokio::test]
 async fn perf_list_objects_prefix_and_pagination() {
-    let provider = new_provider().await;
+    let (_dir, provider) = new_provider().await;
 
     let ctx = make_ctx("PUT", "/prefix-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
@@ -313,7 +312,7 @@ async fn perf_list_objects_prefix_and_pagination() {
 
 #[tokio::test]
 async fn perf_copy_object_large_fast_path() {
-    let provider = new_provider().await;
+    let (_dir, provider) = new_provider().await;
 
     let ctx = make_ctx("PUT", "/copy-src-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
@@ -402,7 +401,8 @@ async fn perf_copy_object_large_fast_path() {
 
 #[tokio::test]
 async fn perf_concurrent_put_across_buckets() {
-    let provider = Arc::new(new_provider().await);
+    let (_dir, provider) = new_provider().await;
+    let provider = Arc::new(provider);
     let n_buckets = 10usize;
     let objects_per_bucket = 20usize;
 
@@ -431,7 +431,10 @@ async fn perf_concurrent_put_across_buckets() {
     }
 
     for handle in handles {
-        handle.await.expect("concurrent PUT task panicked");
+        tokio::time::timeout(Duration::from_secs(30), handle)
+            .await
+            .expect("concurrent PUT task timed out after 30 s — possible deadlock")
+            .expect("concurrent PUT task panicked");
     }
 
     // Verify object count per bucket via ListObjectsV2.
@@ -462,7 +465,7 @@ async fn perf_concurrent_put_across_buckets() {
 
 #[tokio::test]
 async fn perf_multipart_out_of_order_parts() {
-    let provider = new_provider().await;
+    let (_dir, provider) = new_provider().await;
 
     let ctx = make_ctx("PUT", "/mp-order-bucket", b"");
     provider.dispatch(&ctx).await.unwrap();
