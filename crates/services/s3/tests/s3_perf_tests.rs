@@ -535,7 +535,7 @@ async fn perf_multipart_out_of_order_parts() {
         let etag = resp
             .headers
             .iter()
-            .find(|(k, _)| k == "ETag")
+            .find(|(k, _)| k.eq_ignore_ascii_case("etag"))
             .map(|(_, v)| v.clone())
             .expect("ETag header missing for part");
         etags.push((*part_num, etag));

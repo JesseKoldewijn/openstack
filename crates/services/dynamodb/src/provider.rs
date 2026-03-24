@@ -423,6 +423,7 @@ fn av_to_string(v: &AttributeValue) -> Option<String> {
     match v {
         AttributeValue::S(s) => Some(s.clone()),
         AttributeValue::N(n) => Some(n.clone()),
+        AttributeValue::B(b) => Some(b.clone()),
         _ => None,
     }
 }
@@ -1292,13 +1293,13 @@ impl ServiceProvider for DynamoDbProvider {
                     Some(t) => t,
                 };
 
-                // When scanning a secondary index, only items that have the
-                // index's hash key attribute present are included (mirroring
-                // DynamoDB sparse-index semantics).
-                let index_hk: Option<&str> = match index_name {
+                // When scanning a secondary index, only items that carry both
+                // the index hash key AND (if present) the index range key are
+                // included — mirroring DynamoDB sparse-index semantics.
+                let index_keys: Option<(&str, Option<&str>)> = match index_name {
                     None => None,
                     Some(idx) => match table.index_hash_key(idx) {
-                        Some(hk) => Some(hk),
+                        Some(hk) => Some((hk, table.index_range_key(idx))),
                         None => {
                             return Ok(json_error(
                                 "ValidationException",
@@ -1311,10 +1312,12 @@ impl ServiceProvider for DynamoDbProvider {
                 let all_items: Vec<&Item> = table.all_items();
 
                 // scanned_count = items considered before filter (after index pruning)
-                let pre_filter: Vec<&Item> = if let Some(hk) = index_hk {
+                let pre_filter: Vec<&Item> = if let Some((hk, rk_opt)) = index_keys {
                     all_items
                         .into_iter()
-                        .filter(|item| item.contains_key(hk))
+                        .filter(|item| {
+                            item.contains_key(hk) && rk_opt.is_none_or(|rk| item.contains_key(rk))
+                        })
                         .collect()
                 } else {
                     all_items

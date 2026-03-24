@@ -237,10 +237,17 @@ impl MaterializedIndex {
 
     /// Insert an item's primary-key pair into this index (no-op if the item
     /// does not carry the index hash key — sparse index semantics).
+    /// If the index also has a range key, the item must carry that too.
     pub fn add(&mut self, item: &Item, pk_hash: String, pk_sort: String) {
         let Some(hv) = item.get(&self.hash_key_name).and_then(av_to_key_str) else {
             return;
         };
+        // Sparse index: skip items that lack the index range key (when one is defined).
+        if let Some(rk) = &self.range_key_name
+            && item.get(rk).is_none()
+        {
+            return;
+        }
         let bucket = self.data.entry(hv).or_default();
         // Avoid duplicate entries (can happen if put_item is called twice
         // for the same primary key without a preceding delete).
@@ -266,16 +273,100 @@ impl MaterializedIndex {
 #[derive(Debug, PartialEq)]
 pub enum SortKeyValue<'a> {
     S(&'a str),
-    N(f64),
+    /// Numeric value stored as the original DynamoDB string (e.g. "3.14", "-100").
+    /// Compared with full precision via `cmp_numeric_str` — no f64 loss.
+    N(&'a str),
 }
 
 impl<'a> PartialOrd for SortKeyValue<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (SortKeyValue::S(a), SortKeyValue::S(b)) => a.partial_cmp(b),
-            (SortKeyValue::N(a), SortKeyValue::N(b)) => a.partial_cmp(b),
+            (SortKeyValue::N(a), SortKeyValue::N(b)) => Some(cmp_numeric_str(a, b)),
             _ => None,
         }
+    }
+}
+
+/// Compare two DynamoDB numeric strings with full precision (no f64 conversion).
+///
+/// DynamoDB number strings are standard decimal notation, optionally with a
+/// leading minus sign and a decimal point.  Scientific notation is not
+/// produced by the AWS SDK for stored values, so we don't handle it here.
+///
+/// Algorithm:
+/// 1. Compare signs.
+/// 2. For two positives: compare by integer-part length, then lexicographically,
+///    then by fractional part (right-padded with '0').
+/// 3. For two negatives: reverse the positive comparison.
+fn cmp_numeric_str(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let a_neg = a.starts_with('-');
+    let b_neg = b.starts_with('-');
+
+    match (a_neg, b_neg) {
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        _ => {}
+    }
+
+    // Strip sign for magnitude comparison.
+    let a_mag = if a_neg { &a[1..] } else { a };
+    let b_mag = if b_neg { &b[1..] } else { b };
+
+    let mag_ord = cmp_magnitude(a_mag, b_mag);
+
+    // Negative numbers: larger magnitude means smaller value.
+    if a_neg { mag_ord.reverse() } else { mag_ord }
+}
+
+fn cmp_magnitude(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    // Split on decimal point.
+    let (a_int, a_frac) = split_decimal(a);
+    let (b_int, b_frac) = split_decimal(b);
+
+    // Strip leading zeros from integer parts (handles "007" == "7").
+    let a_int = a_int.trim_start_matches('0');
+    let b_int = b_int.trim_start_matches('0');
+
+    // Longer integer part = larger magnitude.
+    match a_int.len().cmp(&b_int.len()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    // Same length integer parts — lexicographic comparison works because
+    // both are digit-only strings of equal length.
+    match a_int.cmp(b_int) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    // Integer parts equal — compare fractional parts (strip trailing zeros).
+    let a_frac = a_frac.trim_end_matches('0');
+    let b_frac = b_frac.trim_end_matches('0');
+
+    // Compare character by character (right-pad shorter with '0').
+    let max_len = a_frac.len().max(b_frac.len());
+    for i in 0..max_len {
+        let ac = a_frac.as_bytes().get(i).copied().unwrap_or(b'0');
+        let bc = b_frac.as_bytes().get(i).copied().unwrap_or(b'0');
+        match ac.cmp(&bc) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
+    Ordering::Equal
+}
+
+fn split_decimal(s: &str) -> (&str, &str) {
+    match s.find('.') {
+        Some(pos) => (&s[..pos], &s[pos + 1..]),
+        None => (s, ""),
     }
 }
 
@@ -694,7 +785,7 @@ impl Table {
         None
     }
 
-    fn index_range_key(&self, index_name: &str) -> Option<&str> {
+    pub fn index_range_key(&self, index_name: &str) -> Option<&str> {
         for gsi in &self.global_secondary_indexes {
             if gsi.index_name == index_name {
                 return gsi
@@ -873,6 +964,7 @@ pub fn av_to_key_str(v: &AttributeValue) -> Option<String> {
     match v {
         AttributeValue::S(s) => Some(s.clone()),
         AttributeValue::N(n) => Some(n.clone()),
+        AttributeValue::B(b) => Some(b.clone()),
         AttributeValue::Bool(b) => Some(b.to_string()),
         _ => None,
     }
@@ -884,6 +976,7 @@ pub fn av_to_key_str_ref(v: &AttributeValue) -> Option<&str> {
     match v {
         AttributeValue::S(s) => Some(s.as_str()),
         AttributeValue::N(n) => Some(n.as_str()),
+        AttributeValue::B(b) => Some(b.as_str()),
         _ => None,
     }
 }
@@ -891,7 +984,8 @@ pub fn av_to_key_str_ref(v: &AttributeValue) -> Option<&str> {
 pub fn av_sort_key(v: &AttributeValue) -> Option<SortKeyValue<'_>> {
     match v {
         AttributeValue::S(s) => Some(SortKeyValue::S(s.as_str())),
-        AttributeValue::N(n) => n.parse::<f64>().ok().map(SortKeyValue::N),
+        AttributeValue::N(n) => Some(SortKeyValue::N(n.as_str())),
+        AttributeValue::B(b) => Some(SortKeyValue::S(b.as_str())),
         _ => None,
     }
 }
