@@ -108,6 +108,7 @@ regex = "1"
 url = "2"
 mime = "0.3"
 tikv-jemallocator = "0.6"
+rust_decimal = "1"
 
 # Internal crates
 openstack-config = { path = "crates/config" }

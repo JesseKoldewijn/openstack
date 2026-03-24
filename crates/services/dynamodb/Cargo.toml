@@ -21,6 +21,7 @@ thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
+rust_decimal.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

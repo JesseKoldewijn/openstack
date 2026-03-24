@@ -23,16 +23,22 @@ use crate::store::{
 
 pub struct DynamoDbProvider {
     store: Arc<AccountRegionBundle<DynamoDbStore>>,
-    /// Serialises TransactWriteItems operations so that the validate→apply
-    /// two-pass is not interleaved with concurrent transactions.
-    txn_lock: Mutex<()>,
+    /// Per-table Mutex pool keyed by `"account_id/region/table_name"`.
+    ///
+    /// Every mutating operation (PutItem, UpdateItem, DeleteItem,
+    /// BatchWriteItem, TransactWriteItems) acquires the lock for each table
+    /// it touches before performing any DashMap read or write. This ensures
+    /// TransactWriteItems' validate→apply two-pass is fully isolated from
+    /// concurrent single-item writers on the same table. Operations on
+    /// disjoint tables remain fully concurrent.
+    table_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl DynamoDbProvider {
     pub fn new() -> Self {
         Self {
             store: Arc::new(AccountRegionBundle::new()),
-            txn_lock: Mutex::new(()),
+            table_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -46,6 +52,21 @@ impl DynamoDbProvider {
     /// outer shard lock immediately after cloning the Arc.
     fn get_or_create_tables(&self, account_id: &str, region: &str) -> Arc<DashMap<String, Table>> {
         self.store.get_or_create(account_id, region).tables_ref()
+    }
+
+    /// Return the per-table `Mutex` for the given (account, region, table)
+    /// triple, creating it if it does not yet exist.
+    ///
+    /// The mutex is held by the caller across **all** reads and writes for the
+    /// table within a single logical operation, ensuring linearisability.
+    fn get_table_lock(&self, account_id: &str, region: &str, table_name: &str) -> Arc<Mutex<()>> {
+        let key = format!("{account_id}/{region}/{table_name}");
+        Arc::clone(
+            self.table_locks
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .value(),
+        )
     }
 }
 
@@ -871,6 +892,9 @@ impl ServiceProvider for DynamoDbProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("NONE");
 
+                let _table_lock = self.get_table_lock(&ctx.account_id, &ctx.region, &name);
+                let _table_guard = _table_lock.lock().await;
+
                 let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
                 let mut table = match tables.get_mut(&name) {
                     None => {
@@ -981,6 +1005,9 @@ impl ServiceProvider for DynamoDbProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("NONE");
 
+                let _table_lock = self.get_table_lock(&ctx.account_id, &ctx.region, &name);
+                let _table_guard = _table_lock.lock().await;
+
                 let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
                 let mut table = match tables.get_mut(&name) {
                     None => {
@@ -1035,6 +1062,9 @@ impl ServiceProvider for DynamoDbProvider {
                     .get("ReturnValues")
                     .and_then(|v| v.as_str())
                     .unwrap_or("NONE");
+
+                let _table_lock = self.get_table_lock(&ctx.account_id, &ctx.region, &name);
+                let _table_guard = _table_lock.lock().await;
 
                 let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
                 let mut table = match tables.get_mut(&name) {
@@ -1450,6 +1480,8 @@ impl ServiceProvider for DynamoDbProvider {
                         Some(arr) => arr,
                         None => continue,
                     };
+                    let _table_lock = self.get_table_lock(&ctx.account_id, &ctx.region, table_name);
+                    let _table_guard = _table_lock.lock().await;
                     let mut table = match tables.get_mut(table_name) {
                         None => {
                             return Ok(json_error(
@@ -1547,10 +1579,37 @@ impl ServiceProvider for DynamoDbProvider {
 
                 let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
 
-                // Acquire the transaction lock before any reads so the
-                // validate→apply two-pass is not interleaved with concurrent
-                // TransactWriteItems calls (B8 atomicity fix).
-                let _txn_guard = self.txn_lock.lock().await;
+                // Acquire per-table locks in sorted order to prevent deadlocks.
+                // All tables touched by this transaction are locked before the
+                // validate→apply two-pass begins, preventing interleaving with
+                // concurrent single-item writers or other transactions.
+                let table_names: Vec<String> = {
+                    let mut seen = std::collections::HashSet::new();
+                    for ti in &transact_items {
+                        for op_name in &["Put", "Delete", "Update", "ConditionCheck"] {
+                            if let Some(op) = ti.get(op_name) {
+                                if let Some(tn) = op.get("TableName").and_then(|v| v.as_str()) {
+                                    seen.insert(tn.to_string());
+                                }
+                            }
+                        }
+                    }
+                    let mut v: Vec<String> = seen.into_iter().collect();
+                    v.sort();
+                    v
+                };
+                // Collect Arcs first (must be declared before _table_guards so they
+                // outlive the guards that borrow from them — Rust drops in reverse order).
+                let table_arcs: Vec<Arc<Mutex<()>>> = table_names
+                    .iter()
+                    .map(|tn| self.get_table_lock(&ctx.account_id, &ctx.region, tn))
+                    .collect();
+                let mut _table_guards = Vec::with_capacity(table_names.len());
+                for arc in &table_arcs {
+                    _table_guards.push(arc.lock().await);
+                }
+                // Suppress unused-variable warning when table_names is empty.
+                let _ = &table_names;
 
                 // B9: fail fast if any referenced table does not exist.
                 for ti in &transact_items {

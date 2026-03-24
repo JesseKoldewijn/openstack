@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use dashmap::mapref::one::{Ref, RefMut};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
@@ -1231,10 +1233,13 @@ fn apply_add_clause(
             let delta = resolve_value(tokens[1].trim(), values);
             if let Some(existing) = item.get_mut(&name) {
                 match (existing, delta) {
-                    // Numeric addition
+                    // Numeric addition — use Decimal to preserve full integer
+                    // precision for values > 2^53 (f64 would lose digits).
                     (AttributeValue::N(cur_s), AttributeValue::N(d_s)) => {
-                        if let (Ok(cur), Ok(d)) = (cur_s.parse::<f64>(), d_s.parse::<f64>()) {
-                            *cur_s = (cur + d).to_string();
+                        if let (Ok(cur), Ok(d)) =
+                            (Decimal::from_str(cur_s), Decimal::from_str(&d_s))
+                        {
+                            *cur_s = (cur + d).normalize().to_string();
                         }
                     }
                     // Set union — SS

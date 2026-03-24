@@ -845,7 +845,9 @@ async fn handle_delete_objects_async(
             let obj_end = remaining.find("</Object>").unwrap_or(remaining.len());
             let obj_xml = &remaining[..obj_end];
             let key = extract_xml_text(obj_xml, "Key").unwrap_or_default();
-            let version_id = extract_xml_text(obj_xml, "VersionId");
+            let version_id = extract_xml_text(obj_xml, "VersionId")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
             if !key.is_empty() {
                 result.push((key, version_id));
             }
@@ -1173,11 +1175,27 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     content_items.truncate(remaining);
 
     let next_token = if truncated {
-        // Prefer the last content key; fall back to the last common prefix.
-        content_items
-            .last()
-            .map(|(k, ..)| k.clone())
-            .or_else(|| cp_vec.last().cloned())
+        // Prefer the last content key.  When the page was filled entirely by
+        // common prefixes (content_items is empty), we must NOT use the
+        // synthetic prefix string (e.g. "dir/") as the cursor: every key
+        // under "dir/" is lexicographically greater than "dir/", so the
+        // retain filter on the next request would keep them all and they
+        // would collapse into "dir/" again — an infinite loop.
+        //
+        // Instead, find the last raw object key in `all_items` that was
+        // grouped into the last kept common prefix.  That key IS a valid
+        // cursor because all remaining keys come strictly after it.
+        if let Some((k, ..)) = content_items.last() {
+            Some(k.clone())
+        } else if let Some(last_cp) = cp_vec.last() {
+            all_items
+                .iter()
+                .filter(|(k, ..)| k.starts_with(last_cp.as_str()))
+                .last()
+                .map(|(k, ..)| k.clone())
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1303,11 +1321,21 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     let remaining1 = max_keys.saturating_sub(cp_vec1.len());
     content_items.truncate(remaining1);
     let next_marker = if truncated {
-        content_items
-            .last()
-            .map(|(k, ..)| k.clone())
-            .or_else(|| cp_vec1.last().cloned())
-            .unwrap_or_default()
+        // Same cursor-safety logic as ListObjectsV2: do not use the synthetic
+        // common-prefix string as a marker — use the last raw key that fell
+        // under the last kept prefix so the next request skips past it cleanly.
+        if let Some((k, ..)) = content_items.last() {
+            k.clone()
+        } else if let Some(last_cp) = cp_vec1.last() {
+            all_items
+                .iter()
+                .filter(|(k, ..)| k.starts_with(last_cp.as_str()))
+                .last()
+                .map(|(k, ..)| k.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
     } else {
         String::new()
     };
@@ -1568,9 +1596,11 @@ async fn handle_complete_multipart_upload_async(
             let end = remaining.find("</Part>").unwrap_or(remaining.len());
             let part_xml = &remaining[..end];
             let pn: u32 = extract_xml_text(part_xml, "PartNumber")
-                .and_then(|v| v.parse().ok())
+                .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(0);
-            let etag = extract_xml_text(part_xml, "ETag").unwrap_or_default();
+            let etag = extract_xml_text(part_xml, "ETag")
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default();
             if pn > 0 {
                 result.push((pn, etag));
             }
@@ -2026,7 +2056,9 @@ fn handle_put_bucket_versioning(store: &mut S3Store, ctx: &RequestContext) -> Di
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
     let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
-    let status = extract_xml_text(body, "Status").unwrap_or_default();
+    let status = extract_xml_text(body, "Status")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
 
     if let Some(b) = store.get_bucket_mut(&bucket) {
         b.versioning = status;
@@ -2168,7 +2200,7 @@ fn extract_xml_text(xml: &str, tag: &str) -> Option<String> {
     let close = format!("</{tag}>");
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)?;
-    Some(unescape_xml(xml[start..start + end].trim()))
+    Some(unescape_xml(&xml[start..start + end]))
 }
 
 fn parse_copy_source(source: &str) -> (String, String) {
@@ -2568,7 +2600,7 @@ fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
             } else if has_uploads {
                 Cow::Borrowed("CreateMultipartUpload")
             } else {
-                Cow::Borrowed("DeleteObjects")
+                Cow::Borrowed("PostObject")
             }
         }
         ("POST", true, true) => {
