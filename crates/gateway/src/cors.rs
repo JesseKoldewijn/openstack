@@ -1,5 +1,6 @@
-use axum::http::{HeaderMap, HeaderValue, Method};
+use axum::http::{HeaderMap, HeaderValue, Method, header::HeaderName};
 use openstack_config::Config;
+use tracing::warn;
 
 /// Handles CORS for all requests.
 pub struct CorsHandler {
@@ -23,8 +24,31 @@ impl CorsHandler {
         ];
         allowed_headers.extend(config.cors.extra_allowed_headers.clone());
 
-        let allowed_headers_value = HeaderValue::from_str(&allowed_headers.join(","))
-            .unwrap_or(HeaderValue::from_static("*"));
+        // Filter out any entries that are not valid HTTP header names so that a
+        // misconfigured `extra_allowed_headers` value cannot silently broaden the
+        // `access-control-allow-headers` to a wildcard or produce an invalid header.
+        allowed_headers.retain(|h| {
+            let ok = HeaderName::from_bytes(h.as_bytes()).is_ok();
+            if !ok {
+                warn!(
+                    header = %h,
+                    "CORS: ignoring invalid extra_allowed_header value"
+                );
+            }
+            ok
+        });
+
+        let joined = allowed_headers.join(",");
+        let allowed_headers_value = HeaderValue::from_str(&joined).unwrap_or_else(|_| {
+            warn!(
+                "CORS: allowed_headers joined value is not a valid HeaderValue; \
+                   falling back to built-in defaults"
+            );
+            HeaderValue::from_static(
+                "Authorization,Content-Type,X-Amz-Date,X-Amz-Security-Token,\
+                 X-Amz-Target,X-Amz-User-Agent,X-Amzn-RequestId",
+            )
+        });
 
         Self {
             disable_headers: config.cors.disable_cors_headers,
