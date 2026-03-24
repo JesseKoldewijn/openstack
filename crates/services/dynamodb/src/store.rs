@@ -1237,7 +1237,7 @@ fn apply_add_clause(
                     // precision for values > 2^53 (f64 would lose digits).
                     (AttributeValue::N(cur_s), AttributeValue::N(d_s)) => {
                         if let (Ok(cur), Ok(d)) =
-                            (Decimal::from_str(cur_s), Decimal::from_str(&d_s))
+                            (Decimal::from_str(cur_s), Decimal::from_str(d_s))
                         {
                             *cur_s = (cur + d).normalize().to_string();
                         }

@@ -1190,8 +1190,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
         } else if let Some(last_cp) = cp_vec.last() {
             all_items
                 .iter()
-                .filter(|(k, ..)| k.starts_with(last_cp.as_str()))
-                .last()
+                .rfind(|(k, ..)| k.starts_with(last_cp.as_str()))
                 .map(|(k, ..)| k.clone())
         } else {
             None
@@ -1329,8 +1328,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
         } else if let Some(last_cp) = cp_vec1.last() {
             all_items
                 .iter()
-                .filter(|(k, ..)| k.starts_with(last_cp.as_str()))
-                .last()
+                .rfind(|(k, ..)| k.starts_with(last_cp.as_str()))
                 .map(|(k, ..)| k.clone())
                 .unwrap_or_default()
         } else {

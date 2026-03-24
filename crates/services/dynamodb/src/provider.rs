@@ -1587,10 +1587,10 @@ impl ServiceProvider for DynamoDbProvider {
                     let mut seen = std::collections::HashSet::new();
                     for ti in &transact_items {
                         for op_name in &["Put", "Delete", "Update", "ConditionCheck"] {
-                            if let Some(op) = ti.get(op_name) {
-                                if let Some(tn) = op.get("TableName").and_then(|v| v.as_str()) {
-                                    seen.insert(tn.to_string());
-                                }
+                            if let Some(op) = ti.get(op_name)
+                                && let Some(tn) = op.get("TableName").and_then(|v| v.as_str())
+                            {
+                                seen.insert(tn.to_string());
                             }
                         }
                     }
