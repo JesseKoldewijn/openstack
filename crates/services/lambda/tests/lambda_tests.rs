@@ -24,6 +24,7 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 
@@ -41,6 +42,7 @@ fn make_ctx_with_path(operation: &str, body: Value, path: &str) -> RequestContex
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 
@@ -62,6 +64,7 @@ fn make_ctx_with_path_and_raw_body(
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 
@@ -611,6 +614,7 @@ async fn test_docker_invoke_python() {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let invoke_resp = p.dispatch(&invoke_ctx).await.unwrap();
     assert_eq!(invoke_resp.status_code, 200, "{}", body_str(&invoke_resp));
@@ -661,6 +665,7 @@ async fn test_docker_invoke_async() {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let resp = p.dispatch(&invoke_ctx).await.unwrap();
     assert_eq!(resp.status_code, 202);
@@ -715,6 +720,7 @@ def handler(event, context):
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let resp = p.dispatch(&invoke_ctx).await.unwrap();
     // Should time out — 429 TooManyRequestsException or 500 ContainerError

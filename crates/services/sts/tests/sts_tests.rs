@@ -22,6 +22,7 @@ fn make_ctx(operation: &str, params: &[(&str, &str)]) -> RequestContext {
         query_params: qp,
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 

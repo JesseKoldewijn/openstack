@@ -22,6 +22,7 @@ fn make_ctx(body: &[u8]) -> RequestContext {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 

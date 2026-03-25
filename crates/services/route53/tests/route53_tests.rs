@@ -18,6 +18,7 @@ fn make_ctx(operation: &str, xml_body: &str, path: &str, method: &str) -> Reques
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 

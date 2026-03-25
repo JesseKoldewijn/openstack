@@ -730,9 +730,19 @@ async fn handle_get_object_async(
             for (mk, mv) in &metadata {
                 headers.push((format!("x-amz-meta-{mk}"), mv.clone()));
             }
-            if let Some(enc) = &content_encoding {
-                headers.push(("Content-Encoding".to_string(), enc.clone()));
-            }
+            // Always emit Content-Encoding so the gateway's CompressionLayer
+            // does not gzip binary object data.  For objects stored without a
+            // custom content-encoding we emit "identity" (RFC 9110 §8.4.1),
+            // which is a no-op encoding that explicitly tells the layer to
+            // leave the bytes untouched.  This mirrors what the Streaming path
+            // already does via the gateway builder.
+            headers.push((
+                "Content-Encoding".to_string(),
+                content_encoding
+                    .as_deref()
+                    .unwrap_or("identity")
+                    .to_string(),
+            ));
 
             let body = match data {
                 ObjectDataRef::Inline(bytes) => ResponseBody::Buffered(bytes),
