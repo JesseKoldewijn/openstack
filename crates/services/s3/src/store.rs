@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use digest::Digest as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -152,8 +154,10 @@ pub struct ObjectVersion {
     /// version-id string; "null" when versioning is disabled
     pub version_id: String,
     pub last_modified: DateTime<Utc>,
-    pub etag: String,
-    pub content_type: String,
+    /// ETag stored as a shared string — clone is O(1) (atomic refcount).
+    pub etag: Arc<str>,
+    /// Content-Type stored as a shared string — clone is O(1).
+    pub content_type: Arc<str>,
     pub content_encoding: Option<String>,
     pub content_disposition: Option<String>,
     pub cache_control: Option<String>,
@@ -177,7 +181,7 @@ impl ObjectVersion {
         metadata: HashMap<String, String>,
         versioning_enabled: bool,
     ) -> Self {
-        let etag = format!("\"{}\"", hex::encode(md5_bytes(&data)));
+        let etag_str = format!("\"{}\"", hex::encode(md5_bytes(&data)));
         let size = data.len() as u64;
         let version_id = if versioning_enabled {
             Uuid::new_v4().to_string()
@@ -187,8 +191,8 @@ impl ObjectVersion {
         Self {
             version_id,
             last_modified: Utc::now(),
-            etag,
-            content_type: content_type.into(),
+            etag: Arc::from(etag_str.as_str()),
+            content_type: Arc::from(content_type.into().as_str()),
             content_encoding: None,
             content_disposition: None,
             cache_control: None,
@@ -218,8 +222,8 @@ impl ObjectVersion {
         Self {
             version_id,
             last_modified: Utc::now(),
-            etag,
-            content_type: content_type.into(),
+            etag: Arc::from(etag.as_str()),
+            content_type: Arc::from(content_type.into().as_str()),
             content_encoding: None,
             content_disposition: None,
             cache_control: None,
@@ -243,26 +247,46 @@ fn md5_bytes(data: &[u8]) -> [u8; 16] {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Object {
     pub key: String,
-    /// Versions ordered newest-first. versions[0] is the current version.
-    pub versions: Vec<ObjectVersion>,
+    /// Versions ordered newest-first.  `versions[0]` is the current version.
+    ///
+    /// `Arc<ObjectVersion>` makes GET metadata extraction O(1) — cloning an
+    /// `Arc` is a single atomic increment rather than a deep copy of all
+    /// fields (etag string, content_type string, metadata HashMap, etc.).
+    pub versions: Vec<Arc<ObjectVersion>>,
 }
 
 impl S3Object {
     pub fn new(key: impl Into<String>, version: ObjectVersion) -> Self {
         Self {
             key: key.into(),
-            versions: vec![version],
+            versions: vec![Arc::new(version)],
         }
     }
 
     /// Returns the current (latest) non-delete-marker version, if any.
     pub fn current(&self) -> Option<&ObjectVersion> {
-        self.versions.first().filter(|v| !v.delete_marker)
+        self.versions
+            .first()
+            .filter(|v| !v.delete_marker)
+            .map(Arc::as_ref)
+    }
+
+    /// Returns an `Arc` to the current (latest) non-delete-marker version, if any.
+    ///
+    /// Prefer this over `current()` when you need to retain the version
+    /// beyond the lifetime of the store guard — cloning an `Arc` is O(1).
+    pub fn current_arc(&self) -> Option<Arc<ObjectVersion>> {
+        self.versions.first().filter(|v| !v.delete_marker).cloned()
     }
 
     /// Returns the latest version regardless of delete-marker status.
     pub fn latest(&self) -> Option<&ObjectVersion> {
-        self.versions.first()
+        self.versions.first().map(Arc::as_ref)
+    }
+
+    /// Returns an `Arc` to the latest version regardless of delete-marker status.
+    pub fn latest_arc(&self) -> Option<Arc<ObjectVersion>> {
+        self.versions.first().cloned()
     }
 }
 
@@ -309,12 +333,25 @@ pub struct NotificationConfig {
 // S3Store  (per-account-region shard)
 // ---------------------------------------------------------------------------
 
+/// Per-account-region S3 data store.
+///
+/// `objects` uses a [`DashMap`] keyed by bucket name so that concurrent
+/// PutObject / GetObject requests targeting **different buckets** within the
+/// same account-region shard can proceed in parallel without contending on a
+/// single write lock.  Each bucket's key→object mapping is a `BTreeMap`
+/// (sorted iteration for `ListObjects`), guarded by the DashMap shard lock.
+///
+/// The outer `AccountRegionBundle<S3Store>` provides coarse account+region
+/// sharding; `DashMap` provides fine-grained per-bucket sharding within that.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct S3Store {
     /// bucket_name → Bucket
     pub buckets: HashMap<String, Bucket>,
-    /// bucket_name → key → S3Object
-    pub objects: HashMap<String, HashMap<String, S3Object>>,
+    /// bucket_name → key → S3Object  (BTreeMap keeps keys sorted for listing)
+    ///
+    /// DashMap provides per-bucket-shard locking so concurrent PUTs/GETs to
+    /// different buckets don't contend.
+    pub objects: DashMap<String, BTreeMap<String, S3Object>>,
     /// upload_id → MultipartUpload
     pub multipart_uploads: HashMap<String, MultipartUpload>,
 }
@@ -402,16 +439,16 @@ impl S3Store {
             }
         };
 
-        let objects = self.objects.entry(bucket.to_string()).or_default();
+        let mut objects = self.objects.entry(bucket.to_string()).or_default();
 
         if let Some(obj) = objects.get_mut(key) {
             let prev = obj.versions.first().map(|v| v.data.clone());
             if version.version_id == "null" {
                 // Non-versioned bucket: overwrite current object in place.
                 obj.versions.clear();
-                obj.versions.push(version);
+                obj.versions.push(Arc::new(version));
             } else {
-                obj.versions.insert(0, version);
+                obj.versions.insert(0, Arc::new(version));
             }
             prev
         } else {
@@ -430,15 +467,15 @@ impl S3Store {
         key: &str,
         version: ObjectVersion,
     ) -> Option<ObjectDataRef> {
-        let objects = self.objects.entry(bucket.to_string()).or_default();
+        let mut objects = self.objects.entry(bucket.to_string()).or_default();
         if let Some(obj) = objects.get_mut(key) {
             let prev = obj.versions.first().map(|v| v.data.clone());
             if version.version_id == "null" {
                 // Non-versioned bucket: overwrite current object in place.
                 obj.versions.clear();
-                obj.versions.push(version);
+                obj.versions.push(Arc::new(version));
             } else {
-                obj.versions.insert(0, version);
+                obj.versions.insert(0, Arc::new(version));
             }
             prev
         } else {
@@ -447,11 +484,10 @@ impl S3Store {
         }
     }
 
-    pub fn get_object(&self, bucket: &str, key: &str) -> Option<&ObjectVersion> {
+    pub fn get_object(&self, bucket: &str, key: &str) -> Option<Arc<ObjectVersion>> {
         self.objects
             .get(bucket)
-            .and_then(|objs| objs.get(key))
-            .and_then(|obj| obj.current())
+            .and_then(|objs| objs.get(key).and_then(|obj| obj.current_arc()))
     }
 
     pub fn get_object_version(
@@ -459,29 +495,33 @@ impl S3Store {
         bucket: &str,
         key: &str,
         version_id: &str,
-    ) -> Option<&ObjectVersion> {
-        self.objects
-            .get(bucket)
-            .and_then(|objs| objs.get(key))
-            .and_then(|obj| obj.versions.iter().find(|v| v.version_id == version_id))
+    ) -> Option<Arc<ObjectVersion>> {
+        self.objects.get(bucket).and_then(|objs| {
+            objs.get(key).and_then(|obj| {
+                obj.versions
+                    .iter()
+                    .find(|v| v.version_id == version_id)
+                    .cloned()
+            })
+        })
     }
 
-    pub fn delete_object(&mut self, bucket: &str, key: &str) -> Option<ObjectVersion> {
+    pub fn delete_object(&mut self, bucket: &str, key: &str) -> Option<Arc<ObjectVersion>> {
         let versioning = self
             .buckets
             .get(bucket)
             .map(|b| b.versioning.as_str() == "Enabled")
             .unwrap_or(false);
 
-        let objects = self.objects.get_mut(bucket)?;
+        let mut objects = self.objects.get_mut(bucket)?;
 
         if versioning {
             // Insert a delete marker
             let marker = ObjectVersion {
                 version_id: Uuid::new_v4().to_string(),
                 last_modified: Utc::now(),
-                etag: String::new(),
-                content_type: String::new(),
+                etag: Arc::from(""),
+                content_type: Arc::from(""),
                 content_encoding: None,
                 content_disposition: None,
                 cache_control: None,
@@ -491,11 +531,12 @@ impl S3Store {
                 data: ObjectDataRef::Inline(Bytes::new()),
                 delete_marker: true,
             };
+            let marker = Arc::new(marker);
             let obj = objects.entry(key.to_string()).or_insert_with(|| S3Object {
                 key: key.to_string(),
                 versions: Vec::new(),
             });
-            obj.versions.insert(0, marker.clone());
+            obj.versions.insert(0, Arc::clone(&marker));
             Some(marker)
         } else {
             objects
@@ -509,8 +550,8 @@ impl S3Store {
         bucket: &str,
         key: &str,
         version_id: &str,
-    ) -> Option<ObjectVersion> {
-        let objects = self.objects.get_mut(bucket)?;
+    ) -> Option<Arc<ObjectVersion>> {
+        let mut objects = self.objects.get_mut(bucket)?;
         let obj = objects.get_mut(key)?;
         let pos = obj
             .versions
@@ -523,10 +564,10 @@ impl S3Store {
         Some(removed)
     }
 
-    pub fn list_objects(&self, bucket: &str) -> Vec<&S3Object> {
+    pub fn list_objects(&self, bucket: &str) -> Vec<S3Object> {
         self.objects
             .get(bucket)
-            .map(|m| m.values().collect())
+            .map(|m| m.values().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -614,7 +655,7 @@ impl S3Store {
         &mut self,
         upload_id: &str,
         parts: &[(u32, String)], // (part_number, etag)
-    ) -> Option<ObjectVersion> {
+    ) -> Option<Arc<ObjectVersion>> {
         let upload = self.multipart_uploads.remove(upload_id)?;
 
         // Concatenate parts in order (inline only)
@@ -665,26 +706,23 @@ impl S3Store {
 
         let mut version = version;
         if let Some(etag) = multipart_etag {
-            version.etag = etag;
+            version.etag = Arc::from(etag.as_str());
         }
 
-        let objects = self.objects.entry(upload.bucket.clone()).or_default();
+        let mut objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
             if version.version_id == "null" {
                 obj.versions.clear();
-                obj.versions.push(version);
+                obj.versions.push(Arc::new(version));
             } else {
-                obj.versions.insert(0, version);
+                obj.versions.insert(0, Arc::new(version));
             }
             obj.versions.first().cloned()
         } else {
-            objects.insert(
-                upload.key.clone(),
-                S3Object::new(upload.key.clone(), version),
-            );
-            objects
-                .get(&upload.key)
-                .and_then(|obj| obj.versions.first().cloned())
+            let s3obj = S3Object::new(upload.key.clone(), version);
+            let ret = s3obj.versions.first().cloned();
+            objects.insert(upload.key.clone(), s3obj);
+            ret
         }
     }
 
@@ -693,8 +731,8 @@ impl S3Store {
     /// Used when parts are file-backed and the caller has already
     /// concatenated them on disk.
     ///
-    /// Returns the previous current version when an existing key is
-    /// overwritten; otherwise returns `None`.
+    /// Returns the previous current version's data ref when an existing key
+    /// is overwritten; otherwise returns `None`.
     pub fn complete_multipart_upload_with_version(
         &mut self,
         upload_id: &str,
@@ -702,14 +740,14 @@ impl S3Store {
     ) -> Option<ObjectDataRef> {
         let upload = self.multipart_uploads.remove(upload_id)?;
 
-        let objects = self.objects.entry(upload.bucket.clone()).or_default();
+        let mut objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
             let prev = obj.versions.first().map(|v| v.data.clone());
             if version.version_id == "null" {
                 obj.versions.clear();
-                obj.versions.push(version);
+                obj.versions.push(Arc::new(version));
             } else {
-                obj.versions.insert(0, version);
+                obj.versions.insert(0, Arc::new(version));
             }
             prev
         } else {

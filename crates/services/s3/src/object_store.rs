@@ -14,14 +14,20 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashSet;
 use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
-use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_128;
+
+/// Process-wide counter used to generate unique temporary file names.
+///
+/// An atomic counter is used instead of `Uuid::new_v4()` because it
+/// requires no OS-RNG syscall and is significantly faster under load.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Manages object data on the filesystem.
 #[derive(Debug, Clone)]
@@ -183,7 +189,8 @@ impl ObjectFileStore {
         self.ensure_dir_exists(&dir).await?;
 
         let final_path = dir.join(version_id);
-        let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
+        let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
         let mut file = fs::File::create(&tmp_path).await?;
         file.write_all(data).await?;
@@ -222,7 +229,8 @@ impl ObjectFileStore {
         self.ensure_dir_exists(&dir).await?;
 
         let final_path = dir.join(version_id);
-        let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
+        let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
         let mut file = fs::File::create(&tmp_path).await?;
 
@@ -268,7 +276,8 @@ impl ObjectFileStore {
         self.ensure_dir_exists_sync(&dir)?;
 
         let final_path = dir.join(version_id);
-        let tmp_path = dir.join(format!("{}-{}.tmp", version_id, Uuid::new_v4()));
+        let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
         let mut file = std::fs::File::create(&tmp_path)?;
 
@@ -442,7 +451,19 @@ impl ObjectFileStore {
         self.ensure_dir_exists(&dst_dir).await?;
         let dst = dst_dir.join(dst.version_id);
 
-        fs::copy(&src, &dst).await?;
+        // Short-circuit when copying an object to itself (same-key copy in a
+        // non-versioned bucket produces identical src/dst paths).  Both
+        // hard_link and fs::copy would either fail or truncate the file.
+        if src == dst {
+            return Ok(dst);
+        }
+
+        // Prefer a hard link (O(1), no data copy) and fall back to a full
+        // byte copy if the source and destination are on different
+        // filesystems or the filesystem does not support hard links.
+        if fs::hard_link(&src, &dst).await.is_err() {
+            fs::copy(&src, &dst).await?;
+        }
 
         debug!(
             src = %src.display(),

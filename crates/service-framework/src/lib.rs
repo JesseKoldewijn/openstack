@@ -13,4 +13,6 @@ pub use hashing::HashingReader;
 pub use lifecycle::ServiceState;
 pub use manager::{ServiceManagerMetrics, ServicePluginManager};
 pub use spooled::{SpooledBody, SpooledBodyReader};
-pub use traits::{DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider};
+pub use traits::{
+    BodyReader, DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
+};

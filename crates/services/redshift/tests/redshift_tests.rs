@@ -17,6 +17,7 @@ fn make_ctx(operation: &str, params: HashMap<String, String>) -> RequestContext 
         query_params: params,
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 

@@ -4,28 +4,69 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use dashmap::DashMap;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
+use serde::Serialize;
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::store::{
-    AttributeDefinition, DynamoDbStore, GlobalSecondaryIndex, Item, KeySchemaElement, KeyType,
-    LocalSecondaryIndex, Projection, RangeCondition, StreamSpecification, apply_update_expression,
-    check_condition, evaluate_filter,
+    AttributeDefinition, AttributeValue, DynamoDbStore, GlobalSecondaryIndex, Item,
+    KeySchemaElement, KeyType, LocalSecondaryIndex, Projection, RangeCondition,
+    StreamSpecification, Table, apply_update_expression, av_from_json, check_condition,
+    evaluate_filter, item_from_json_map,
 };
 
 pub struct DynamoDbProvider {
     store: Arc<AccountRegionBundle<DynamoDbStore>>,
+    /// Per-table Mutex pool keyed by `"account_id/region/table_name"`.
+    ///
+    /// Every mutating operation (PutItem, UpdateItem, DeleteItem,
+    /// BatchWriteItem, TransactWriteItems) acquires the lock for each table
+    /// it touches before performing any DashMap read or write. This ensures
+    /// TransactWriteItems' validate→apply two-pass is fully isolated from
+    /// concurrent single-item writers on the same table. Operations on
+    /// disjoint tables remain fully concurrent.
+    table_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl DynamoDbProvider {
     pub fn new() -> Self {
         Self {
             store: Arc::new(AccountRegionBundle::new()),
+            table_locks: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Clone the inner Arc<DashMap<String, Table>> for an account+region,
+    /// releasing the outer shard lock immediately.
+    fn get_tables(&self, account_id: &str, region: &str) -> Option<Arc<DashMap<String, Table>>> {
+        self.store.get(account_id, region).map(|s| s.tables_ref())
+    }
+
+    /// Get-or-create the inner Arc<DashMap<String, Table>>, releasing the
+    /// outer shard lock immediately after cloning the Arc.
+    fn get_or_create_tables(&self, account_id: &str, region: &str) -> Arc<DashMap<String, Table>> {
+        self.store.get_or_create(account_id, region).tables_ref()
+    }
+
+    /// Return the per-table `Mutex` for the given (account, region, table)
+    /// triple, creating it if it does not yet exist.
+    ///
+    /// The mutex is held by the caller across **all** reads and writes for the
+    /// table within a single logical operation, ensuring linearisability.
+    fn get_table_lock(&self, account_id: &str, region: &str, table_name: &str) -> Arc<Mutex<()>> {
+        let key = format!("{account_id}/{region}/{table_name}");
+        Arc::clone(
+            self.table_locks
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .value(),
+        )
     }
 }
 
@@ -46,6 +87,43 @@ fn json_ok(body: Value) -> DispatchResponse {
         content_type: Cow::Borrowed("application/x-amz-json-1.0"),
         headers: Vec::new(),
     }
+}
+
+/// Serialize `val` directly to JSON bytes, bypassing the intermediate
+/// `serde_json::Value` tree that `json_ok(json!({...}))` would produce.
+fn serialize_response<T: Serialize>(val: &T) -> DispatchResponse {
+    DispatchResponse {
+        status_code: 200,
+        body: ResponseBody::Buffered(Bytes::from(serde_json::to_vec(val).unwrap())),
+        content_type: Cow::Borrowed("application/x-amz-json-1.0"),
+        headers: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thin response wrapper structs — derive Serialize to avoid double-serialization
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct GetItemResp<'a> {
+    #[serde(rename = "Item", skip_serializing_if = "Option::is_none")]
+    item: Option<&'a Item>,
+}
+
+#[derive(Serialize)]
+struct QueryResp<'a> {
+    #[serde(rename = "Items")]
+    items: &'a [Item],
+    #[serde(rename = "Count")]
+    count: usize,
+    #[serde(rename = "ScannedCount")]
+    scanned_count: usize,
+}
+
+#[derive(Serialize)]
+struct MutationResp<'a> {
+    #[serde(rename = "Attributes", skip_serializing_if = "Option::is_none")]
+    attributes: Option<&'a Item>,
 }
 
 fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
@@ -187,9 +265,13 @@ fn parse_expr_names(v: Option<&Value>) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn parse_expr_values(v: Option<&Value>) -> HashMap<String, Value> {
+fn parse_expr_values(v: Option<&Value>) -> HashMap<String, AttributeValue> {
     v.and_then(|m| m.as_object())
-        .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), av_from_json(v)))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -201,7 +283,7 @@ fn parse_key_condition(
     expr: &str,
     range_key_name: &str,
     attr_names: &HashMap<String, String>,
-    attr_values: &HashMap<String, Value>,
+    attr_values: &HashMap<String, AttributeValue>,
 ) -> (Option<String>, Option<RangeCondition>) {
     // Returns (hash_key_value_str, range_condition)
     // Expression is like: "#pk = :pk AND #sk BETWEEN :lo AND :hi"
@@ -220,11 +302,11 @@ fn parse_key_condition(
             if comps.len() == 2 {
                 let name = resolve_attr_name(comps[0].trim(), attr_names);
                 let val = resolve_attr_value(comps[1].trim(), attr_values);
-                let prefix = val
-                    .get("S")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let prefix = if let AttributeValue::S(s) = val {
+                    s.clone()
+                } else {
+                    String::new()
+                };
                 if name == range_key_name {
                     range_cond = Some(RangeCondition::BeginsWith(prefix));
                 }
@@ -241,8 +323,8 @@ fn parse_key_condition(
                 let lo_str = rest[..ap].trim();
                 let hi_str = rest[ap + 5..].trim();
                 let name = resolve_attr_name(lhs, attr_names);
-                let lo = resolve_attr_value(lo_str, attr_values);
-                let hi = resolve_attr_value(hi_str, attr_values);
+                let lo = resolve_attr_value(lo_str, attr_values).clone();
+                let hi = resolve_attr_value(hi_str, attr_values).clone();
                 if name == range_key_name {
                     range_cond = Some(RangeCondition::Between(lo, hi));
                 } else {
@@ -257,33 +339,33 @@ fn parse_key_condition(
                 let lhs = resolve_attr_name(part[..pos].trim(), attr_names);
                 let rhs_str = part[pos + op.len()..].trim();
                 let rhs = resolve_attr_value(rhs_str, attr_values);
-                let rhs_str_val = av_to_string(&rhs);
+                let rhs_str_val = av_to_string(rhs);
                 match *op {
                     "=" => {
                         if lhs == range_key_name {
-                            range_cond = Some(RangeCondition::Eq(rhs));
+                            range_cond = Some(RangeCondition::Eq(rhs.clone()));
                         } else {
                             hash_val = rhs_str_val;
                         }
                     }
                     "<" => {
                         if lhs == range_key_name {
-                            range_cond = Some(RangeCondition::Lt(rhs));
+                            range_cond = Some(RangeCondition::Lt(rhs.clone()));
                         }
                     }
                     "<=" => {
                         if lhs == range_key_name {
-                            range_cond = Some(RangeCondition::Lte(rhs));
+                            range_cond = Some(RangeCondition::Lte(rhs.clone()));
                         }
                     }
                     ">" => {
                         if lhs == range_key_name {
-                            range_cond = Some(RangeCondition::Gt(rhs));
+                            range_cond = Some(RangeCondition::Gt(rhs.clone()));
                         }
                     }
                     ">=" => {
                         if lhs == range_key_name {
-                            range_cond = Some(RangeCondition::Gte(rhs));
+                            range_cond = Some(RangeCondition::Gte(rhs.clone()));
                         }
                     }
                     _ => {}
@@ -350,18 +432,21 @@ fn resolve_attr_name(name: &str, attr_names: &HashMap<String, String>) -> String
         .unwrap_or_else(|| name.to_string())
 }
 
-fn resolve_attr_value(val: &str, attr_values: &HashMap<String, Value>) -> Value {
-    attr_values.get(val).cloned().unwrap_or(Value::Null)
+fn resolve_attr_value<'a>(
+    val: &str,
+    attr_values: &'a HashMap<String, AttributeValue>,
+) -> &'a AttributeValue {
+    static NULL_AV: AttributeValue = AttributeValue::Null;
+    attr_values.get(val).unwrap_or(&NULL_AV)
 }
 
-fn av_to_string(v: &Value) -> Option<String> {
-    if let Some(s) = v.get("S").and_then(|s| s.as_str()) {
-        return Some(s.to_string());
+fn av_to_string(v: &AttributeValue) -> Option<String> {
+    match v {
+        AttributeValue::S(s) => Some(s.clone()),
+        AttributeValue::N(n) => Some(n.clone()),
+        AttributeValue::B(b) => Some(b.clone()),
+        _ => None,
     }
-    if let Some(n) = v.get("N").and_then(|s| s.as_str()) {
-        return Some(n.to_string());
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -483,19 +568,45 @@ fn table_description(table: &crate::store::Table) -> Value {
 // Project item fields
 // ---------------------------------------------------------------------------
 
-fn project_item(
-    item: &Item,
+fn project_item<'a>(
+    item: &'a Item,
     projection: Option<&str>,
-    _attr_names: &HashMap<String, String>,
-) -> Item {
+    attr_names: &HashMap<String, String>,
+) -> Cow<'a, Item> {
     match projection {
-        None | Some("") => item.clone(),
+        None | Some("") => Cow::Borrowed(item),
         Some(expr) => {
-            let attrs: Vec<&str> = expr.split(',').map(|s| s.trim()).collect();
-            item.iter()
-                .filter(|(k, _)| attrs.contains(&k.as_str()))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
+            // Resolve ExpressionAttributeNames placeholders (#name → actual name)
+            // before splitting on commas.
+            let resolved: String = {
+                let mut out = String::with_capacity(expr.len());
+                let mut rest = expr;
+                while let Some(hash_pos) = rest.find('#') {
+                    out.push_str(&rest[..hash_pos]);
+                    let after = &rest[hash_pos..];
+                    // Placeholder ends at the first char that is not alphanumeric or '_'
+                    let end = after[1..]
+                        .find(|c: char| !c.is_alphanumeric() && c != '_')
+                        .map(|i| i + 1)
+                        .unwrap_or(after.len());
+                    let placeholder = &after[..end];
+                    if let Some(real) = attr_names.get(placeholder) {
+                        out.push_str(real);
+                    } else {
+                        out.push_str(placeholder);
+                    }
+                    rest = &after[end..];
+                }
+                out.push_str(rest);
+                out
+            };
+            let attrs: Vec<&str> = resolved.split(',').map(|s| s.trim()).collect();
+            Cow::Owned(
+                item.iter()
+                    .filter(|(k, _)| attrs.contains(&k.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            )
         }
     }
 }
@@ -555,25 +666,41 @@ impl ServiceProvider for DynamoDbProvider {
                 let lsis = parse_lsis(body.get("LocalSecondaryIndexes").unwrap_or(&Value::Null));
                 let stream_spec = parse_stream_spec(body.get("StreamSpecification"));
 
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                if store.get_table(&name).is_some() {
-                    return Ok(json_error(
-                        "ResourceInUseException",
-                        &format!("Table already exists: {name}"),
-                        400,
-                    ));
-                }
-                store.create_table(
-                    &name,
-                    &ctx.account_id,
-                    &ctx.region,
-                    key_schema,
-                    attr_defs,
-                    gsis,
-                    lsis,
-                    stream_spec,
-                );
-                let desc = table_description(store.get_table(&name).unwrap());
+                // Clone the Arc immediately so the outer shard lock is released
+                // before we do any work on the inner table map.
+                let desc = {
+                    let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                    if store.get_table(&name).is_some() {
+                        return Ok(json_error(
+                            "ResourceInUseException",
+                            &format!("Table already exists: {name}"),
+                            400,
+                        ));
+                    }
+                    store.create_table(
+                        &name,
+                        &ctx.account_id,
+                        &ctx.region,
+                        key_schema,
+                        attr_defs,
+                        gsis,
+                        lsis,
+                        stream_spec,
+                    );
+                    // Build the description while still holding the shard lock so
+                    // a concurrent DeleteTable cannot remove the entry underneath us.
+                    match store.get_table(&name) {
+                        Some(t) => table_description(&t),
+                        None => {
+                            return Ok(json_error(
+                                "InternalFailure",
+                                "Table was created but could not be retrieved",
+                                500,
+                            ));
+                        }
+                    }
+                    // outer RefMut (shard lock) released here
+                };
                 Ok(json_ok(json!({ "TableDescription": desc })))
             }
 
@@ -588,7 +715,7 @@ impl ServiceProvider for DynamoDbProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 match store.delete_table(&name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -612,20 +739,20 @@ impl ServiceProvider for DynamoDbProvider {
                         ));
                     }
                 };
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         "Cannot do operations on a non-existent table",
                         400,
                     ));
                 };
-                match store.get_table(&name) {
+                match tables.get(&name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         "Cannot do operations on a non-existent table",
                         400,
                     )),
-                    Some(table) => Ok(json_ok(json!({ "Table": table_description(table) }))),
+                    Some(table) => Ok(json_ok(json!({ "Table": table_description(&table) }))),
                 }
             }
 
@@ -636,11 +763,7 @@ impl ServiceProvider for DynamoDbProvider {
                 let limit = body.get("Limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
                 let exclusive_start = body.get("ExclusiveStartTableName").and_then(|v| v.as_str());
 
-                let mut names: Vec<String> = store
-                    .list_table_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                let mut names: Vec<String> = store.list_table_names();
                 names.sort();
 
                 let start_idx = if let Some(start) = exclusive_start {
@@ -682,14 +805,14 @@ impl ServiceProvider for DynamoDbProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                match store.get_table_mut(&name) {
+                let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
+                match tables.get_mut(&name) {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         "Cannot do operations on a non-existent table",
                         400,
                     )),
-                    Some(table) => {
+                    Some(mut table) => {
                         // Handle stream updates
                         if let Some(ss) = body.get("StreamSpecification") {
                             let new_spec = parse_stream_spec(Some(ss));
@@ -723,19 +846,21 @@ impl ServiceProvider for DynamoDbProvider {
                                         projection: parse_projection(create.get("Projection")),
                                         item_count: 0,
                                     };
-                                    table.global_secondary_indexes.push(gsi);
+                                    // add_gsi back-fills from existing items and
+                                    // pushes to global_secondary_indexes.
+                                    table.add_gsi(gsi);
                                 } else if let Some(delete) = update.get("Delete") {
                                     let idx_name = delete
                                         .get("IndexName")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("");
-                                    table
-                                        .global_secondary_indexes
-                                        .retain(|g| g.index_name != idx_name);
+                                    // remove_gsi drops the materialized data and
+                                    // removes from global_secondary_indexes.
+                                    table.remove_gsi(idx_name);
                                 }
                             }
                         }
-                        let desc = table_description(table);
+                        let desc = table_description(&table);
                         Ok(json_ok(json!({ "TableDescription": desc })))
                     }
                 }
@@ -756,7 +881,7 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
                 let item: Item = match body.get("Item").and_then(|v| v.as_object()) {
-                    Some(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    Some(m) => item_from_json_map(m),
                     None => return Ok(json_error("ValidationException", "Item is required", 400)),
                 };
                 let condition = body.get("ConditionExpression").and_then(|v| v.as_str());
@@ -767,8 +892,11 @@ impl ServiceProvider for DynamoDbProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("NONE");
 
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                let table = match store.get_table_mut(&name) {
+                let _table_lock = self.get_table_lock(&ctx.account_id, &ctx.region, &name);
+                let _table_guard = _table_lock.lock().await;
+
+                let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
+                let mut table = match tables.get_mut(&name) {
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
@@ -790,13 +918,15 @@ impl ServiceProvider for DynamoDbProvider {
                 }
 
                 let old = table.put_item(item);
-                let mut resp = json!({});
-                if return_values == "ALL_OLD"
-                    && let Some(old_item) = old
-                {
-                    resp["Attributes"] = json!(old_item);
-                }
-                Ok(json_ok(resp))
+                // Opt 4: drop the write lock before serialization.
+                drop(table);
+                Ok(serialize_response(&MutationResp {
+                    attributes: if return_values == "ALL_OLD" {
+                        old.as_ref()
+                    } else {
+                        None
+                    },
+                }))
             }
 
             "GetItem" => {
@@ -811,20 +941,20 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
                 let key: Item = match body.get("Key").and_then(|v| v.as_object()) {
-                    Some(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    Some(m) => item_from_json_map(m),
                     None => return Ok(json_error("ValidationException", "Key is required", 400)),
                 };
                 let projection = body.get("ProjectionExpression").and_then(|v| v.as_str());
                 let attr_names = parse_expr_names(body.get("ExpressionAttributeNames"));
 
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         "Cannot do operations on a non-existent table",
                         400,
                     ));
                 };
-                let table = match store.get_table(&name) {
+                let table = match tables.get(&name) {
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
@@ -835,13 +965,21 @@ impl ServiceProvider for DynamoDbProvider {
                     Some(t) => t,
                 };
 
-                match table.get_item(&key) {
-                    None => Ok(json_ok(json!({}))),
+                // Opt 2: project_item returns Cow::Borrowed for no-projection (no clone).
+                // Opt 1: serialize_response writes bytes directly — lock is held only
+                //        during this fast byte-serialization pass, then dropped.
+                let resp = match table.get_item(&key) {
+                    None => serialize_response(&GetItemResp { item: None }),
                     Some(item) => {
                         let out = project_item(item, projection, &attr_names);
-                        Ok(json_ok(json!({ "Item": out })))
+                        serialize_response(&GetItemResp {
+                            item: Some(out.as_ref()),
+                        })
                     }
-                }
+                };
+                // Opt 4: explicitly drop the shard lock before returning.
+                drop(table);
+                Ok(resp)
             }
 
             "DeleteItem" => {
@@ -856,7 +994,7 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
                 let key: Item = match body.get("Key").and_then(|v| v.as_object()) {
-                    Some(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    Some(m) => item_from_json_map(m),
                     None => return Ok(json_error("ValidationException", "Key is required", 400)),
                 };
                 let condition = body.get("ConditionExpression").and_then(|v| v.as_str());
@@ -867,8 +1005,11 @@ impl ServiceProvider for DynamoDbProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("NONE");
 
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                let table = match store.get_table_mut(&name) {
+                let _table_lock = self.get_table_lock(&ctx.account_id, &ctx.region, &name);
+                let _table_guard = _table_lock.lock().await;
+
+                let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
+                let mut table = match tables.get_mut(&name) {
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
@@ -910,7 +1051,7 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
                 let key: Item = match body.get("Key").and_then(|v| v.as_object()) {
-                    Some(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    Some(m) => item_from_json_map(m),
                     None => return Ok(json_error("ValidationException", "Key is required", 400)),
                 };
                 let update_expr = body.get("UpdateExpression").and_then(|v| v.as_str());
@@ -922,8 +1063,11 @@ impl ServiceProvider for DynamoDbProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("NONE");
 
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                let table = match store.get_table_mut(&name) {
+                let _table_lock = self.get_table_lock(&ctx.account_id, &ctx.region, &name);
+                let _table_guard = _table_lock.lock().await;
+
+                let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
+                let mut table = match tables.get_mut(&name) {
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
@@ -1021,14 +1165,14 @@ impl ServiceProvider for DynamoDbProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("ALL_ATTRIBUTES");
 
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         "Cannot do operations on a non-existent table",
                         400,
                     ));
                 };
-                let table = match store.get_table(&name) {
+                let table = match tables.get(&name) {
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
@@ -1039,31 +1183,38 @@ impl ServiceProvider for DynamoDbProvider {
                     Some(t) => t,
                 };
 
-                // Determine range key for index
+                // Determine range key for index — reject unknown IndexName up-front.
                 let range_key_name = if let Some(idx) = index_name {
-                    table
+                    let gsi = table
                         .global_secondary_indexes
                         .iter()
-                        .find(|g| g.index_name == idx)
-                        .and_then(|g| {
-                            g.key_schema
+                        .find(|g| g.index_name == idx);
+                    let lsi = table
+                        .local_secondary_indexes
+                        .iter()
+                        .find(|l| l.index_name == idx);
+                    if gsi.is_none() && lsi.is_none() {
+                        return Ok(json_error(
+                            "ValidationException",
+                            &format!("The table does not have the specified index: {idx}"),
+                            400,
+                        ));
+                    }
+                    gsi.and_then(|g| {
+                        g.key_schema
+                            .iter()
+                            .find(|k| k.key_type == KeyType::RANGE)
+                            .map(|k| k.attribute_name.clone())
+                    })
+                    .or_else(|| {
+                        lsi.and_then(|l| {
+                            l.key_schema
                                 .iter()
                                 .find(|k| k.key_type == KeyType::RANGE)
                                 .map(|k| k.attribute_name.clone())
                         })
-                        .or_else(|| {
-                            table
-                                .local_secondary_indexes
-                                .iter()
-                                .find(|l| l.index_name == idx)
-                                .and_then(|l| {
-                                    l.key_schema
-                                        .iter()
-                                        .find(|k| k.key_type == KeyType::RANGE)
-                                        .map(|k| k.attribute_name.clone())
-                                })
-                        })
-                        .unwrap_or_default()
+                    })
+                    .unwrap_or_default()
                 } else {
                     table.range_key_name().unwrap_or("").to_string()
                 };
@@ -1082,8 +1233,21 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let mut items: Vec<Item> = table
-                    .query(&hash_val, range_cond.as_ref(), index_name, scan_forward)
+                // Apply Limit to items *examined* (DynamoDB semantics), then filter.
+                // scanned_count = items read before FilterExpression; count = items returned.
+                let raw_matches: Vec<&Item> = {
+                    let all = table.query(&hash_val, range_cond.as_ref(), index_name, scan_forward);
+                    if let Some(lim) = limit {
+                        all.into_iter().take(lim).collect()
+                    } else {
+                        all.into_iter().collect()
+                    }
+                };
+                let scanned_count = raw_matches.len();
+
+                // Collect owned items under the lock; Cow::into_owned() moves
+                // already-projected items (Cow::Owned) without extra allocation.
+                let items: Vec<Item> = raw_matches
                     .into_iter()
                     .filter(|item| {
                         if let Some(fe) = filter_expr {
@@ -1092,25 +1256,25 @@ impl ServiceProvider for DynamoDbProvider {
                             true
                         }
                     })
-                    .map(|item| project_item(item, projection_expr, &attr_names))
+                    .map(|item| project_item(item, projection_expr, &attr_names).into_owned())
                     .collect();
 
-                let total_count = items.len();
-                if let Some(lim) = limit {
-                    items.truncate(lim);
-                }
-
                 let count = items.len();
-                let mut resp = json!({
-                    "Items": items,
-                    "Count": count,
-                    "ScannedCount": total_count,
-                });
-                if select == "COUNT" {
-                    resp["Items"] = json!([]);
-                    resp["Count"] = json!(total_count);
-                }
-                Ok(json_ok(resp))
+
+                // Opt 4: release the shard lock before serialization.
+                drop(table);
+
+                // Opt 1: serialize directly — no intermediate serde_json::Value tree.
+                let (out_items, out_count) = if select == "COUNT" {
+                    (Vec::new(), count)
+                } else {
+                    (items, count)
+                };
+                Ok(serialize_response(&QueryResp {
+                    items: &out_items,
+                    count: out_count,
+                    scanned_count,
+                }))
             }
 
             // ---------------------------------------------------------------
@@ -1129,7 +1293,7 @@ impl ServiceProvider for DynamoDbProvider {
                 };
                 let filter_expr = body.get("FilterExpression").and_then(|v| v.as_str());
                 let projection_expr = body.get("ProjectionExpression").and_then(|v| v.as_str());
-                let _index_name = body.get("IndexName").and_then(|v| v.as_str());
+                let index_name = body.get("IndexName").and_then(|v| v.as_str());
                 let limit = body
                     .get("Limit")
                     .and_then(|v| v.as_u64())
@@ -1141,14 +1305,14 @@ impl ServiceProvider for DynamoDbProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("ALL_ATTRIBUTES");
 
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         "Cannot do operations on a non-existent table",
                         400,
                     ));
                 };
-                let table = match store.get_table(&name) {
+                let table = match tables.get(&name) {
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
@@ -1159,11 +1323,48 @@ impl ServiceProvider for DynamoDbProvider {
                     Some(t) => t,
                 };
 
-                // For index scans, we scan all items
+                // When scanning a secondary index, only items that carry both
+                // the index hash key AND (if present) the index range key are
+                // included — mirroring DynamoDB sparse-index semantics.
+                let index_keys: Option<(&str, Option<&str>)> = match index_name {
+                    None => None,
+                    Some(idx) => match table.index_hash_key(idx) {
+                        Some(hk) => Some((hk, table.index_range_key(idx))),
+                        None => {
+                            return Ok(json_error(
+                                "ValidationException",
+                                &format!("The table does not have the specified index: {idx}"),
+                                400,
+                            ));
+                        }
+                    },
+                };
                 let all_items: Vec<&Item> = table.all_items();
 
-                let scanned_count = all_items.len();
-                let mut items: Vec<Item> = all_items
+                // scanned_count = items considered before filter (after index pruning)
+                let pre_filter: Vec<&Item> = if let Some((hk, rk_opt)) = index_keys {
+                    all_items
+                        .into_iter()
+                        .filter(|item| {
+                            item.contains_key(hk) && rk_opt.is_none_or(|rk| item.contains_key(rk))
+                        })
+                        .collect()
+                } else {
+                    all_items
+                };
+                // Apply Limit to items *examined* before the filter (DynamoDB semantics).
+                // scanned_count = items read from the index/table (capped by Limit).
+                let examined: Vec<&Item> = if let Some(lim) = limit {
+                    pre_filter.into_iter().take(lim).collect()
+                } else {
+                    pre_filter
+                };
+                let scanned_count = examined.len();
+
+                // Apply FilterExpression after the limit-based examination cap.
+                // Collect owned items under the lock; Cow::into_owned() is free
+                // when already projected (Cow::Owned), or clones the borrow otherwise.
+                let items: Vec<Item> = examined
                     .into_iter()
                     .filter(|item| {
                         if let Some(fe) = filter_expr {
@@ -1172,23 +1373,25 @@ impl ServiceProvider for DynamoDbProvider {
                             true
                         }
                     })
-                    .map(|item| project_item(item, projection_expr, &attr_names))
+                    .map(|item| project_item(item, projection_expr, &attr_names).into_owned())
                     .collect();
 
-                if let Some(lim) = limit {
-                    items.truncate(lim);
-                }
-
                 let count = items.len();
-                let mut resp = json!({
-                    "Items": items,
-                    "Count": count,
-                    "ScannedCount": scanned_count,
-                });
-                if select == "COUNT" {
-                    resp["Items"] = json!([]);
-                }
-                Ok(json_ok(resp))
+
+                // Opt 4: release the shard lock before serialization.
+                drop(table);
+
+                // Opt 1: serialize directly — no intermediate serde_json::Value tree.
+                let (out_items, out_count) = if select == "COUNT" {
+                    (Vec::new(), count)
+                } else {
+                    (items, count)
+                };
+                Ok(serialize_response(&QueryResp {
+                    items: &out_items,
+                    count: out_count,
+                    scanned_count,
+                }))
             }
 
             // ---------------------------------------------------------------
@@ -1206,7 +1409,7 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         "Cannot do operations on a non-existent table",
@@ -1221,7 +1424,7 @@ impl ServiceProvider for DynamoDbProvider {
                     let projection_expr = req.get("ProjectionExpression").and_then(|v| v.as_str());
                     let attr_names = parse_expr_names(req.get("ExpressionAttributeNames"));
 
-                    match store.get_table(table_name) {
+                    match tables.get(table_name) {
                         None => {
                             return Ok(json_error(
                                 "ResourceNotFoundException",
@@ -1235,9 +1438,7 @@ impl ServiceProvider for DynamoDbProvider {
                                 for key_val in keys {
                                     let key: Item = key_val
                                         .as_object()
-                                        .map(|m| {
-                                            m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                                        })
+                                        .map(item_from_json_map)
                                         .unwrap_or_default();
                                     if let Some(item) = table.get_item(&key) {
                                         found.push(json!(project_item(
@@ -1271,7 +1472,7 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
                 let unprocessed: serde_json::Map<String, Value> = serde_json::Map::new();
 
                 for (table_name, requests) in &request_items {
@@ -1279,7 +1480,9 @@ impl ServiceProvider for DynamoDbProvider {
                         Some(arr) => arr,
                         None => continue,
                     };
-                    let table = match store.get_table_mut(table_name) {
+                    let _table_lock = self.get_table_lock(&ctx.account_id, &ctx.region, table_name);
+                    let _table_guard = _table_lock.lock().await;
+                    let mut table = match tables.get_mut(table_name) {
                         None => {
                             return Ok(json_error(
                                 "ResourceNotFoundException",
@@ -1293,19 +1496,13 @@ impl ServiceProvider for DynamoDbProvider {
                     for req in reqs {
                         if let Some(put) = req.get("PutRequest") {
                             if let Some(item_val) = put.get("Item").and_then(|v| v.as_object()) {
-                                let item: Item = item_val
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), v.clone()))
-                                    .collect();
+                                let item: Item = item_from_json_map(item_val);
                                 table.put_item(item);
                             }
                         } else if let Some(del) = req.get("DeleteRequest")
                             && let Some(key_val) = del.get("Key").and_then(|v| v.as_object())
                         {
-                            let key: Item = key_val
-                                .iter()
-                                .map(|(k, v)| (k.clone(), v.clone()))
-                                .collect();
+                            let key: Item = item_from_json_map(key_val);
                             table.delete_item(&key);
                         }
                     }
@@ -1331,7 +1528,7 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_ok(json!({
                         "Responses": vec![json!({}); transact_items.len()]
                     })));
@@ -1345,13 +1542,13 @@ impl ServiceProvider for DynamoDbProvider {
                         let key: Item = get
                             .get("Key")
                             .and_then(|v| v.as_object())
-                            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                            .map(item_from_json_map)
                             .unwrap_or_default();
                         let projection_expr =
                             get.get("ProjectionExpression").and_then(|v| v.as_str());
                         let attr_names = parse_expr_names(get.get("ExpressionAttributeNames"));
 
-                        match store.get_table(table_name) {
+                        match tables.get(table_name) {
                             None => responses.push(json!({})),
                             Some(table) => match table.get_item(&key) {
                                 None => responses.push(json!({})),
@@ -1380,7 +1577,58 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                let tables = self.get_or_create_tables(&ctx.account_id, &ctx.region);
+
+                // Acquire per-table locks in sorted order to prevent deadlocks.
+                // All tables touched by this transaction are locked before the
+                // validate→apply two-pass begins, preventing interleaving with
+                // concurrent single-item writers or other transactions.
+                let table_names: Vec<String> = {
+                    let mut seen = std::collections::HashSet::new();
+                    for ti in &transact_items {
+                        for op_name in &["Put", "Delete", "Update", "ConditionCheck"] {
+                            if let Some(op) = ti.get(op_name)
+                                && let Some(tn) = op.get("TableName").and_then(|v| v.as_str())
+                            {
+                                seen.insert(tn.to_string());
+                            }
+                        }
+                    }
+                    let mut v: Vec<String> = seen.into_iter().collect();
+                    v.sort();
+                    v
+                };
+                // Collect Arcs first (must be declared before _table_guards so they
+                // outlive the guards that borrow from them — Rust drops in reverse order).
+                let table_arcs: Vec<Arc<Mutex<()>>> = table_names
+                    .iter()
+                    .map(|tn| self.get_table_lock(&ctx.account_id, &ctx.region, tn))
+                    .collect();
+                let mut _table_guards = Vec::with_capacity(table_names.len());
+                for arc in &table_arcs {
+                    _table_guards.push(arc.lock().await);
+                }
+                // Suppress unused-variable warning when table_names is empty.
+                let _ = &table_names;
+
+                // B9: fail fast if any referenced table does not exist.
+                for ti in &transact_items {
+                    for op_name in &["Put", "Delete", "Update", "ConditionCheck"] {
+                        if let Some(op) = ti.get(op_name) {
+                            let table_name =
+                                op.get("TableName").and_then(|v| v.as_str()).unwrap_or("");
+                            if tables.get(table_name).is_none() {
+                                return Ok(json_error(
+                                    "TransactionCanceledException",
+                                    &format!(
+                                        "Transaction cancelled: table {table_name} does not exist [ResourceNotFoundException]"
+                                    ),
+                                    400,
+                                ));
+                            }
+                        }
+                    }
+                }
 
                 // First pass: validate all conditions
                 for ti in &transact_items {
@@ -1398,27 +1646,25 @@ impl ServiceProvider for DynamoDbProvider {
                                     .get("Key")
                                     .or_else(|| op.get("Item"))
                                     .and_then(|v| v.as_object())
-                                    .map(|m| {
-                                        m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                                    })
+                                    .map(item_from_json_map)
                                     .unwrap_or_default();
 
-                                if let Some(table) = store.get_table(table_name) {
-                                    let existing = table.get_item(&key).cloned();
-                                    if check_condition(
-                                        existing.as_ref(),
-                                        cond,
-                                        &attr_names,
-                                        &attr_values,
-                                    )
-                                    .is_err()
-                                    {
-                                        return Ok(json_error(
-                                            "TransactionCanceledException",
-                                            "Transaction cancelled, please refer cancellation reasons for specific reasons [ConditionalCheckFailed]",
-                                            400,
-                                        ));
-                                    }
+                                // Table existence already validated above; unwrap is safe.
+                                let table = tables.get(table_name).unwrap();
+                                let existing = table.get_item(&key).cloned();
+                                if check_condition(
+                                    existing.as_ref(),
+                                    cond,
+                                    &attr_names,
+                                    &attr_values,
+                                )
+                                .is_err()
+                                {
+                                    return Ok(json_error(
+                                        "TransactionCanceledException",
+                                        "Transaction cancelled, please refer cancellation reasons for specific reasons [ConditionalCheckFailed]",
+                                        400,
+                                    ));
                                 }
                             }
                         }
@@ -1433,9 +1679,9 @@ impl ServiceProvider for DynamoDbProvider {
                         let item: Item = put
                             .get("Item")
                             .and_then(|v| v.as_object())
-                            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                            .map(item_from_json_map)
                             .unwrap_or_default();
-                        if let Some(table) = store.get_table_mut(table_name) {
+                        if let Some(mut table) = tables.get_mut(table_name) {
                             table.put_item(item);
                         }
                     } else if let Some(del) = ti.get("Delete") {
@@ -1444,9 +1690,9 @@ impl ServiceProvider for DynamoDbProvider {
                         let key: Item = del
                             .get("Key")
                             .and_then(|v| v.as_object())
-                            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                            .map(item_from_json_map)
                             .unwrap_or_default();
-                        if let Some(table) = store.get_table_mut(table_name) {
+                        if let Some(mut table) = tables.get_mut(table_name) {
                             table.delete_item(&key);
                         }
                     } else if let Some(upd) = ti.get("Update") {
@@ -1455,12 +1701,12 @@ impl ServiceProvider for DynamoDbProvider {
                         let key: Item = upd
                             .get("Key")
                             .and_then(|v| v.as_object())
-                            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                            .map(item_from_json_map)
                             .unwrap_or_default();
                         let update_expr = upd.get("UpdateExpression").and_then(|v| v.as_str());
                         let attr_names = parse_expr_names(upd.get("ExpressionAttributeNames"));
                         let attr_values = parse_expr_values(upd.get("ExpressionAttributeValues"));
-                        if let Some(table) = store.get_table_mut(table_name)
+                        if let Some(mut table) = tables.get_mut(table_name)
                             && let Some((hk, sk)) = table.extract_key_from_item(&key)
                         {
                             let mut item = table
@@ -1496,7 +1742,7 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         "Stream not found",
@@ -1504,12 +1750,11 @@ impl ServiceProvider for DynamoDbProvider {
                     ));
                 };
                 // Find the table with this stream ARN
-                let table = store
-                    .tables
-                    .values()
+                let found = tables
+                    .iter()
                     .find(|t| t.stream_arn.as_deref() == Some(&stream_arn));
 
-                match table {
+                match found {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         "Stream not found",
@@ -1535,12 +1780,11 @@ impl ServiceProvider for DynamoDbProvider {
 
             "ListStreams" => {
                 let table_name_filter = body.get("TableName").and_then(|v| v.as_str());
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_ok(json!({ "Streams": [] })));
                 };
-                let streams: Vec<Value> = store
-                    .tables
-                    .values()
+                let streams: Vec<Value> = tables
+                    .iter()
                     .filter(|t| {
                         t.stream_specification.stream_enabled
                             && table_name_filter.map(|n| t.table_name == n).unwrap_or(true)
@@ -1576,19 +1820,18 @@ impl ServiceProvider for DynamoDbProvider {
                     .unwrap_or("TRIM_HORIZON");
                 let sequence_number = body.get("SequenceNumber").and_then(|v| v.as_str());
 
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         "Stream not found",
                         400,
                     ));
                 };
-                let table = store
-                    .tables
-                    .values()
+                let found = tables
+                    .iter()
                     .find(|t| t.stream_arn.as_deref() == Some(&stream_arn));
 
-                match table {
+                match found {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         "Stream not found",
@@ -1637,19 +1880,18 @@ impl ServiceProvider for DynamoDbProvider {
                     }
                 };
 
-                let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
+                let Some(tables) = self.get_tables(&ctx.account_id, &ctx.region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         "Stream not found",
                         400,
                     ));
                 };
-                let table = store
-                    .tables
-                    .values()
+                let found = tables
+                    .iter()
                     .find(|t| t.stream_arn.as_deref() == Some(&stream_arn));
 
-                match table {
+                match found {
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         "Stream not found",

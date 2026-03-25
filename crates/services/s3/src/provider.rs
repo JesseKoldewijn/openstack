@@ -1,9 +1,10 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -20,14 +21,24 @@ use tracing::{debug, warn};
 use crate::object_store::{ObjectFileStore, ObjectLocation};
 use crate::store::{ObjectDataRef, S3Store};
 
-/// Objects whose byte count is at or below this threshold are stored
-/// inline in the in-memory store (`ObjectDataRef::Inline`) rather than
-/// being written to the filesystem.  This eliminates all disk I/O on the
-/// hot GET/HEAD/LIST paths for the vast majority of emulator workloads.
+/// Returns the threshold (in bytes) below which objects are stored inline
+/// in memory rather than written to disk.  Objects at or below this size
+/// use `ObjectDataRef::Inline`; larger objects are written to the filesystem.
 ///
-/// Objects above the threshold are still written to disk and streamed
-/// from disk on reads, which is appropriate for large blobs.
-const INLINE_OBJECT_THRESHOLD: u64 = 256 * 1024; // 256 KiB
+/// The value is read once from the `S3_INLINE_OBJECT_THRESHOLD_BYTES`
+/// environment variable on first call and cached for the process lifetime.
+/// If the variable is unset or unparseable the default is **4 MiB**, which
+/// covers the smallest common benchmark tier (1 MB) and keeps typical
+/// emulator workloads entirely in memory.
+fn inline_object_threshold() -> u64 {
+    static THRESHOLD: OnceLock<u64> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("S3_INLINE_OBJECT_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4 * 1024 * 1024) // 4 MiB default
+    })
+}
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
@@ -63,6 +74,8 @@ impl<R: std::io::Read> std::io::Read for Md5Read<R> {
 
 enum MultipartPartReader {
     Inline(std::io::Cursor<Bytes>),
+    /// File not yet opened — opened lazily on first read.
+    PendingFile(PathBuf),
     File(std::fs::File),
 }
 
@@ -70,6 +83,12 @@ impl std::io::Read for MultipartPartReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Inline(reader) => std::io::Read::read(reader, buf),
+            Self::PendingFile(path) => {
+                let mut file = std::fs::File::open(path)?;
+                let n = std::io::Read::read(&mut file, buf)?;
+                *self = Self::File(file);
+                Ok(n)
+            }
             Self::File(reader) => std::io::Read::read(reader, buf),
         }
     }
@@ -88,7 +107,10 @@ impl MultipartRead {
                     readers.push_back(MultipartPartReader::Inline(std::io::Cursor::new(bytes)));
                 }
                 ObjectDataRef::FileRef(path) => {
-                    readers.push_back(MultipartPartReader::File(std::fs::File::open(path)?));
+                    // Store the path; the file is opened lazily on first read
+                    // to avoid holding open file descriptors for all parts
+                    // before any data is consumed.
+                    readers.push_back(MultipartPartReader::PendingFile(path));
                 }
             }
         }
@@ -309,11 +331,13 @@ fn handle_list_buckets(store: &S3Store, _ctx: &RequestContext) -> DispatchRespon
     let mut buckets: Vec<_> = store.buckets.values().collect();
     buckets.sort_by_key(|b| &b.name);
     for b in buckets {
-        xml.push_str(&format!(
+        write!(
+            xml,
             "<Bucket><Name>{}</Name><CreationDate>{}</CreationDate></Bucket>",
             xml_escape(&b.name),
             b.creation_date.format("%Y-%m-%dT%H:%M:%S.000Z")
-        ));
+        )
+        .unwrap();
     }
     xml.push_str("</Buckets></ListAllMyBucketsResult>");
     xml_ok(&xml)
@@ -367,10 +391,11 @@ async fn handle_put_object_async(
     };
     let key = key_from_path(&ctx.path);
 
-    // Preflight store lookup with one mutable guard: validate bucket existence and
-    // read versioning state without taking separate read/write locks.
+    // Preflight store lookup: validate bucket existence and read versioning
+    // state under a *read* lock so that concurrent GETs and other PUTs can
+    // proceed in parallel during this validation phase.
     let versioning_enabled = {
-        let store = match store_bundle.get_mut(&ctx.account_id, &ctx.region) {
+        let store = match store_bundle.get(&ctx.account_id, &ctx.region) {
             Some(store) => store,
             None => return s3_error("NoSuchBucket", "The specified bucket does not exist", 404),
         };
@@ -406,9 +431,62 @@ async fn handle_put_object_async(
         "null".to_string()
     };
 
-    // Get body data — prefer spooled_body (streaming, no full copy in memory),
-    // fall back to raw_body for unit-test contexts where spooled_body is None.
-    let (etag, size, object_data) = if let Some(mutex) = ctx.spooled_body.as_ref() {
+    // Get body data — prefer body_reader (stream-through, single disk write),
+    // then spooled_body (streaming, no full copy in memory),
+    // fall back to raw_body for unit-test contexts where both are None.
+    let (etag, size, object_data) = if let Some(reader_mutex) = ctx.body_reader.as_ref() {
+        // Stream-through path: the gateway bypassed SpooledBody so we receive
+        // the raw network stream.  Read it directly into memory or disk,
+        // computing the MD5 hash on the fly with HashingReader.
+        let content_length: Option<u64> = ctx
+            .headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
+
+        let mut reader_guard = reader_mutex.lock().await;
+        let threshold = inline_object_threshold();
+
+        if content_length.is_some_and(|len| len <= threshold) {
+            // Small object: read entirely into memory.
+            let cap = content_length.unwrap_or(64 * 1024) as usize;
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
+            let mut body_bytes = Vec::with_capacity(cap);
+            if let Err(e) =
+                tokio::io::AsyncReadExt::read_to_end(&mut hashing_reader, &mut body_bytes).await
+            {
+                warn!(error = %e, "Failed to read body_reader (small path)");
+                return s3_error("InternalError", "Failed to read request body", 500);
+            }
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            let size = body_bytes.len() as u64;
+            (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
+        } else {
+            // Large object (or unknown size): stream directly to disk.
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
+            let (file_path, bytes_written) = match file_store
+                .write_object_from_reader(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &key,
+                    &version_id,
+                    &mut hashing_reader,
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(error = %e, "Failed to stream body_reader to filesystem");
+                    return s3_error("InternalError", "Failed to store object", 500);
+                }
+            };
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+        }
+    } else if let Some(mutex) = ctx.spooled_body.as_ref() {
         // Take the SpooledBody out of the Mutex so we can consume it into a reader.
         // The guard must be dropped before any .await, so use a block scope.
         let (spooled, spooled_len) = {
@@ -421,7 +499,7 @@ async fn handle_put_object_async(
             (spooled, spooled_len)
         };
 
-        if spooled_len <= INLINE_OBJECT_THRESHOLD {
+        if spooled_len <= inline_object_threshold() {
             // Small object: read into memory, hash on the way.
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
             let mut body_bytes = Vec::with_capacity(spooled_len as usize);
@@ -479,7 +557,7 @@ async fn handle_put_object_async(
         let body_bytes = ctx.raw_body_bytes().to_vec();
         let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&body_bytes)));
         let size = body_bytes.len() as u64;
-        let object_data = if size <= INLINE_OBJECT_THRESHOLD {
+        let object_data = if size <= inline_object_threshold() {
             ObjectDataRef::Inline(Bytes::from(body_bytes))
         } else {
             let file_path = match file_store
@@ -513,8 +591,8 @@ async fn handle_put_object_async(
     let version = crate::store::ObjectVersion {
         version_id: version_id.clone(),
         last_modified: chrono::Utc::now(),
-        etag: etag.clone(),
-        content_type,
+        etag: Arc::from(etag.as_str()),
+        content_type: Arc::from(content_type.as_str()),
         content_encoding: None,
         content_disposition: None,
         cache_control: None,
@@ -637,7 +715,7 @@ async fn handle_get_object_async(
             metadata,
         )) => {
             let mut headers = vec![
-                ("ETag".to_string(), etag),
+                ("ETag".to_string(), String::from(&*etag)),
                 (
                     "Last-Modified".to_string(),
                     last_modified
@@ -652,9 +730,19 @@ async fn handle_get_object_async(
             for (mk, mv) in &metadata {
                 headers.push((format!("x-amz-meta-{mk}"), mv.clone()));
             }
-            if let Some(enc) = &content_encoding {
-                headers.push(("Content-Encoding".to_string(), enc.clone()));
-            }
+            // Always emit Content-Encoding so the gateway's CompressionLayer
+            // does not gzip binary object data.  For objects stored without a
+            // custom content-encoding we emit "identity" (RFC 9110 §8.4.1),
+            // which is a no-op encoding that explicitly tells the layer to
+            // leave the bytes untouched.  This mirrors what the Streaming path
+            // already does via the gateway builder.
+            headers.push((
+                "Content-Encoding".to_string(),
+                content_encoding
+                    .as_deref()
+                    .unwrap_or("identity")
+                    .to_string(),
+            ));
 
             let body = match data {
                 ObjectDataRef::Inline(bytes) => ResponseBody::Buffered(bytes),
@@ -662,7 +750,7 @@ async fn handle_get_object_async(
                     // For small objects read the entire file into memory and
                     // return a buffered response — this avoids the spawn_blocking
                     // overhead of ReaderStream for tiny payloads.
-                    if size <= INLINE_OBJECT_THRESHOLD {
+                    if size <= inline_object_threshold() {
                         match tokio::fs::read(&path).await {
                             Ok(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
                             Err(e) => {
@@ -693,7 +781,7 @@ async fn handle_get_object_async(
             DispatchResponse {
                 status_code: 200,
                 body,
-                content_type: Cow::Owned(content_type),
+                content_type: Cow::Owned(String::from(&*content_type)),
                 headers,
             }
         }
@@ -715,7 +803,7 @@ fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse
         None => s3_error("NoSuchKey", "The specified key does not exist", 404),
         Some(v) => {
             let mut headers = vec![
-                ("ETag".to_string(), v.etag.clone()),
+                ("ETag".to_string(), String::from(&*v.etag)),
                 (
                     "Last-Modified".to_string(),
                     v.last_modified
@@ -733,7 +821,7 @@ fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse
             DispatchResponse {
                 status_code: 200,
                 body: ResponseBody::Buffered(Bytes::new()),
-                content_type: Cow::Owned(v.content_type.clone()),
+                content_type: Cow::Owned(String::from(&*v.content_type)),
                 headers,
             }
         }
@@ -831,7 +919,9 @@ async fn handle_delete_objects_async(
             let obj_end = remaining.find("</Object>").unwrap_or(remaining.len());
             let obj_xml = &remaining[..obj_end];
             let key = extract_xml_text(obj_xml, "Key").unwrap_or_default();
-            let version_id = extract_xml_text(obj_xml, "VersionId");
+            let version_id = extract_xml_text(obj_xml, "VersionId")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
             if !key.is_empty() {
                 result.push((key, version_id));
             }
@@ -853,11 +943,13 @@ async fn handle_delete_objects_async(
                 {
                     files_to_delete.push(path.clone());
                 }
-                deleted_xml.push_str(&format!(
+                write!(
+                    deleted_xml,
                     "<Deleted><Key>{}</Key><VersionId>{}</VersionId></Deleted>",
                     xml_escape(key),
                     xml_escape(vid)
-                ));
+                )
+                .unwrap();
             } else {
                 if let Some(removed) = store.delete_object(&bucket, key)
                     && !removed.delete_marker
@@ -865,10 +957,12 @@ async fn handle_delete_objects_async(
                 {
                     files_to_delete.push(path.clone());
                 }
-                deleted_xml.push_str(&format!(
+                write!(
+                    deleted_xml,
                     "<Deleted><Key>{}</Key></Deleted>",
                     xml_escape(key)
-                ));
+                )
+                .unwrap();
             }
         }
     }
@@ -956,7 +1050,7 @@ async fn handle_copy_object_async(
         ObjectDataRef::Inline(bytes) => {
             // Source is already in memory — keep it inline for the destination
             // if it's within the threshold; otherwise write to disk.
-            if src_size <= INLINE_OBJECT_THRESHOLD {
+            if src_size <= inline_object_threshold() {
                 ObjectDataRef::Inline(bytes.clone())
             } else {
                 match file_store
@@ -979,7 +1073,7 @@ async fn handle_copy_object_async(
             }
         }
         ObjectDataRef::FileRef(path) => {
-            if src_size <= INLINE_OBJECT_THRESHOLD {
+            if src_size <= inline_object_threshold() {
                 // Small file-backed object — read into memory and keep inline.
                 match tokio::fs::read(path).await {
                     Ok(bytes) => ObjectDataRef::Inline(Bytes::from(bytes)),
@@ -1106,56 +1200,85 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     let continuation_token = ctx.query_params.get("continuation-token").cloned();
     let start_after = ctx.query_params.get("start-after").cloned();
 
-    // Collect and sort all current (non-delete-marker) objects with matching prefix
-    let mut all_keys: Vec<String> = store
+    // Single-pass: collect (key, last_modified, etag, size) for all matching objects.
+    // list_objects() returns in sorted key order (BTreeMap), so no sort needed.
+    type ObjMeta = (String, chrono::DateTime<chrono::Utc>, Arc<str>, u64);
+    let mut all_items: Vec<ObjMeta> = store
         .list_objects(&bucket)
         .into_iter()
         .filter_map(|obj| {
-            if obj.current().is_some() && obj.key.starts_with(&prefix) {
-                Some(obj.key.clone())
-            } else {
-                None
+            let v = obj.current()?;
+            if !obj.key.starts_with(&prefix) {
+                return None;
             }
+            Some((
+                obj.key.clone(),
+                v.last_modified,
+                Arc::clone(&v.etag),
+                v.size,
+            ))
         })
         .collect();
-    all_keys.sort();
 
     // Apply start_after / continuation_token
     let skip_after = continuation_token.as_deref().or(start_after.as_deref());
     if let Some(skip) = skip_after {
-        all_keys.retain(|k| k.as_str() > skip);
+        all_items.retain(|(k, ..)| k.as_str() > skip);
     }
 
     // Common prefix (delimiter) handling
-    let mut common_prefixes: Vec<String> = Vec::new();
-    let mut content_keys: Vec<String> = Vec::new();
+    let mut common_prefixes: BTreeSet<String> = BTreeSet::new();
+    let mut content_items: Vec<ObjMeta> = Vec::new();
 
     if delimiter.is_empty() {
-        content_keys = std::mem::take(&mut all_keys);
+        content_items = std::mem::take(&mut all_items);
     } else {
-        for key in &all_keys {
-            let suffix = &key[prefix.len()..];
+        for item in &all_items {
+            let suffix = &item.0[prefix.len()..];
             if let Some(pos) = suffix.find(&*delimiter) {
-                let cp = format!("{}{}{}", prefix, &suffix[..pos], delimiter);
-                if !common_prefixes.contains(&cp) {
-                    common_prefixes.push(cp);
-                }
+                common_prefixes.insert(format!("{}{}{}", prefix, &suffix[..pos], delimiter));
             } else {
-                content_keys.push(key.clone());
+                content_items.push(item.clone());
             }
         }
     }
 
-    let truncated = content_keys.len() + common_prefixes.len() > max_keys;
-    content_keys.truncate(max_keys.saturating_sub(common_prefixes.len()));
+    let truncated = content_items.len() + common_prefixes.len() > max_keys;
+    // Truncate common_prefixes first (BTreeSet order = sorted), then
+    // give the remaining MaxKeys budget to content_items.
+    let mut cp_vec: Vec<String> = common_prefixes.into_iter().collect();
+    if cp_vec.len() > max_keys {
+        cp_vec.truncate(max_keys);
+    }
+    let remaining = max_keys.saturating_sub(cp_vec.len());
+    content_items.truncate(remaining);
 
     let next_token = if truncated {
-        content_keys.last().cloned()
+        // Prefer the last content key.  When the page was filled entirely by
+        // common prefixes (content_items is empty), we must NOT use the
+        // synthetic prefix string (e.g. "dir/") as the cursor: every key
+        // under "dir/" is lexicographically greater than "dir/", so the
+        // retain filter on the next request would keep them all and they
+        // would collapse into "dir/" again — an infinite loop.
+        //
+        // Instead, find the last raw object key in `all_items` that was
+        // grouped into the last kept common prefix.  That key IS a valid
+        // cursor because all remaining keys come strictly after it.
+        if let Some((k, ..)) = content_items.last() {
+            Some(k.clone())
+        } else if let Some(last_cp) = cp_vec.last() {
+            all_items
+                .iter()
+                .rfind(|(k, ..)| k.starts_with(last_cp.as_str()))
+                .map(|(k, ..)| k.clone())
+        } else {
+            None
+        }
     } else {
         None
     };
 
-    let key_count = content_keys.len() + common_prefixes.len();
+    let key_count = content_items.len() + cp_vec.len();
 
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -1170,35 +1293,39 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     );
 
     if let Some(ref t) = next_token {
-        xml.push_str(&format!(
+        write!(
+            xml,
             "<NextContinuationToken>{}</NextContinuationToken>",
             xml_escape(t)
-        ));
+        )
+        .unwrap();
     }
 
-    for key in &content_keys {
-        if let Some(v) = store.get_object(&bucket, key) {
-            xml.push_str(&format!(
-                "<Contents>\
+    for (key, lm, etag, size) in &content_items {
+        write!(
+            xml,
+            "<Contents>\
 <Key>{key}</Key>\
 <LastModified>{lm}</LastModified>\
 <ETag>{etag}</ETag>\
 <Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Contents>",
-                key = xml_escape(key),
-                lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                etag = xml_escape(&v.etag),
-                size = v.size,
-            ));
-        }
+            key = xml_escape(key),
+            lm = lm.format("%Y-%m-%dT%H:%M:%S.000Z"),
+            etag = xml_escape(etag),
+            size = size,
+        )
+        .unwrap();
     }
 
-    for cp in &common_prefixes {
-        xml.push_str(&format!(
+    for cp in &cp_vec {
+        write!(
+            xml,
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
             xml_escape(cp)
-        ));
+        )
+        .unwrap();
     }
 
     xml.push_str("</ListBucketResult>");
@@ -1230,44 +1357,67 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
         .min(1000);
     let marker = ctx.query_params.get("marker").cloned().unwrap_or_default();
 
-    let mut all_keys: Vec<String> = store
+    // Single-pass: collect (key, last_modified, etag, size) for all matching objects.
+    // list_objects() returns in sorted key order (BTreeMap), so no sort needed.
+    type ObjMeta1 = (String, chrono::DateTime<chrono::Utc>, Arc<str>, u64);
+    let mut all_items: Vec<ObjMeta1> = store
         .list_objects(&bucket)
         .into_iter()
         .filter_map(|obj| {
-            if obj.current().is_some() && obj.key.starts_with(&prefix) {
-                Some(obj.key.clone())
-            } else {
-                None
+            let v = obj.current()?;
+            if !obj.key.starts_with(&prefix) {
+                return None;
             }
+            Some((
+                obj.key.clone(),
+                v.last_modified,
+                Arc::clone(&v.etag),
+                v.size,
+            ))
         })
         .collect();
-    all_keys.sort();
     if !marker.is_empty() {
-        all_keys.retain(|k| k.as_str() > marker.as_str());
+        all_items.retain(|(k, ..)| k.as_str() > marker.as_str());
     }
 
-    let mut common_prefixes: Vec<String> = Vec::new();
-    let mut content_keys: Vec<String> = Vec::new();
+    let mut common_prefixes: BTreeSet<String> = BTreeSet::new();
+    let mut content_items: Vec<ObjMeta1> = Vec::new();
     if delimiter.is_empty() {
-        content_keys = std::mem::take(&mut all_keys);
+        content_items = std::mem::take(&mut all_items);
     } else {
-        for key in &all_keys {
-            let suffix = &key[prefix.len()..];
+        for item in &all_items {
+            let suffix = &item.0[prefix.len()..];
             if let Some(pos) = suffix.find(&*delimiter) {
-                let cp = format!("{}{}{}", prefix, &suffix[..pos], delimiter);
-                if !common_prefixes.contains(&cp) {
-                    common_prefixes.push(cp);
-                }
+                common_prefixes.insert(format!("{}{}{}", prefix, &suffix[..pos], delimiter));
             } else {
-                content_keys.push(key.clone());
+                content_items.push(item.clone());
             }
         }
     }
 
-    let truncated = content_keys.len() + common_prefixes.len() > max_keys;
-    content_keys.truncate(max_keys.saturating_sub(common_prefixes.len()));
+    let truncated = content_items.len() + common_prefixes.len() > max_keys;
+    // Truncate common_prefixes first, then give remaining budget to content_items.
+    let mut cp_vec1: Vec<String> = common_prefixes.into_iter().collect();
+    if cp_vec1.len() > max_keys {
+        cp_vec1.truncate(max_keys);
+    }
+    let remaining1 = max_keys.saturating_sub(cp_vec1.len());
+    content_items.truncate(remaining1);
     let next_marker = if truncated {
-        content_keys.last().cloned().unwrap_or_default()
+        // Same cursor-safety logic as ListObjectsV2: do not use the synthetic
+        // common-prefix string as a marker — use the last raw key that fell
+        // under the last kept prefix so the next request skips past it cleanly.
+        if let Some((k, ..)) = content_items.last() {
+            k.clone()
+        } else if let Some(last_cp) = cp_vec1.last() {
+            all_items
+                .iter()
+                .rfind(|(k, ..)| k.starts_with(last_cp.as_str()))
+                .map(|(k, ..)| k.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
     } else {
         String::new()
     };
@@ -1284,35 +1434,34 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     );
 
     if truncated && !next_marker.is_empty() {
-        xml.push_str(&format!(
-            "<NextMarker>{}</NextMarker>",
-            xml_escape(&next_marker)
-        ));
+        write!(xml, "<NextMarker>{}</NextMarker>", xml_escape(&next_marker)).unwrap();
     }
 
-    for key in &content_keys {
-        if let Some(v) = store.get_object(&bucket, key) {
-            xml.push_str(&format!(
-                "<Contents>\
+    for (key, lm, etag, size) in &content_items {
+        write!(
+            xml,
+            "<Contents>\
 <Key>{key}</Key>\
 <LastModified>{lm}</LastModified>\
 <ETag>{etag}</ETag>\
 <Size>{size}</Size>\
 <StorageClass>STANDARD</StorageClass>\
 </Contents>",
-                key = xml_escape(key),
-                lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                etag = xml_escape(&v.etag),
-                size = v.size,
-            ));
-        }
+            key = xml_escape(key),
+            lm = lm.format("%Y-%m-%dT%H:%M:%S.000Z"),
+            etag = xml_escape(etag),
+            size = size,
+        )
+        .unwrap();
     }
 
-    for cp in &common_prefixes {
-        xml.push_str(&format!(
+    for cp in &cp_vec1 {
+        write!(
+            xml,
             "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
             xml_escape(cp)
-        ));
+        )
+        .unwrap();
     }
 
     xml.push_str("</ListBucketResult>");
@@ -1405,8 +1554,57 @@ async fn handle_upload_part_async(
         }
     };
 
-    // Get part data — prefer spooled_body (streaming), fall back to raw_body.
-    let (etag, size, part_data) = if let Some(mutex) = ctx.spooled_body.as_ref() {
+    // Get part data — prefer body_reader (stream-through, single disk write),
+    // then spooled_body (streaming), fall back to raw_body for tests.
+    let (etag, size, part_data) = if let Some(reader_mutex) = ctx.body_reader.as_ref() {
+        let content_length: Option<u64> = ctx
+            .headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
+
+        let mut reader_guard = reader_mutex.lock().await;
+        let threshold = inline_object_threshold();
+
+        if content_length.is_some_and(|len| len <= threshold) {
+            let cap = content_length.unwrap_or(64 * 1024) as usize;
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
+            let mut data = Vec::with_capacity(cap);
+            if let Err(e) =
+                tokio::io::AsyncReadExt::read_to_end(&mut hashing_reader, &mut data).await
+            {
+                warn!(error = %e, "Failed to read body_reader for upload part (small path)");
+                return s3_error("InternalError", "Failed to read request body", 500);
+            }
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            let size = data.len() as u64;
+            (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
+        } else {
+            let part_version_id = format!("part-{}", part_number);
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
+            let (file_path, bytes_written) = match file_store
+                .write_object_from_reader(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &format!("__multipart/{upload_id}/{key}"),
+                    &part_version_id,
+                    &mut hashing_reader,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!(error = %e, "Failed to stream body_reader upload part to filesystem");
+                    return s3_error("InternalError", "Failed to store part", 500);
+                }
+            };
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+        }
+    } else if let Some(mutex) = ctx.spooled_body.as_ref() {
         // Take the SpooledBody out of the Mutex so we can consume it into a reader.
         // The guard must be dropped before any .await, so use a block scope.
         let (spooled, spooled_len) = {
@@ -1419,7 +1617,7 @@ async fn handle_upload_part_async(
             (spooled, spooled_len)
         };
 
-        if spooled_len <= INLINE_OBJECT_THRESHOLD {
+        if spooled_len <= inline_object_threshold() {
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
             let mut data = Vec::with_capacity(spooled_len as usize);
             if let Err(e) =
@@ -1461,7 +1659,7 @@ async fn handle_upload_part_async(
         let data = ctx.raw_body_bytes().to_vec();
         let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&data)));
         let size = data.len() as u64;
-        let part_data = if size <= INLINE_OBJECT_THRESHOLD {
+        let part_data = if size <= inline_object_threshold() {
             ObjectDataRef::Inline(Bytes::from(data))
         } else {
             let part_version_id = format!("part-{}", part_number);
@@ -1529,9 +1727,11 @@ async fn handle_complete_multipart_upload_async(
             let end = remaining.find("</Part>").unwrap_or(remaining.len());
             let part_xml = &remaining[..end];
             let pn: u32 = extract_xml_text(part_xml, "PartNumber")
-                .and_then(|v| v.parse().ok())
+                .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(0);
-            let etag = extract_xml_text(part_xml, "ETag").unwrap_or_default();
+            let etag = extract_xml_text(part_xml, "ETag")
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default();
             if pn > 0 {
                 result.push((pn, etag));
             }
@@ -1609,7 +1809,7 @@ async fn handle_complete_multipart_upload_async(
     };
 
     // For small assembled objects, keep the existing inline path.
-    let assembled_data = if estimated_size <= INLINE_OBJECT_THRESHOLD {
+    let assembled_data = if estimated_size <= inline_object_threshold() {
         let mut combined = Vec::with_capacity(estimated_size as usize);
         for (_pn, data_ref, _size) in &part_data {
             match data_ref {
@@ -1687,12 +1887,17 @@ async fn handle_complete_multipart_upload_async(
             }
         };
 
-        // Clean up part files after successful assembly.
+        // Clean up part files after successful assembly — spawn all removals
+        // concurrently so that many parts are deleted in parallel rather than
+        // one-at-a-time.
+        let mut cleanup_set = tokio::task::JoinSet::new();
         for (_pn, data_ref, _size) in &part_data {
             if let ObjectDataRef::FileRef(path) = data_ref {
-                let _ = tokio::fs::remove_file(path).await;
+                let path = path.clone();
+                cleanup_set.spawn(async move { tokio::fs::remove_file(path).await });
             }
         }
+        while cleanup_set.join_next().await.is_some() {}
 
         let etag = if multipart_etag.is_empty() {
             format!("\"{}\"", hex::encode(digest))
@@ -1713,8 +1918,8 @@ async fn handle_complete_multipart_upload_async(
     let version = crate::store::ObjectVersion {
         version_id: version_id.clone(),
         last_modified: chrono::Utc::now(),
-        etag: etag.clone(),
-        content_type: content_type.clone(),
+        etag: Arc::from(etag.as_str()),
+        content_type: Arc::from(content_type.as_str()),
         content_encoding: None,
         content_disposition: None,
         cache_control: None,
@@ -1798,7 +2003,8 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
     );
 
     for u in uploads {
-        xml.push_str(&format!(
+        write!(
+            xml,
             "<Upload>\
 <Key>{key}</Key>\
 <UploadId>{id}</UploadId>\
@@ -1807,7 +2013,8 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
             key = xml_escape(&u.key),
             id = xml_escape(&u.upload_id),
             initiated = u.initiated.format("%Y-%m-%dT%H:%M:%S.000Z"),
-        ));
+        )
+        .unwrap();
     }
 
     xml.push_str("</ListMultipartUploadsResult>");
@@ -1980,7 +2187,9 @@ fn handle_put_bucket_versioning(store: &mut S3Store, ctx: &RequestContext) -> Di
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
     let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
-    let status = extract_xml_text(body, "Status").unwrap_or_default();
+    let status = extract_xml_text(body, "Status")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
 
     if let Some(b) = store.get_bucket_mut(&bucket) {
         b.versioning = status;
@@ -2001,9 +2210,12 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
     }
 
     let prefix = ctx.query_params.get("prefix").cloned().unwrap_or_default();
-    let mut objects = store.list_objects(&bucket);
-    objects.retain(|o| o.key.starts_with(&prefix));
-    objects.sort_by_key(|o| o.key.clone());
+    // list_objects() returns objects in sorted key order (BTreeMap).
+    let objects: Vec<_> = store
+        .list_objects(&bucket)
+        .into_iter()
+        .filter(|o| o.key.starts_with(&prefix))
+        .collect();
 
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -2021,7 +2233,8 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
                 .map(|fv| fv.version_id == v.version_id)
                 .unwrap_or(false);
             if v.delete_marker {
-                xml.push_str(&format!(
+                write!(
+                    xml,
                     "<DeleteMarker>\
 <Key>{key}</Key><VersionId>{vid}</VersionId>\
 <IsLatest>{latest}</IsLatest>\
@@ -2031,9 +2244,11 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
                     vid = xml_escape(&v.version_id),
                     latest = is_latest,
                     lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                ));
+                )
+                .unwrap();
             } else {
-                xml.push_str(&format!(
+                write!(
+                    xml,
                     "<Version>\
 <Key>{key}</Key><VersionId>{vid}</VersionId>\
 <IsLatest>{latest}</IsLatest>\
@@ -2047,7 +2262,8 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
                     lm = v.last_modified.format("%Y-%m-%dT%H:%M:%S.000Z"),
                     etag = xml_escape(&v.etag),
                     size = v.size,
-                ));
+                )
+                .unwrap();
             }
         }
     }
@@ -2100,12 +2316,22 @@ fn handle_put_bucket_notification(store: &mut S3Store, ctx: &RequestContext) -> 
 // ---------------------------------------------------------------------------
 
 /// Naive XML text extractor: finds first occurrence of <tag>text</tag>
+fn unescape_xml(s: &str) -> String {
+    // Replace the five predefined XML entities.  Order matters: &amp; must be
+    // last so we don't double-expand entities like `&amp;lt;`.
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
 fn extract_xml_text(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)?;
-    Some(xml[start..start + end].trim().to_string())
+    Some(unescape_xml(&xml[start..start + end]))
 }
 
 fn parse_copy_source(source: &str) -> (String, String) {
@@ -2185,7 +2411,7 @@ impl ServiceProvider for S3Provider {
         let op = derive_s3_operation(ctx);
 
         // For read operations we use get() (read lock); mutations use get_or_create() (write lock).
-        let response = match op.as_str() {
+        let response = match op.as_ref() {
             // ---- Bucket ops ----
             "ListBuckets" => {
                 if let Some(store) = self.store.get(&ctx.account_id, &ctx.region) {
@@ -2387,7 +2613,7 @@ impl ServiceProvider for S3Provider {
             "PresignedGetObject" => handle_get_object_async(&self.store, ctx).await,
             _ => {
                 warn!(service = "s3", operation = %op, "S3 operation not implemented");
-                return Err(DispatchError::NotImplemented(op));
+                return Err(DispatchError::NotImplemented(op.into_owned()));
             }
         };
 
@@ -2406,7 +2632,7 @@ impl ServiceProvider for S3Provider {
 // Operation derivation from HTTP method + path + query params
 // ---------------------------------------------------------------------------
 
-fn derive_s3_operation(ctx: &RequestContext) -> String {
+fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
     let method = ctx.method.to_uppercase();
     let has_key = !key_from_path(&ctx.path).is_empty();
     let has_bucket = bucket_from_path(&ctx.path).is_some();
@@ -2428,95 +2654,95 @@ fn derive_s3_operation(ctx: &RequestContext) -> String {
     let has_copy_source = ctx.headers.contains_key("x-amz-copy-source");
 
     match (method.as_str(), has_bucket, has_key) {
-        ("GET", false, _) => "ListBuckets".to_string(),
+        ("GET", false, _) => Cow::Borrowed("ListBuckets"),
         ("GET", true, false) => {
             if has_location {
-                "GetBucketLocation".to_string()
+                Cow::Borrowed("GetBucketLocation")
             } else if has_acl {
-                "GetBucketAcl".to_string()
+                Cow::Borrowed("GetBucketAcl")
             } else if has_policy {
-                "GetBucketPolicy".to_string()
+                Cow::Borrowed("GetBucketPolicy")
             } else if has_versioning {
-                "GetBucketVersioning".to_string()
+                Cow::Borrowed("GetBucketVersioning")
             } else if has_versions {
-                "ListObjectVersions".to_string()
+                Cow::Borrowed("ListObjectVersions")
             } else if has_notification {
-                "GetBucketNotificationConfiguration".to_string()
+                Cow::Borrowed("GetBucketNotificationConfiguration")
             } else if has_uploads {
-                "ListMultipartUploads".to_string()
+                Cow::Borrowed("ListMultipartUploads")
             } else if has_list_type_2 {
-                "ListObjectsV2".to_string()
+                Cow::Borrowed("ListObjectsV2")
             } else {
-                "ListObjects".to_string()
+                Cow::Borrowed("ListObjects")
             }
         }
         ("GET", true, true) => {
             if has_acl {
-                "GetObjectAcl".to_string()
+                Cow::Borrowed("GetObjectAcl")
             } else if has_x_amz_sig {
-                "PresignedGetObject".to_string()
+                Cow::Borrowed("PresignedGetObject")
             } else {
-                "GetObject".to_string()
+                Cow::Borrowed("GetObject")
             }
         }
-        ("HEAD", true, false) => "HeadBucket".to_string(),
-        ("HEAD", true, true) => "HeadObject".to_string(),
+        ("HEAD", true, false) => Cow::Borrowed("HeadBucket"),
+        ("HEAD", true, true) => Cow::Borrowed("HeadObject"),
         ("PUT", true, false) => {
             if has_acl {
-                "PutBucketAcl".to_string()
+                Cow::Borrowed("PutBucketAcl")
             } else if has_policy {
-                "PutBucketPolicy".to_string()
+                Cow::Borrowed("PutBucketPolicy")
             } else if has_versioning {
-                "PutBucketVersioning".to_string()
+                Cow::Borrowed("PutBucketVersioning")
             } else if has_notification {
-                "PutBucketNotificationConfiguration".to_string()
+                Cow::Borrowed("PutBucketNotificationConfiguration")
             } else {
-                "CreateBucket".to_string()
+                Cow::Borrowed("CreateBucket")
             }
         }
         ("PUT", true, true) => {
             if has_copy_source {
-                "CopyObject".to_string()
+                Cow::Borrowed("CopyObject")
             } else if has_upload_id && has_part_number {
-                "UploadPart".to_string()
+                Cow::Borrowed("UploadPart")
             } else if has_acl {
-                "PutObjectAcl".to_string()
+                Cow::Borrowed("PutObjectAcl")
             } else {
-                "PutObject".to_string()
+                Cow::Borrowed("PutObject")
             }
         }
         ("DELETE", true, false) => {
             if has_policy {
-                "DeleteBucketPolicy".to_string()
+                Cow::Borrowed("DeleteBucketPolicy")
             } else {
-                "DeleteBucket".to_string()
+                Cow::Borrowed("DeleteBucket")
             }
         }
         ("DELETE", true, true) => {
             if has_upload_id {
-                "AbortMultipartUpload".to_string()
+                Cow::Borrowed("AbortMultipartUpload")
             } else {
-                "DeleteObject".to_string()
+                Cow::Borrowed("DeleteObject")
             }
         }
         ("POST", true, false) => {
             if has_delete {
-                "DeleteObjects".to_string()
+                Cow::Borrowed("DeleteObjects")
             } else if has_uploads {
-                "CreateMultipartUpload".to_string()
+                Cow::Borrowed("CreateMultipartUpload")
             } else {
-                "DeleteObjects".to_string()
+                Cow::Borrowed("PostObject")
             }
         }
         ("POST", true, true) => {
             if has_upload_id {
-                "CompleteMultipartUpload".to_string()
+                Cow::Borrowed("CompleteMultipartUpload")
             } else if has_uploads {
-                "CreateMultipartUpload".to_string()
+                Cow::Borrowed("CreateMultipartUpload")
             } else {
-                "PostObject".to_string()
+                Cow::Borrowed("PostObject")
             }
         }
-        _ => format!("Unknown({method})"),
+        _ => Cow::Owned(format!("Unknown({method})")),
     }
 }

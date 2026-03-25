@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
@@ -19,11 +20,12 @@ use openstack_aws_protocol::{
 };
 use openstack_config::Config;
 use openstack_service_framework::traits::ResponseBody;
-use openstack_service_framework::{ServicePluginManager, SpooledBody};
+use openstack_service_framework::{BodyReader, ServicePluginManager, SpooledBody};
 use openstack_state::StateManager;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
+use tokio_util::io::StreamReader;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tracing::{debug, error, info, warn};
@@ -590,41 +592,41 @@ async fn handle_request(
         None
     };
 
-    // Stream the request body into a SpooledBody
-    let threshold = state.config.body_spool_threshold_bytes;
-    let mut spooled = SpooledBody::new(threshold);
-    let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
-    if let Err(e) = spooled.write_from_stream(stream).await {
-        if e.kind() == io::ErrorKind::InvalidData {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "guided execution payload exceeds configured limit",
-            )
-                .into_response();
-        }
-        error!("Failed to read request body: {}", e);
-        return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
-    }
-
-    // Materialize raw_body as Bytes for protocol parsing.
-    // For S3 object-body requests (PUT/POST to a bucket+key path) the body
-    // is binary object data — never XML or JSON — so we skip the copy and
-    // let the S3 provider stream it directly from the SpooledBody instead.
-    //
-    // For all other services we consume the SpooledBody via `into_bytes()`,
-    // replacing it with an empty sentinel.  No non-S3 provider ever reads
-    // `spooled_body`, so this avoids keeping two copies of the body in
-    // memory (the materialised `Bytes` and the original spool buffer).
+    // Determine whether this is an S3 object-body request BEFORE reading the
+    // body.  For S3 PutObject / UploadPart we bypass the intermediate
+    // SpooledBody disk spool entirely: the raw axum body stream is wrapped in
+    // a `StreamReader` and passed directly to the S3 provider so it can write
+    // object data to persistent storage in a single pass (eliminates the
+    // intermediate disk write that SpooledBody would have caused).
     let is_s3_body = is_s3_object_body_request(&method, &path, &headers, &query_params);
-    let body_bytes = if is_s3_body {
-        // Keep the body in the SpooledBody; pass an empty slice to parsers.
-        Bytes::new()
+
+    let (body_bytes, body_reader): (Bytes, Option<BodyReader>) = if is_s3_body {
+        // S3 object-body path: wrap the axum body as an AsyncRead and pass it
+        // through to the S3 provider.  The parsers only need an empty slice
+        // (S3 PutObject has no XML/JSON protocol body to parse).
+        let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
+        let reader: BodyReader = Box::new(StreamReader::new(stream));
+        (Bytes::new(), Some(reader))
     } else {
-        // Swap the data-bearing spool for an empty sentinel and consume it,
-        // so only one copy of the body lives in memory at a time.
-        let owned = std::mem::replace(&mut spooled, SpooledBody::new(0));
-        match owned.into_bytes() {
-            Ok(b) => b,
+        // Non-S3 path (or S3 sub-resource operations like CompleteMultipart):
+        // spool the body into memory/disk, then materialise as Bytes for
+        // protocol parsing.  No provider other than S3 reads `body_reader`.
+        let threshold = state.config.body_spool_threshold_bytes;
+        let mut spooled = SpooledBody::new(threshold);
+        let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
+        if let Err(e) = spooled.write_from_stream(stream).await {
+            if e.kind() == io::ErrorKind::InvalidData {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "guided execution payload exceeds configured limit",
+                )
+                    .into_response();
+            }
+            error!("Failed to read request body: {}", e);
+            return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+        }
+        match spooled.into_bytes() {
+            Ok(b) => (b, None),
             Err(e) => {
                 error!("Failed to materialize request body: {}", e);
                 return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
@@ -648,9 +650,7 @@ async fn handle_request(
         &body_bytes,
         &request_id,
         &state.config,
-        // Only S3 object-body requests need spooled_body; for all others the
-        // body was already consumed into body_bytes above.
-        if is_s3_body { Some(spooled) } else { None },
+        body_reader,
     ) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
@@ -849,7 +849,7 @@ fn build_request_context(
     body: &Bytes,
     request_id: &str,
     config: &Config,
-    spooled_body: Option<SpooledBody>,
+    body_reader: Option<BodyReader>,
 ) -> Result<RequestContext, Response> {
     // Parse SigV4 Authorization or inject default.
     // SigV4Auth borrows from the auth header string — no allocations here.
@@ -869,7 +869,8 @@ fn build_request_context(
     let account_id = access_key_to_account_id(access_key);
 
     // Determine the target service
-    let service = detect_service(&path, &query_params, &headers, body, service_from_auth);
+    let service =
+        detect_service(&path, &query_params, &headers, body, service_from_auth).into_owned();
 
     // Validate / normalize region
     let region = if config.allow_nonstandard_regions || is_valid_region(region) {
@@ -911,7 +912,8 @@ fn build_request_context(
         method: method.to_string(),
         query_params,
         request_id: request_id.to_string(),
-        spooled_body,
+        spooled_body: None,
+        body_reader,
     })
 }
 
@@ -922,7 +924,7 @@ fn detect_service(
     headers: &HeaderMap,
     body: &Bytes,
     service_from_auth: Option<&str>,
-) -> String {
+) -> Cow<'static, str> {
     // 1. Authorization header credential scope (highest priority)
     if let Some(svc) = service_from_auth {
         return normalize_service_name(svc);
@@ -939,10 +941,6 @@ fn detect_service(
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
                 && is_known_service(&potential_service)
             {
-                // Known service names have a static equivalent — use it.
-                if let Some(s) = known_service_static(&potential_service) {
-                    return s.to_string();
-                }
                 return potential_service;
             }
         }
@@ -954,49 +952,49 @@ fn detect_service(
         && body.is_empty()
         && !headers.contains_key("x-amz-target")
     {
-        return "s3".to_string();
+        return Cow::Borrowed("s3");
     }
 
     if let Some(target) = headers.get("x-amz-target").and_then(|v| v.to_str().ok())
         && let Some(svc) = service_from_target(target)
     {
-        return svc.to_string();
+        return Cow::Borrowed(svc);
     }
 
     // 4. Query protocol Action (POST form body or query string)
     if let Some(svc) = service_from_query_action(query_params, body) {
-        return svc.to_string();
+        return Cow::Borrowed(svc);
     }
 
     // 5. URL path patterns
     if let Some(svc) = service_from_path(path) {
-        return svc.to_string();
+        return Cow::Borrowed(svc);
     }
 
     // 6. S3 path-style heuristic for unsigned endpoint-url calls
     let trimmed = path.trim_start_matches('/');
     if !trimmed.is_empty() {
-        return "s3".to_string();
+        return Cow::Borrowed("s3");
     }
 
-    "unknown".to_string()
+    Cow::Borrowed("unknown")
 }
 
-fn normalize_service_name(service: &str) -> String {
+fn normalize_service_name(service: &str) -> Cow<'static, str> {
     if service.eq_ignore_ascii_case("es") {
-        return "opensearch".to_string();
+        return Cow::Borrowed("opensearch");
     }
     // AWS SDKs always send lowercase service names in credentials, so the
     // common path avoids `to_ascii_lowercase`'s character-by-character scan.
     if service.bytes().all(|b| !b.is_ascii_uppercase()) {
         // Try to resolve to a known static string to avoid allocating.
         if let Some(s) = known_service_static(service) {
-            s.to_string()
+            Cow::Borrowed(s)
         } else {
-            service.to_string()
+            Cow::Owned(service.to_string())
         }
     } else {
-        service.to_ascii_lowercase()
+        Cow::Owned(service.to_ascii_lowercase())
     }
 }
 

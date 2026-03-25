@@ -35,6 +35,7 @@ fn make_ctx(
         query_params,
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 
@@ -58,6 +59,7 @@ fn make_ctx_json(
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 
@@ -97,6 +99,7 @@ async fn test_sqs_multi_account_isolation() {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let create_a = provider.dispatch(&ctx_a).await.unwrap();
     assert_eq!(create_a.status_code, 200);
@@ -116,6 +119,7 @@ async fn test_sqs_multi_account_isolation() {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let create_b = provider.dispatch(&ctx_b).await.unwrap();
     assert_eq!(create_b.status_code, 200);
@@ -135,6 +139,7 @@ async fn test_sqs_multi_account_isolation() {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let list_a = provider.dispatch(&list_ctx_a).await.unwrap();
     let list_a_body = body_str(&list_a);
@@ -162,6 +167,7 @@ async fn test_sqs_multi_account_isolation() {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let list_b = provider.dispatch(&list_ctx_b).await.unwrap();
     let list_b_body = body_str(&list_b);
@@ -286,6 +292,7 @@ async fn test_s3_multi_account_isolation() {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let create_a = provider.dispatch(&ctx_a).await.unwrap();
     assert_eq!(create_a.status_code, 200);
@@ -304,6 +311,7 @@ async fn test_s3_multi_account_isolation() {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let create_b = provider.dispatch(&ctx_b).await.unwrap();
     assert_eq!(create_b.status_code, 200);
@@ -322,6 +330,7 @@ async fn test_s3_multi_account_isolation() {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     };
     let list_a = provider.dispatch(&list_ctx_a).await.unwrap();
     let list_a_body = body_str(&list_a);

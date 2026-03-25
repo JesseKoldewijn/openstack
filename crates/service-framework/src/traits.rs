@@ -9,8 +9,15 @@ use thiserror::Error;
 
 use crate::SpooledBody;
 
+/// Type alias for the boxed async body reader passed from the gateway to
+/// providers for S3 object-body requests.
+///
+/// Using `Box<dyn AsyncRead + Send + Unpin>` allows the gateway to pass any
+/// async byte source (e.g. the raw axum body stream) without leaking axum
+/// types into the service-framework crate.
+pub type BodyReader = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
+
 /// The parsed request context passed to provider methods.
-#[derive(Debug)]
 pub struct RequestContext {
     /// Target AWS service (e.g., "s3", "sqs")
     pub service: String,
@@ -44,6 +51,18 @@ pub struct RequestContext {
     /// (via `SpooledBody::into_reader()`) even when the provider receives
     /// `ctx: &RequestContext`.
     pub spooled_body: Option<Mutex<SpooledBody>>,
+    /// Streaming body reader for S3 object-body requests (PutObject, UploadPart).
+    ///
+    /// When the gateway sets this field it has bypassed the intermediate
+    /// `SpooledBody` disk spool, allowing providers to read object data
+    /// directly from the network stream and write it to persistent storage
+    /// in a single pass — eliminating one full disk write per large-object PUT.
+    ///
+    /// Wrapped in `tokio::sync::Mutex` so the provider can hold the lock
+    /// across `.await` points while streaming to disk.
+    ///
+    /// Priority order in providers: `body_reader` → `spooled_body` → `raw_body`.
+    pub body_reader: Option<tokio::sync::Mutex<BodyReader>>,
 }
 
 impl RequestContext {
@@ -66,6 +85,7 @@ impl RequestContext {
             query_params: Default::default(),
             request_id: String::new(),
             spooled_body: None,
+            body_reader: None,
         }
     }
 
@@ -76,6 +96,31 @@ impl RequestContext {
     /// changes do not break them.
     pub fn raw_body_bytes(&self) -> &[u8] {
         self.raw_body.as_deref().unwrap_or(b"")
+    }
+}
+
+impl std::fmt::Debug for RequestContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestContext")
+            .field("service", &self.service)
+            .field("operation", &self.operation)
+            .field("region", &self.region)
+            .field("account_id", &self.account_id)
+            .field("request_body", &self.request_body)
+            .field("raw_body", &self.raw_body.as_ref().map(|b| b.len()))
+            .field("path", &self.path)
+            .field("method", &self.method)
+            .field("query_params", &self.query_params)
+            .field("request_id", &self.request_id)
+            .field(
+                "spooled_body",
+                &self.spooled_body.as_ref().map(|_| "<SpooledBody>"),
+            )
+            .field(
+                "body_reader",
+                &self.body_reader.as_ref().map(|_| "<BodyReader>"),
+            )
+            .finish()
     }
 }
 

@@ -92,11 +92,14 @@ impl PersistableStore for S3PersistableStore {
 
 /// Convert all `FileRef` absolute paths to paths relative to `base`.
 fn relativize_paths(store: &mut S3Store, base: &Path) {
-    // Object versions
-    for objects_by_key in store.objects.values_mut() {
-        for s3_obj in objects_by_key.values_mut() {
+    // Object versions — DashMap::iter_mut() yields RefMut guards
+    for mut bucket_entry in store.objects.iter_mut() {
+        for s3_obj in bucket_entry.value_mut().values_mut() {
             for version in &mut s3_obj.versions {
-                relativize_data_ref(&mut version.data, base);
+                // Arc::make_mut gives us &mut ObjectVersion, cloning only if
+                // this Arc is shared (it never is during save, but we must be
+                // safe regardless).
+                relativize_data_ref(&mut Arc::make_mut(version).data, base);
             }
         }
     }
@@ -114,11 +117,12 @@ fn relativize_paths(store: &mut S3Store, base: &Path) {
 /// and the data ref is left as-is (the object metadata is retained but
 /// reads will fail gracefully).
 fn resolve_and_verify_paths(store: &mut S3Store, base: &Path) {
-    // Object versions
-    for (bucket_name, objects_by_key) in store.objects.iter_mut() {
-        for (key, s3_obj) in objects_by_key.iter_mut() {
+    // Object versions — DashMap::iter_mut() yields RefMut guards
+    for mut bucket_entry in store.objects.iter_mut() {
+        let bucket_name = bucket_entry.key().clone();
+        for (key, s3_obj) in bucket_entry.value_mut().iter_mut() {
             for version in &mut s3_obj.versions {
-                resolve_data_ref(&mut version.data, base, bucket_name, key);
+                resolve_data_ref(&mut Arc::make_mut(version).data, base, &bucket_name, key);
             }
         }
     }
@@ -206,16 +210,32 @@ mod tests {
 
         // Relativize
         relativize_paths(&mut store, &base);
-        let data = &store.objects["mybucket"]["my-key"].versions[0].data;
+        let data = store
+            .objects
+            .get("mybucket")
+            .unwrap()
+            .get("my-key")
+            .unwrap()
+            .versions[0]
+            .data
+            .clone();
         assert_eq!(
             data,
-            &ObjectDataRef::FileRef(PathBuf::from("acct/us-east-1/mybucket/abc123/null"))
+            ObjectDataRef::FileRef(PathBuf::from("acct/us-east-1/mybucket/abc123/null"))
         );
 
         // Resolve (note: file won't exist on disk in test, but path should be absolute)
         resolve_and_verify_paths(&mut store, &base);
-        let data = &store.objects["mybucket"]["my-key"].versions[0].data;
-        assert_eq!(data, &ObjectDataRef::FileRef(abs_path));
+        let data = store
+            .objects
+            .get("mybucket")
+            .unwrap()
+            .get("my-key")
+            .unwrap()
+            .versions[0]
+            .data
+            .clone();
+        assert_eq!(data, ObjectDataRef::FileRef(abs_path));
     }
 
     #[test]
@@ -238,12 +258,28 @@ mod tests {
 
         // Relativize should not touch Inline data
         relativize_paths(&mut store, &base);
-        let data = &store.objects["mybucket"]["inline-key"].versions[0].data;
-        assert_eq!(data, &ObjectDataRef::Inline(Bytes::from_static(b"hello")));
+        let data = store
+            .objects
+            .get("mybucket")
+            .unwrap()
+            .get("inline-key")
+            .unwrap()
+            .versions[0]
+            .data
+            .clone();
+        assert_eq!(data, ObjectDataRef::Inline(Bytes::from_static(b"hello")));
 
         // Resolve should not touch Inline data
         resolve_and_verify_paths(&mut store, &base);
-        let data = &store.objects["mybucket"]["inline-key"].versions[0].data;
-        assert_eq!(data, &ObjectDataRef::Inline(Bytes::from_static(b"hello")));
+        let data = store
+            .objects
+            .get("mybucket")
+            .unwrap()
+            .get("inline-key")
+            .unwrap()
+            .versions[0]
+            .data
+            .clone();
+        assert_eq!(data, ObjectDataRef::Inline(Bytes::from_static(b"hello")));
     }
 }

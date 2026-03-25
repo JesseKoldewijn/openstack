@@ -1,14 +1,140 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::str::FromStr;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use dashmap::DashMap;
+use dashmap::mapref::one::{Ref, RefMut};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
-// AttributeValue — mirrors the DynamoDB wire format
+// AttributeValue — typed enum mirroring the DynamoDB wire format.
+//
+// DynamoDB represents each attribute as a single-key object:
+//   {"S": "hello"}, {"N": "42"}, {"BOOL": true}, {"NULL": true},
+//   {"B": "<base64>"}, {"SS": [...]}, {"NS": [...]}, {"BS": [...]},
+//   {"L": [...]}, {"M": {...}}
+//
+// We store this as a typed Rust enum for O(1) variant dispatch and to
+// eliminate repeated `.get("S").and_then(|v| v.as_str())` chains.
+// The custom Serialize/Deserialize impls maintain full wire-format parity.
 // ---------------------------------------------------------------------------
 
-pub type Item = HashMap<String, Value>;
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttributeValue {
+    /// String
+    S(String),
+    /// Number (stored as string to preserve precision, per DynamoDB wire format)
+    N(String),
+    /// Binary (base64-encoded string on the wire)
+    B(String),
+    /// Boolean
+    Bool(bool),
+    /// Null
+    Null,
+    /// String set
+    Ss(Vec<String>),
+    /// Number set
+    Ns(Vec<String>),
+    /// Binary set
+    Bs(Vec<String>),
+    /// List
+    L(Vec<AttributeValue>),
+    /// Map
+    M(HashMap<String, AttributeValue>),
+}
+
+impl Serialize for AttributeValue {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = ser.serialize_map(Some(1))?;
+        match self {
+            AttributeValue::S(v) => map.serialize_entry("S", v)?,
+            AttributeValue::N(v) => map.serialize_entry("N", v)?,
+            AttributeValue::B(v) => map.serialize_entry("B", v)?,
+            AttributeValue::Bool(v) => map.serialize_entry("BOOL", v)?,
+            AttributeValue::Null => map.serialize_entry("NULL", &true)?,
+            AttributeValue::Ss(v) => map.serialize_entry("SS", v)?,
+            AttributeValue::Ns(v) => map.serialize_entry("NS", v)?,
+            AttributeValue::Bs(v) => map.serialize_entry("BS", v)?,
+            AttributeValue::L(v) => map.serialize_entry("L", v)?,
+            AttributeValue::M(v) => map.serialize_entry("M", v)?,
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for AttributeValue {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        // Deserialize as a raw serde_json::Value first, then interpret.
+        let v = Value::deserialize(de)?;
+        Ok(av_from_json(&v))
+    }
+}
+
+/// Convert a raw JSON `Value` (in DynamoDB wire format) into an `AttributeValue`.
+/// Unknown or missing type tags fall back to `AttributeValue::Null`.
+pub fn av_from_json(v: &Value) -> AttributeValue {
+    if let Some(s) = v.get("S").and_then(|x| x.as_str()) {
+        return AttributeValue::S(s.to_string());
+    }
+    if let Some(n) = v.get("N").and_then(|x| x.as_str()) {
+        return AttributeValue::N(n.to_string());
+    }
+    if let Some(b) = v.get("B").and_then(|x| x.as_str()) {
+        return AttributeValue::B(b.to_string());
+    }
+    if let Some(b) = v.get("BOOL").and_then(|x| x.as_bool()) {
+        return AttributeValue::Bool(b);
+    }
+    if v.get("NULL").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return AttributeValue::Null;
+    }
+    if let Some(arr) = v.get("SS").and_then(|x| x.as_array()) {
+        let items: Vec<String> = arr
+            .iter()
+            .filter_map(|s| s.as_str().map(String::from))
+            .collect();
+        return AttributeValue::Ss(items);
+    }
+    if let Some(arr) = v.get("NS").and_then(|x| x.as_array()) {
+        let items: Vec<String> = arr
+            .iter()
+            .filter_map(|s| s.as_str().map(String::from))
+            .collect();
+        return AttributeValue::Ns(items);
+    }
+    if let Some(arr) = v.get("BS").and_then(|x| x.as_array()) {
+        let items: Vec<String> = arr
+            .iter()
+            .filter_map(|s| s.as_str().map(String::from))
+            .collect();
+        return AttributeValue::Bs(items);
+    }
+    if let Some(arr) = v.get("L").and_then(|x| x.as_array()) {
+        let items: Vec<AttributeValue> = arr.iter().map(av_from_json).collect();
+        return AttributeValue::L(items);
+    }
+    if let Some(obj) = v.get("M").and_then(|x| x.as_object()) {
+        let map: HashMap<String, AttributeValue> = obj
+            .iter()
+            .map(|(k, v)| (k.clone(), av_from_json(v)))
+            .collect();
+        return AttributeValue::M(map);
+    }
+    AttributeValue::Null
+}
+
+/// Convert a `serde_json::Map` of wire-format attribute values into an `Item`.
+pub fn item_from_json_map(m: &serde_json::Map<String, Value>) -> Item {
+    m.iter()
+        .map(|(k, v)| (k.clone(), av_from_json(v)))
+        .collect()
+}
+
+pub type Item = HashMap<String, AttributeValue>;
 
 // ---------------------------------------------------------------------------
 // Key schema
@@ -76,29 +202,173 @@ pub struct StreamSpecification {
 pub struct StreamRecord {
     pub sequence_number: String,
     pub event_name: String,
-    pub keys: HashMap<String, Value>,
+    pub keys: Item,
     pub new_image: Option<Item>,
     pub old_image: Option<Item>,
     pub approximate_creation_date_time: f64,
 }
 
 // ---------------------------------------------------------------------------
-// Sort key
+// Materialized secondary index
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum SortKeyValue {
-    S(String),
-    N(f64),
+/// A hash-partitioned index maintained in parallel with the primary item store.
+///
+/// Each entry in `data` corresponds to one hash-key value and holds the list
+/// of `(pk_hash, pk_sort)` primary-key pairs for all items that landed in that
+/// partition.  The list is kept sorted by the index range-key value so that
+/// queries can apply a range condition and sort in a single pass.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MaterializedIndex {
+    /// Attribute name of this index's hash key.
+    pub hash_key_name: String,
+    /// Attribute name of this index's range key, if any.
+    pub range_key_name: Option<String>,
+    /// index_hash_val → Vec<(pk_hash, pk_sort)>
+    pub data: HashMap<String, Vec<(String, String)>>,
 }
 
-impl PartialOrd for SortKeyValue {
+impl MaterializedIndex {
+    pub fn new(hash_key_name: String, range_key_name: Option<String>) -> Self {
+        Self {
+            hash_key_name,
+            range_key_name,
+            data: HashMap::new(),
+        }
+    }
+
+    /// Insert an item's primary-key pair into this index (no-op if the item
+    /// does not carry the index hash key — sparse index semantics).
+    /// If the index also has a range key, the item must carry that too.
+    pub fn add(&mut self, item: &Item, pk_hash: String, pk_sort: String) {
+        let Some(hv) = item.get(&self.hash_key_name).and_then(av_to_key_str) else {
+            return;
+        };
+        // Sparse index: skip items that lack the index range key (when one is defined).
+        if let Some(rk) = &self.range_key_name
+            && item.get(rk).is_none()
+        {
+            return;
+        }
+        let bucket = self.data.entry(hv).or_default();
+        // Avoid duplicate entries (can happen if put_item is called twice
+        // for the same primary key without a preceding delete).
+        if !bucket.contains(&(pk_hash.clone(), pk_sort.clone())) {
+            bucket.push((pk_hash, pk_sort));
+        }
+    }
+
+    /// Remove an item's primary-key pair from this index.
+    pub fn remove(&mut self, item: &Item, pk_hash: &str, pk_sort: &str) {
+        let Some(hv) = item.get(&self.hash_key_name).and_then(av_to_key_str_ref) else {
+            return;
+        };
+        if let Some(bucket) = self.data.get_mut(hv) {
+            bucket.retain(|(h, s)| h != pk_hash || s != pk_sort);
+            if bucket.is_empty() {
+                self.data.remove(hv);
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SortKeyValue<'a> {
+    S(&'a str),
+    /// Numeric value stored as the original DynamoDB string (e.g. "3.14", "-100").
+    /// Compared with full precision via `cmp_numeric_str` — no f64 loss.
+    N(&'a str),
+}
+
+impl<'a> PartialOrd for SortKeyValue<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (SortKeyValue::S(a), SortKeyValue::S(b)) => a.partial_cmp(b),
-            (SortKeyValue::N(a), SortKeyValue::N(b)) => a.partial_cmp(b),
+            (SortKeyValue::N(a), SortKeyValue::N(b)) => Some(cmp_numeric_str(a, b)),
             _ => None,
         }
+    }
+}
+
+/// Compare two DynamoDB numeric strings with full precision (no f64 conversion).
+///
+/// DynamoDB number strings are standard decimal notation, optionally with a
+/// leading minus sign and a decimal point.  Scientific notation is not
+/// produced by the AWS SDK for stored values, so we don't handle it here.
+///
+/// Algorithm:
+/// 1. Compare signs.
+/// 2. For two positives: compare by integer-part length, then lexicographically,
+///    then by fractional part (right-padded with '0').
+/// 3. For two negatives: reverse the positive comparison.
+fn cmp_numeric_str(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let a_neg = a.starts_with('-');
+    let b_neg = b.starts_with('-');
+
+    match (a_neg, b_neg) {
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        _ => {}
+    }
+
+    // Strip sign for magnitude comparison.
+    let a_mag = if a_neg { &a[1..] } else { a };
+    let b_mag = if b_neg { &b[1..] } else { b };
+
+    let mag_ord = cmp_magnitude(a_mag, b_mag);
+
+    // Negative numbers: larger magnitude means smaller value.
+    if a_neg { mag_ord.reverse() } else { mag_ord }
+}
+
+fn cmp_magnitude(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    // Split on decimal point.
+    let (a_int, a_frac) = split_decimal(a);
+    let (b_int, b_frac) = split_decimal(b);
+
+    // Strip leading zeros from integer parts (handles "007" == "7").
+    let a_int = a_int.trim_start_matches('0');
+    let b_int = b_int.trim_start_matches('0');
+
+    // Longer integer part = larger magnitude.
+    match a_int.len().cmp(&b_int.len()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    // Same length integer parts — lexicographic comparison works because
+    // both are digit-only strings of equal length.
+    match a_int.cmp(b_int) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    // Integer parts equal — compare fractional parts (strip trailing zeros).
+    let a_frac = a_frac.trim_end_matches('0');
+    let b_frac = b_frac.trim_end_matches('0');
+
+    // Compare character by character (right-pad shorter with '0').
+    let max_len = a_frac.len().max(b_frac.len());
+    for i in 0..max_len {
+        let ac = a_frac.as_bytes().get(i).copied().unwrap_or(b'0');
+        let bc = b_frac.as_bytes().get(i).copied().unwrap_or(b'0');
+        match ac.cmp(&bc) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
+    Ordering::Equal
+}
+
+fn split_decimal(s: &str) -> (&str, &str) {
+    match s.find('.') {
+        Some(pos) => (&s[..pos], &s[pos + 1..]),
+        None => (s, ""),
     }
 }
 
@@ -130,10 +400,12 @@ pub struct Table {
     pub billing_mode: String,
     pub item_count: u64,
     pub table_size_bytes: u64,
-    /// partition_key → sort_key → Item  (sort_key = "" when no range key)
-    pub items: HashMap<String, HashMap<String, Item>>,
-    pub stream_records: Vec<StreamRecord>,
+    /// partition_key → sort_key → Item  (BTreeMap keeps sort keys ordered for Query)
+    pub items: HashMap<String, BTreeMap<String, Item>>,
+    pub stream_records: VecDeque<StreamRecord>,
     pub stream_sequence: u64,
+    /// Materialized secondary indexes — kept in sync on every write.
+    pub index_data: HashMap<String, MaterializedIndex>,
 }
 
 impl Table {
@@ -158,6 +430,38 @@ impl Table {
         } else {
             None
         };
+
+        // Build materialized indexes from GSI/LSI definitions.
+        let mut index_data: HashMap<String, MaterializedIndex> = HashMap::new();
+        for gsi in &gsis {
+            let hk = gsi
+                .key_schema
+                .iter()
+                .find(|k| k.key_type == KeyType::HASH)
+                .map(|k| k.attribute_name.clone())
+                .unwrap_or_default();
+            let rk = gsi
+                .key_schema
+                .iter()
+                .find(|k| k.key_type == KeyType::RANGE)
+                .map(|k| k.attribute_name.clone());
+            index_data.insert(gsi.index_name.clone(), MaterializedIndex::new(hk, rk));
+        }
+        for lsi in &lsis {
+            let hk = lsi
+                .key_schema
+                .iter()
+                .find(|k| k.key_type == KeyType::HASH)
+                .map(|k| k.attribute_name.clone())
+                .unwrap_or_default();
+            let rk = lsi
+                .key_schema
+                .iter()
+                .find(|k| k.key_type == KeyType::RANGE)
+                .map(|k| k.attribute_name.clone());
+            index_data.insert(lsi.index_name.clone(), MaterializedIndex::new(hk, rk));
+        }
+
         Self {
             table_name: name,
             table_arn,
@@ -174,8 +478,9 @@ impl Table {
             item_count: 0,
             table_size_bytes: 0,
             items: HashMap::new(),
-            stream_records: Vec::new(),
+            stream_records: VecDeque::new(),
             stream_sequence: 0,
+            index_data,
         }
     }
 
@@ -193,8 +498,8 @@ impl Table {
             .map(|k| k.attribute_name.as_str())
     }
 
-    fn make_key_map(&self, item: &Item) -> HashMap<String, Value> {
-        let mut keys = HashMap::new();
+    fn make_key_map(&self, item: &Item) -> Item {
+        let mut keys = Item::new();
         if let Some(hk) = self.hash_key_name()
             && let Some(v) = item.get(hk)
         {
@@ -211,7 +516,7 @@ impl Table {
     fn append_stream_record(
         &mut self,
         event_name: &str,
-        keys: HashMap<String, Value>,
+        keys: Item,
         old_image: Option<Item>,
         new_image: Option<Item>,
     ) {
@@ -227,9 +532,9 @@ impl Table {
             old_image,
             approximate_creation_date_time: Utc::now().timestamp() as f64,
         };
-        self.stream_records.push(rec);
+        self.stream_records.push_back(rec);
         if self.stream_records.len() > 1000 {
-            self.stream_records.remove(0);
+            self.stream_records.pop_front();
         }
     }
 
@@ -246,21 +551,53 @@ impl Table {
         Some((hash_str, sort_str))
     }
 
+    /// Borrow partition + sort key strings directly from the item's `AttributeValue`s
+    /// without allocating.  Used on read paths (e.g. `get_item`) where owned
+    /// `String`s are not required.
+    pub fn extract_key_ref_from_item<'a>(&self, item: &'a Item) -> Option<(&'a str, &'a str)> {
+        let hk = self.hash_key_name()?;
+        let hv = item.get(hk)?;
+        let hash_str = av_to_key_str_ref(hv)?;
+        let sort_str = if let Some(rk) = self.range_key_name() {
+            let rv = item.get(rk)?;
+            av_to_key_str_ref(rv)?
+        } else {
+            ""
+        };
+        Some((hash_str, sort_str))
+    }
+
     pub fn put_item(&mut self, item: Item) -> Option<Item> {
         let (hk, sk) = self.extract_key_from_item(&item)?;
         let keys = self.make_key_map(&item);
-        let old = self.items.entry(hk).or_default().insert(sk, item.clone());
-        if old.is_none() {
+
+        // Remove old item from all materialized indexes before replacing it.
+        let old = self
+            .items
+            .entry(hk.clone())
+            .or_default()
+            .insert(sk.clone(), item.clone());
+        if let Some(ref old_item) = old {
+            for idx in self.index_data.values_mut() {
+                idx.remove(old_item, &hk, &sk);
+            }
+        } else {
             self.item_count += 1;
         }
+
+        // Add new item to all materialized indexes.
+        for idx in self.index_data.values_mut() {
+            idx.add(&item, hk.clone(), sk.clone());
+        }
+
         let event = if old.is_some() { "MODIFY" } else { "INSERT" };
         self.append_stream_record(event, keys, old.clone(), Some(item));
         old
     }
 
     pub fn get_item(&self, key: &Item) -> Option<&Item> {
-        let (hk, sk) = self.extract_key_from_item(key)?;
-        self.items.get(&hk)?.get(&sk)
+        let (hk, sk) = self.extract_key_ref_from_item(key)?;
+        self.items.get(hk)?.get(sk)
     }
 
     pub fn delete_item(&mut self, key: &Item) -> Option<Item> {
@@ -271,7 +608,10 @@ impl Table {
         if old.is_some() {
             self.item_count = self.item_count.saturating_sub(1);
         }
-        if old.is_some() {
+        if let Some(ref old_item) = old {
+            for idx in self.index_data.values_mut() {
+                idx.remove(old_item, &hk, &sk);
+            }
             self.append_stream_record("REMOVE", keys, old.clone(), None);
         }
         old
@@ -289,15 +629,52 @@ impl Table {
         index_name: Option<&str>,
         scan_index_forward: bool,
     ) -> Vec<&Item> {
-        if let Some(idx) = index_name {
-            let idx_hk = self.index_hash_key(idx).unwrap_or("");
-            let idx_rk = self.index_range_key(idx);
+        if let Some(idx_name) = index_name {
+            // Fast path: use the materialized index when available (O(1) hash
+            // lookup instead of scanning all items).
+            if let Some(mat_idx) = self.index_data.get(idx_name) {
+                let idx_rk = mat_idx.range_key_name.as_deref();
+                let pairs = mat_idx.data.get(hash_key_val);
+                let mut items: Vec<&Item> = pairs
+                    .into_iter()
+                    .flat_map(|v| v.iter())
+                    .filter_map(|(h, s)| self.items.get(h)?.get(s))
+                    .filter(|item| {
+                        if let Some(rc) = range_condition
+                            && let Some(rk) = idx_rk
+                            && let Some(rv) = item.get(rk)
+                        {
+                            rc.matches(rv)
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+                if let Some(rk) = idx_rk {
+                    items.sort_by(|a, b| {
+                        let ak = a.get(rk).and_then(av_sort_key);
+                        let bk = b.get(rk).and_then(av_sort_key);
+                        let ord = ak.partial_cmp(&bk).unwrap_or(std::cmp::Ordering::Equal);
+                        if scan_index_forward {
+                            ord
+                        } else {
+                            ord.reverse()
+                        }
+                    });
+                }
+                return items;
+            }
+
+            // Fallback: full-table scan (handles tables created before
+            // materialized indexes were introduced, or unknown index names).
+            let idx_hk = self.index_hash_key(idx_name).unwrap_or("");
+            let idx_rk = self.index_range_key(idx_name);
             let mut items: Vec<&Item> = self
                 .all_items()
                 .into_iter()
                 .filter(|item| {
-                    let item_hash = item.get(idx_hk).and_then(av_to_key_str);
-                    if item_hash.as_deref() != Some(hash_key_val) {
+                    let item_hash = item.get(idx_hk).and_then(av_to_key_str_ref);
+                    if item_hash != Some(hash_key_val) {
                         return false;
                     }
                     if let Some(rc) = range_condition
@@ -356,7 +733,39 @@ impl Table {
         }
     }
 
-    fn index_hash_key(&self, index_name: &str) -> Option<&str> {
+    /// Add a GSI dynamically (called from UpdateTable) and populate it from
+    /// all existing items so it is immediately queryable.
+    pub fn add_gsi(&mut self, gsi: GlobalSecondaryIndex) {
+        let hk = gsi
+            .key_schema
+            .iter()
+            .find(|k| k.key_type == KeyType::HASH)
+            .map(|k| k.attribute_name.clone())
+            .unwrap_or_default();
+        let rk = gsi
+            .key_schema
+            .iter()
+            .find(|k| k.key_type == KeyType::RANGE)
+            .map(|k| k.attribute_name.clone());
+        let mut idx = MaterializedIndex::new(hk, rk);
+        // Back-fill from existing items.
+        for (pk_hash, partition) in &self.items {
+            for (pk_sort, item) in partition {
+                idx.add(item, pk_hash.clone(), pk_sort.clone());
+            }
+        }
+        self.index_data.insert(gsi.index_name.clone(), idx);
+        self.global_secondary_indexes.push(gsi);
+    }
+
+    /// Remove a GSI dynamically (called from UpdateTable).
+    pub fn remove_gsi(&mut self, index_name: &str) {
+        self.index_data.remove(index_name);
+        self.global_secondary_indexes
+            .retain(|g| g.index_name != index_name);
+    }
+
+    pub fn index_hash_key(&self, index_name: &str) -> Option<&str> {
         for gsi in &self.global_secondary_indexes {
             if gsi.index_name == index_name {
                 return gsi
@@ -378,7 +787,7 @@ impl Table {
         None
     }
 
-    fn index_range_key(&self, index_name: &str) -> Option<&str> {
+    pub fn index_range_key(&self, index_name: &str) -> Option<&str> {
         for gsi in &self.global_secondary_indexes {
             if gsi.index_name == index_name {
                 return gsi
@@ -407,17 +816,17 @@ impl Table {
 
 #[derive(Debug, Clone)]
 pub enum RangeCondition {
-    Eq(Value),
-    Lt(Value),
-    Lte(Value),
-    Gt(Value),
-    Gte(Value),
-    Between(Value, Value),
+    Eq(AttributeValue),
+    Lt(AttributeValue),
+    Lte(AttributeValue),
+    Gt(AttributeValue),
+    Gte(AttributeValue),
+    Between(AttributeValue, AttributeValue),
     BeginsWith(String),
 }
 
 impl RangeCondition {
-    pub fn matches(&self, av: &Value) -> bool {
+    pub fn matches(&self, av: &AttributeValue) -> bool {
         match self {
             RangeCondition::Eq(e) => av_compare(av, e) == Some(std::cmp::Ordering::Equal),
             RangeCondition::Lt(b) => {
@@ -443,11 +852,13 @@ impl RangeCondition {
                     Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
                 )
             }
-            RangeCondition::BeginsWith(prefix) => av
-                .get("S")
-                .and_then(|s| s.as_str())
-                .map(|s| s.starts_with(prefix.as_str()))
-                .unwrap_or(false),
+            RangeCondition::BeginsWith(prefix) => {
+                if let AttributeValue::S(s) = av {
+                    s.starts_with(prefix.as_str())
+                } else {
+                    false
+                }
+            }
         }
     }
 }
@@ -456,9 +867,37 @@ impl RangeCondition {
 // DynamoDbStore
 // ---------------------------------------------------------------------------
 
+/// Serialize `Arc<DashMap<K, V>>` by serializing the inner DashMap.
+mod arc_dashmap_serde {
+    use std::sync::Arc;
+
+    use dashmap::DashMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S, K, V>(map: &Arc<DashMap<K, V>>, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Serialize + std::hash::Hash + Eq,
+        V: Serialize,
+    {
+        map.as_ref().serialize(ser)
+    }
+
+    pub fn deserialize<'de, D, K, V>(de: D) -> Result<Arc<DashMap<K, V>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: Deserialize<'de> + std::hash::Hash + Eq,
+        V: Deserialize<'de>,
+    {
+        let inner = DashMap::<K, V>::deserialize(de)?;
+        Ok(Arc::new(inner))
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DynamoDbStore {
-    pub tables: HashMap<String, Table>,
+    #[serde(with = "arc_dashmap_serde")]
+    pub tables: Arc<DashMap<String, Table>>,
 }
 
 impl DynamoDbStore {
@@ -468,7 +907,7 @@ impl DynamoDbStore {
 
     #[allow(clippy::too_many_arguments)]
     pub fn create_table(
-        &mut self,
+        &self,
         name: impl Into<String>,
         account_id: &str,
         region: &str,
@@ -477,7 +916,7 @@ impl DynamoDbStore {
         gsis: Vec<GlobalSecondaryIndex>,
         lsis: Vec<LocalSecondaryIndex>,
         stream_spec: StreamSpecification,
-    ) -> &Table {
+    ) {
         let name = name.into();
         if !self.tables.contains_key(&name) {
             let table = Table::new(
@@ -490,25 +929,30 @@ impl DynamoDbStore {
                 lsis,
                 stream_spec,
             );
-            self.tables.insert(name.clone(), table);
+            self.tables.insert(name, table);
         }
-        self.tables.get(&name).unwrap()
     }
 
-    pub fn delete_table(&mut self, name: &str) -> Option<Table> {
-        self.tables.remove(name)
+    pub fn delete_table(&self, name: &str) -> Option<Table> {
+        self.tables.remove(name).map(|(_, t)| t)
     }
 
-    pub fn get_table(&self, name: &str) -> Option<&Table> {
+    pub fn get_table(&self, name: &str) -> Option<Ref<'_, String, Table>> {
         self.tables.get(name)
     }
 
-    pub fn get_table_mut(&mut self, name: &str) -> Option<&mut Table> {
+    pub fn get_table_mut(&self, name: &str) -> Option<RefMut<'_, String, Table>> {
         self.tables.get_mut(name)
     }
 
-    pub fn list_table_names(&self) -> Vec<&str> {
-        self.tables.keys().map(|s| s.as_str()).collect()
+    pub fn list_table_names(&self) -> Vec<String> {
+        self.tables.iter().map(|r| r.key().clone()).collect()
+    }
+
+    /// Cheaply clone the Arc to allow callers to release the outer store lock
+    /// and then access tables via the inner DashMap's own per-shard locking.
+    pub fn tables_ref(&self) -> Arc<DashMap<String, Table>> {
+        Arc::clone(&self.tables)
     }
 }
 
@@ -516,32 +960,39 @@ impl DynamoDbStore {
 // Attribute value helpers
 // ---------------------------------------------------------------------------
 
-pub fn av_to_key_str(v: &Value) -> Option<String> {
-    if let Some(s) = v.get("S").and_then(|x| x.as_str()) {
-        return Some(s.to_string());
+/// Extract a string key representation from an `AttributeValue` for use as
+/// a partition-key or sort-key string in the items map.
+pub fn av_to_key_str(v: &AttributeValue) -> Option<String> {
+    match v {
+        AttributeValue::S(s) => Some(s.clone()),
+        AttributeValue::N(n) => Some(n.clone()),
+        AttributeValue::B(b) => Some(b.clone()),
+        AttributeValue::Bool(b) => Some(b.to_string()),
+        _ => None,
     }
-    if let Some(n) = v.get("N").and_then(|x| x.as_str()) {
-        return Some(n.to_string());
-    }
-    if let Some(b) = v.get("BOOL") {
-        return Some(b.to_string());
-    }
-    None
 }
 
-pub fn av_sort_key(v: &Value) -> Option<SortKeyValue> {
-    if let Some(s) = v.get("S").and_then(|x| x.as_str()) {
-        return Some(SortKeyValue::S(s.to_string()));
+/// Borrow a string key from an `AttributeValue` without cloning.
+/// Use on read paths (lookups) where an owned `String` is not required.
+pub fn av_to_key_str_ref(v: &AttributeValue) -> Option<&str> {
+    match v {
+        AttributeValue::S(s) => Some(s.as_str()),
+        AttributeValue::N(n) => Some(n.as_str()),
+        AttributeValue::B(b) => Some(b.as_str()),
+        _ => None,
     }
-    if let Some(n) = v.get("N").and_then(|x| x.as_str())
-        && let Ok(f) = n.parse::<f64>()
-    {
-        return Some(SortKeyValue::N(f));
-    }
-    None
 }
 
-pub fn av_compare(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+pub fn av_sort_key(v: &AttributeValue) -> Option<SortKeyValue<'_>> {
+    match v {
+        AttributeValue::S(s) => Some(SortKeyValue::S(s.as_str())),
+        AttributeValue::N(n) => Some(SortKeyValue::N(n.as_str())),
+        AttributeValue::B(b) => Some(SortKeyValue::S(b.as_str())),
+        _ => None,
+    }
+}
+
+pub fn av_compare(a: &AttributeValue, b: &AttributeValue) -> Option<std::cmp::Ordering> {
     let ak = av_sort_key(a)?;
     let bk = av_sort_key(b)?;
     ak.partial_cmp(&bk)
@@ -551,11 +1002,14 @@ pub fn av_compare(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 // Filter expression evaluation
 // ---------------------------------------------------------------------------
 
+/// `ExpressionAttributeValues` on the wire is `{":v": {"S": "foo"}}` — we
+/// parse the inner `{"S": "foo"}` objects into `AttributeValue` at the call
+/// site in `provider.rs`, so here we receive a typed map.
 pub fn evaluate_filter(
     item: &Item,
     expression: &str,
     attr_names: &HashMap<String, String>,
-    attr_values: &HashMap<String, Value>,
+    attr_values: &HashMap<String, AttributeValue>,
 ) -> bool {
     evaluate_expr(item, expression.trim(), attr_names, attr_values)
 }
@@ -564,7 +1018,7 @@ fn evaluate_expr(
     item: &Item,
     expr: &str,
     names: &HashMap<String, String>,
-    values: &HashMap<String, Value>,
+    values: &HashMap<String, AttributeValue>,
 ) -> bool {
     let expr = expr.trim();
 
@@ -594,8 +1048,16 @@ fn evaluate_expr(
             let attr_name = resolve_name(parts[0].trim(), names);
             let val = resolve_value(parts[1].trim(), values);
             if let Some(iv) = item.get(&attr_name) {
-                let is = iv.get("S").and_then(|s| s.as_str()).unwrap_or("");
-                let p = val.get("S").and_then(|s| s.as_str()).unwrap_or("");
+                let is = if let AttributeValue::S(s) = iv {
+                    s.as_str()
+                } else {
+                    ""
+                };
+                let p = if let AttributeValue::S(s) = val {
+                    s.as_str()
+                } else {
+                    ""
+                };
                 return is.starts_with(p);
             }
         }
@@ -608,8 +1070,16 @@ fn evaluate_expr(
             let attr_name = resolve_name(parts[0].trim(), names);
             let val = resolve_value(parts[1].trim(), values);
             if let Some(iv) = item.get(&attr_name) {
-                let is = iv.get("S").and_then(|s| s.as_str()).unwrap_or("");
-                let substr = val.get("S").and_then(|s| s.as_str()).unwrap_or("");
+                let is = if let AttributeValue::S(s) = iv {
+                    s.as_str()
+                } else {
+                    ""
+                };
+                let substr = if let AttributeValue::S(s) = val {
+                    s.as_str()
+                } else {
+                    ""
+                };
                 return is.contains(substr);
             }
         }
@@ -622,16 +1092,16 @@ fn evaluate_expr(
             let lv = resolve_item_value(item, lhs, names);
             let rv = resolve_value(rhs, values);
             return match *op {
-                "=" => av_compare(&lv, &rv) == Some(std::cmp::Ordering::Equal),
-                "<>" => av_compare(&lv, &rv) != Some(std::cmp::Ordering::Equal),
-                "<" => matches!(av_compare(&lv, &rv), Some(std::cmp::Ordering::Less)),
+                "=" => av_compare(lv, rv) == Some(std::cmp::Ordering::Equal),
+                "<>" => av_compare(lv, rv) != Some(std::cmp::Ordering::Equal),
+                "<" => matches!(av_compare(lv, rv), Some(std::cmp::Ordering::Less)),
                 "<=" => matches!(
-                    av_compare(&lv, &rv),
+                    av_compare(lv, rv),
                     Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
                 ),
-                ">" => matches!(av_compare(&lv, &rv), Some(std::cmp::Ordering::Greater)),
+                ">" => matches!(av_compare(lv, rv), Some(std::cmp::Ordering::Greater)),
                 ">=" => matches!(
-                    av_compare(&lv, &rv),
+                    av_compare(lv, rv),
                     Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
                 ),
                 _ => false,
@@ -662,13 +1132,21 @@ fn resolve_name(name: &str, names: &HashMap<String, String>) -> String {
     names.get(name).cloned().unwrap_or_else(|| name.to_string())
 }
 
-fn resolve_value(val: &str, values: &HashMap<String, Value>) -> Value {
-    values.get(val).cloned().unwrap_or(Value::Null)
+/// Returns a reference to the `AttributeValue` in `values`, or `&AttributeValue::Null`
+/// via a thread-local sentinel when the key is not found.
+fn resolve_value<'a>(val: &str, values: &'a HashMap<String, AttributeValue>) -> &'a AttributeValue {
+    static NULL_AV: AttributeValue = AttributeValue::Null;
+    values.get(val).unwrap_or(&NULL_AV)
 }
 
-fn resolve_item_value(item: &Item, attr: &str, names: &HashMap<String, String>) -> Value {
+fn resolve_item_value<'a>(
+    item: &'a Item,
+    attr: &str,
+    names: &HashMap<String, String>,
+) -> &'a AttributeValue {
+    static NULL_AV: AttributeValue = AttributeValue::Null;
     let name = resolve_name(attr, names);
-    item.get(&name).cloned().unwrap_or(Value::Null)
+    item.get(&name).unwrap_or(&NULL_AV)
 }
 
 // ---------------------------------------------------------------------------
@@ -679,7 +1157,7 @@ pub fn apply_update_expression(
     item: &mut Item,
     expression: &str,
     attr_names: &HashMap<String, String>,
-    attr_values: &HashMap<String, Value>,
+    attr_values: &HashMap<String, AttributeValue>,
 ) {
     let mut rest = expression.trim();
     while !rest.is_empty() {
@@ -722,14 +1200,14 @@ fn apply_set_clause(
     item: &mut Item,
     clause: &str,
     names: &HashMap<String, String>,
-    values: &HashMap<String, Value>,
+    values: &HashMap<String, AttributeValue>,
 ) {
     for assignment in clause.split(',') {
         let assignment = assignment.trim();
         if let Some(eq_pos) = assignment.find('=') {
             let lhs = resolve_name(assignment[..eq_pos].trim(), names);
             let rhs = assignment[eq_pos + 1..].trim();
-            let value = resolve_value(rhs, values);
+            let value = resolve_value(rhs, values).clone();
             item.insert(lhs, value);
         }
     }
@@ -746,7 +1224,7 @@ fn apply_add_clause(
     item: &mut Item,
     clause: &str,
     names: &HashMap<String, String>,
-    values: &HashMap<String, Value>,
+    values: &HashMap<String, AttributeValue>,
 ) {
     for part in clause.split(',') {
         let tokens: Vec<&str> = part.trim().splitn(2, ' ').collect();
@@ -754,20 +1232,44 @@ fn apply_add_clause(
             let name = resolve_name(tokens[0].trim(), names);
             let delta = resolve_value(tokens[1].trim(), values);
             if let Some(existing) = item.get_mut(&name) {
-                if let (Some(cur), Some(d)) = (
-                    existing
-                        .get("N")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.parse::<f64>().ok()),
-                    delta
-                        .get("N")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.parse::<f64>().ok()),
-                ) {
-                    *existing = serde_json::json!({"N": (cur + d).to_string()});
+                match (existing, delta) {
+                    // Numeric addition — use Decimal to preserve full integer
+                    // precision for values > 2^53 (f64 would lose digits).
+                    (AttributeValue::N(cur_s), AttributeValue::N(d_s)) => {
+                        if let (Ok(cur), Ok(d)) = (Decimal::from_str(cur_s), Decimal::from_str(d_s))
+                        {
+                            *cur_s = (cur + d).normalize().to_string();
+                        }
+                    }
+                    // Set union — SS
+                    (AttributeValue::Ss(cur), AttributeValue::Ss(delta_set)) => {
+                        for v in delta_set {
+                            if !cur.contains(v) {
+                                cur.push(v.clone());
+                            }
+                        }
+                    }
+                    // Set union — NS
+                    (AttributeValue::Ns(cur), AttributeValue::Ns(delta_set)) => {
+                        for v in delta_set {
+                            if !cur.contains(v) {
+                                cur.push(v.clone());
+                            }
+                        }
+                    }
+                    // Set union — BS
+                    (AttributeValue::Bs(cur), AttributeValue::Bs(delta_set)) => {
+                        for v in delta_set {
+                            if !cur.contains(v) {
+                                cur.push(v.clone());
+                            }
+                        }
+                    }
+                    _ => {} // type mismatch — no-op, matching real DynamoDB behaviour
                 }
             } else {
-                item.insert(name, delta);
+                // Attribute absent — insert the delta value directly.
+                item.insert(name, delta.clone());
             }
         }
     }
@@ -777,12 +1279,44 @@ fn apply_delete_clause(
     item: &mut Item,
     clause: &str,
     names: &HashMap<String, String>,
-    _values: &HashMap<String, Value>,
+    values: &HashMap<String, AttributeValue>,
 ) {
     for part in clause.split(',') {
         let tokens: Vec<&str> = part.trim().splitn(2, ' ').collect();
-        if !tokens.is_empty() {
-            let name = resolve_name(tokens[0].trim(), names);
+        if tokens.is_empty() {
+            continue;
+        }
+        let name = resolve_name(tokens[0].trim(), names);
+        if tokens.len() == 2 {
+            // Second token is a value reference — perform set element removal.
+            let delta = resolve_value(tokens[1].trim(), values);
+            if let Some(existing) = item.get_mut(&name) {
+                match (existing, delta) {
+                    (AttributeValue::Ss(cur), AttributeValue::Ss(to_remove)) => {
+                        cur.retain(|v| !to_remove.contains(v));
+                        // DynamoDB removes the attribute when the set becomes empty.
+                    }
+                    (AttributeValue::Ns(cur), AttributeValue::Ns(to_remove)) => {
+                        cur.retain(|v| !to_remove.contains(v));
+                    }
+                    (AttributeValue::Bs(cur), AttributeValue::Bs(to_remove)) => {
+                        cur.retain(|v| !to_remove.contains(v));
+                    }
+                    _ => {} // type mismatch — no-op
+                }
+                // Remove the attribute if the set is now empty.
+                let is_empty = match item.get(&name) {
+                    Some(AttributeValue::Ss(v)) => v.is_empty(),
+                    Some(AttributeValue::Ns(v)) => v.is_empty(),
+                    Some(AttributeValue::Bs(v)) => v.is_empty(),
+                    _ => false,
+                };
+                if is_empty {
+                    item.remove(&name);
+                }
+            }
+        } else {
+            // No value token — remove the whole attribute (legacy / non-set usage).
             item.remove(&name);
         }
     }
@@ -796,7 +1330,7 @@ pub fn check_condition(
     item: Option<&Item>,
     condition: &str,
     attr_names: &HashMap<String, String>,
-    attr_values: &HashMap<String, Value>,
+    attr_values: &HashMap<String, AttributeValue>,
 ) -> Result<(), String> {
     let empty = HashMap::new();
     let item_ref = item.unwrap_or(&empty);
