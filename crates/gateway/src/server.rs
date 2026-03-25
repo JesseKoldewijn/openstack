@@ -20,11 +20,12 @@ use openstack_aws_protocol::{
 };
 use openstack_config::Config;
 use openstack_service_framework::traits::ResponseBody;
-use openstack_service_framework::{ServicePluginManager, SpooledBody};
+use openstack_service_framework::{BodyReader, ServicePluginManager, SpooledBody};
 use openstack_state::StateManager;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
+use tokio_util::io::StreamReader;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tracing::{debug, error, info, warn};
@@ -591,41 +592,41 @@ async fn handle_request(
         None
     };
 
-    // Stream the request body into a SpooledBody
-    let threshold = state.config.body_spool_threshold_bytes;
-    let mut spooled = SpooledBody::new(threshold);
-    let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
-    if let Err(e) = spooled.write_from_stream(stream).await {
-        if e.kind() == io::ErrorKind::InvalidData {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "guided execution payload exceeds configured limit",
-            )
-                .into_response();
-        }
-        error!("Failed to read request body: {}", e);
-        return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
-    }
-
-    // Materialize raw_body as Bytes for protocol parsing.
-    // For S3 object-body requests (PUT/POST to a bucket+key path) the body
-    // is binary object data — never XML or JSON — so we skip the copy and
-    // let the S3 provider stream it directly from the SpooledBody instead.
-    //
-    // For all other services we consume the SpooledBody via `into_bytes()`,
-    // replacing it with an empty sentinel.  No non-S3 provider ever reads
-    // `spooled_body`, so this avoids keeping two copies of the body in
-    // memory (the materialised `Bytes` and the original spool buffer).
+    // Determine whether this is an S3 object-body request BEFORE reading the
+    // body.  For S3 PutObject / UploadPart we bypass the intermediate
+    // SpooledBody disk spool entirely: the raw axum body stream is wrapped in
+    // a `StreamReader` and passed directly to the S3 provider so it can write
+    // object data to persistent storage in a single pass (eliminates the
+    // intermediate disk write that SpooledBody would have caused).
     let is_s3_body = is_s3_object_body_request(&method, &path, &headers, &query_params);
-    let body_bytes = if is_s3_body {
-        // Keep the body in the SpooledBody; pass an empty slice to parsers.
-        Bytes::new()
+
+    let (body_bytes, body_reader): (Bytes, Option<BodyReader>) = if is_s3_body {
+        // S3 object-body path: wrap the axum body as an AsyncRead and pass it
+        // through to the S3 provider.  The parsers only need an empty slice
+        // (S3 PutObject has no XML/JSON protocol body to parse).
+        let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
+        let reader: BodyReader = Box::new(StreamReader::new(stream));
+        (Bytes::new(), Some(reader))
     } else {
-        // Swap the data-bearing spool for an empty sentinel and consume it,
-        // so only one copy of the body lives in memory at a time.
-        let owned = std::mem::replace(&mut spooled, SpooledBody::new(0));
-        match owned.into_bytes() {
-            Ok(b) => b,
+        // Non-S3 path (or S3 sub-resource operations like CompleteMultipart):
+        // spool the body into memory/disk, then materialise as Bytes for
+        // protocol parsing.  No provider other than S3 reads `body_reader`.
+        let threshold = state.config.body_spool_threshold_bytes;
+        let mut spooled = SpooledBody::new(threshold);
+        let stream = BodyStreamAdapter::new(req.into_body(), guided_limit);
+        if let Err(e) = spooled.write_from_stream(stream).await {
+            if e.kind() == io::ErrorKind::InvalidData {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "guided execution payload exceeds configured limit",
+                )
+                    .into_response();
+            }
+            error!("Failed to read request body: {}", e);
+            return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+        }
+        match spooled.into_bytes() {
+            Ok(b) => (b, None),
             Err(e) => {
                 error!("Failed to materialize request body: {}", e);
                 return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
@@ -649,9 +650,7 @@ async fn handle_request(
         &body_bytes,
         &request_id,
         &state.config,
-        // Only S3 object-body requests need spooled_body; for all others the
-        // body was already consumed into body_bytes above.
-        if is_s3_body { Some(spooled) } else { None },
+        body_reader,
     ) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
@@ -850,7 +849,7 @@ fn build_request_context(
     body: &Bytes,
     request_id: &str,
     config: &Config,
-    spooled_body: Option<SpooledBody>,
+    body_reader: Option<BodyReader>,
 ) -> Result<RequestContext, Response> {
     // Parse SigV4 Authorization or inject default.
     // SigV4Auth borrows from the auth header string — no allocations here.
@@ -913,7 +912,8 @@ fn build_request_context(
         method: method.to_string(),
         query_params,
         request_id: request_id.to_string(),
-        spooled_body,
+        spooled_body: None,
+        body_reader,
     })
 }
 

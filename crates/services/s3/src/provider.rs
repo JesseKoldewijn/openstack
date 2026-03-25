@@ -431,9 +431,62 @@ async fn handle_put_object_async(
         "null".to_string()
     };
 
-    // Get body data — prefer spooled_body (streaming, no full copy in memory),
-    // fall back to raw_body for unit-test contexts where spooled_body is None.
-    let (etag, size, object_data) = if let Some(mutex) = ctx.spooled_body.as_ref() {
+    // Get body data — prefer body_reader (stream-through, single disk write),
+    // then spooled_body (streaming, no full copy in memory),
+    // fall back to raw_body for unit-test contexts where both are None.
+    let (etag, size, object_data) = if let Some(reader_mutex) = ctx.body_reader.as_ref() {
+        // Stream-through path: the gateway bypassed SpooledBody so we receive
+        // the raw network stream.  Read it directly into memory or disk,
+        // computing the MD5 hash on the fly with HashingReader.
+        let content_length: Option<u64> = ctx
+            .headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
+
+        let mut reader_guard = reader_mutex.lock().await;
+        let threshold = inline_object_threshold();
+
+        if content_length.map_or(false, |len| len <= threshold) {
+            // Small object: read entirely into memory.
+            let cap = content_length.unwrap_or(64 * 1024) as usize;
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
+            let mut body_bytes = Vec::with_capacity(cap);
+            if let Err(e) =
+                tokio::io::AsyncReadExt::read_to_end(&mut hashing_reader, &mut body_bytes).await
+            {
+                warn!(error = %e, "Failed to read body_reader (small path)");
+                return s3_error("InternalError", "Failed to read request body", 500);
+            }
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            let size = body_bytes.len() as u64;
+            (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
+        } else {
+            // Large object (or unknown size): stream directly to disk.
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
+            let (file_path, bytes_written) = match file_store
+                .write_object_from_reader(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &key,
+                    &version_id,
+                    &mut hashing_reader,
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(error = %e, "Failed to stream body_reader to filesystem");
+                    return s3_error("InternalError", "Failed to store object", 500);
+                }
+            };
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+        }
+    } else if let Some(mutex) = ctx.spooled_body.as_ref() {
         // Take the SpooledBody out of the Mutex so we can consume it into a reader.
         // The guard must be dropped before any .await, so use a block scope.
         let (spooled, spooled_len) = {
@@ -1481,8 +1534,57 @@ async fn handle_upload_part_async(
         }
     };
 
-    // Get part data — prefer spooled_body (streaming), fall back to raw_body.
-    let (etag, size, part_data) = if let Some(mutex) = ctx.spooled_body.as_ref() {
+    // Get part data — prefer body_reader (stream-through, single disk write),
+    // then spooled_body (streaming), fall back to raw_body for tests.
+    let (etag, size, part_data) = if let Some(reader_mutex) = ctx.body_reader.as_ref() {
+        let content_length: Option<u64> = ctx
+            .headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
+
+        let mut reader_guard = reader_mutex.lock().await;
+        let threshold = inline_object_threshold();
+
+        if content_length.map_or(false, |len| len <= threshold) {
+            let cap = content_length.unwrap_or(64 * 1024) as usize;
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
+            let mut data = Vec::with_capacity(cap);
+            if let Err(e) =
+                tokio::io::AsyncReadExt::read_to_end(&mut hashing_reader, &mut data).await
+            {
+                warn!(error = %e, "Failed to read body_reader for upload part (small path)");
+                return s3_error("InternalError", "Failed to read request body", 500);
+            }
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            let size = data.len() as u64;
+            (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
+        } else {
+            let part_version_id = format!("part-{}", part_number);
+            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
+            let (file_path, bytes_written) = match file_store
+                .write_object_from_reader(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &format!("__multipart/{upload_id}/{key}"),
+                    &part_version_id,
+                    &mut hashing_reader,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!(error = %e, "Failed to stream body_reader upload part to filesystem");
+                    return s3_error("InternalError", "Failed to store part", 500);
+                }
+            };
+            let digest = hashing_reader.finalize();
+            let etag = format!("\"{}\"", hex::encode(digest));
+            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+        }
+    } else if let Some(mutex) = ctx.spooled_body.as_ref() {
         // Take the SpooledBody out of the Mutex so we can consume it into a reader.
         // The guard must be dropped before any .await, so use a block scope.
         let (spooled, spooled_len) = {

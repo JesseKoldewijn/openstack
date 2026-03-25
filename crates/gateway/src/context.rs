@@ -6,7 +6,6 @@ use bytes::Bytes;
 use openstack_service_framework::SpooledBody;
 
 /// Full context for an in-flight AWS request as it passes through the handler chain.
-#[derive(Debug)]
 pub struct RequestContext {
     /// Target AWS service (e.g., "s3", "sqs")
     pub service: String,
@@ -24,7 +23,7 @@ pub struct RequestContext {
     pub params: serde_json::Value,
     /// Raw request body bytes.
     ///
-    /// `None` for S3 PutObject / UploadPart (body lives in `spooled_body`).
+    /// `None` for S3 PutObject / UploadPart (body lives in `body_reader`).
     /// `Some(bytes)` for all other requests.
     pub raw_body: Option<Bytes>,
     /// Request headers
@@ -39,6 +38,12 @@ pub struct RequestContext {
     pub request_id: String,
     /// Spooled request body (for large payloads, may be on disk)
     pub spooled_body: Option<SpooledBody>,
+    /// Streaming body reader for S3 object-body requests.
+    ///
+    /// When set, the gateway has bypassed the SpooledBody spool so that
+    /// the S3 provider can read object data directly from the network
+    /// and write it to disk in a single pass (no intermediate disk write).
+    pub body_reader: Option<openstack_service_framework::BodyReader>,
 }
 
 impl RequestContext {
@@ -48,7 +53,7 @@ impl RequestContext {
     }
 
     /// Convert to the service-framework `RequestContext`, consuming self
-    /// (because `SpooledBody` is not `Clone`).
+    /// (because `SpooledBody` and `BodyReader` are not `Clone`).
     pub fn to_service_request_context(self) -> openstack_service_framework::traits::RequestContext {
         openstack_service_framework::traits::RequestContext {
             service: self.service,
@@ -63,6 +68,29 @@ impl RequestContext {
             query_params: self.query_params,
             request_id: self.request_id,
             spooled_body: self.spooled_body.map(Mutex::new),
+            body_reader: self.body_reader.map(tokio::sync::Mutex::new),
         }
+    }
+}
+
+impl std::fmt::Debug for RequestContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestContext")
+            .field("service", &self.service)
+            .field("operation", &self.operation)
+            .field("region", &self.region)
+            .field("account_id", &self.account_id)
+            .field("path", &self.path)
+            .field("method", &self.method)
+            .field("request_id", &self.request_id)
+            .field(
+                "spooled_body",
+                &self.spooled_body.as_ref().map(|_| "<SpooledBody>"),
+            )
+            .field(
+                "body_reader",
+                &self.body_reader.as_ref().map(|_| "<BodyReader>"),
+            )
+            .finish()
     }
 }

@@ -23,6 +23,7 @@ fn make_ctx(operation: &str, body: Value) -> RequestContext {
         query_params: HashMap::new(),
         request_id: String::new(),
         spooled_body: None,
+        body_reader: None,
     }
 }
 
