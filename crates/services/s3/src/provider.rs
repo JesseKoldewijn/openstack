@@ -447,7 +447,7 @@ async fn handle_put_object_async(
         let mut reader_guard = reader_mutex.lock().await;
         let threshold = inline_object_threshold();
 
-        if content_length.map_or(false, |len| len <= threshold) {
+        if content_length.is_some_and(|len| len <= threshold) {
             // Small object: read entirely into memory.
             let cap = content_length.unwrap_or(64 * 1024) as usize;
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
@@ -1556,7 +1556,7 @@ async fn handle_upload_part_async(
         let mut reader_guard = reader_mutex.lock().await;
         let threshold = inline_object_threshold();
 
-        if content_length.map_or(false, |len| len <= threshold) {
+        if content_length.is_some_and(|len| len <= threshold) {
             let cap = content_length.unwrap_or(64 * 1024) as usize;
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
             let mut data = Vec::with_capacity(cap);
