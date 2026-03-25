@@ -591,8 +591,8 @@ async fn handle_put_object_async(
     let version = crate::store::ObjectVersion {
         version_id: version_id.clone(),
         last_modified: chrono::Utc::now(),
-        etag: etag.clone(),
-        content_type,
+        etag: Arc::from(etag.as_str()),
+        content_type: Arc::from(content_type.as_str()),
         content_encoding: None,
         content_disposition: None,
         cache_control: None,
@@ -715,7 +715,7 @@ async fn handle_get_object_async(
             metadata,
         )) => {
             let mut headers = vec![
-                ("ETag".to_string(), etag),
+                ("ETag".to_string(), String::from(&*etag)),
                 (
                     "Last-Modified".to_string(),
                     last_modified
@@ -771,7 +771,7 @@ async fn handle_get_object_async(
             DispatchResponse {
                 status_code: 200,
                 body,
-                content_type: Cow::Owned(content_type),
+                content_type: Cow::Owned(String::from(&*content_type)),
                 headers,
             }
         }
@@ -793,7 +793,7 @@ fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse
         None => s3_error("NoSuchKey", "The specified key does not exist", 404),
         Some(v) => {
             let mut headers = vec![
-                ("ETag".to_string(), v.etag.clone()),
+                ("ETag".to_string(), String::from(&*v.etag)),
                 (
                     "Last-Modified".to_string(),
                     v.last_modified
@@ -811,7 +811,7 @@ fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse
             DispatchResponse {
                 status_code: 200,
                 body: ResponseBody::Buffered(Bytes::new()),
-                content_type: Cow::Owned(v.content_type.clone()),
+                content_type: Cow::Owned(String::from(&*v.content_type)),
                 headers,
             }
         }
@@ -1192,7 +1192,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
 
     // Single-pass: collect (key, last_modified, etag, size) for all matching objects.
     // list_objects() returns in sorted key order (BTreeMap), so no sort needed.
-    type ObjMeta = (String, chrono::DateTime<chrono::Utc>, String, u64);
+    type ObjMeta = (String, chrono::DateTime<chrono::Utc>, Arc<str>, u64);
     let mut all_items: Vec<ObjMeta> = store
         .list_objects(&bucket)
         .into_iter()
@@ -1201,7 +1201,12 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
             if !obj.key.starts_with(&prefix) {
                 return None;
             }
-            Some((obj.key.clone(), v.last_modified, v.etag.clone(), v.size))
+            Some((
+                obj.key.clone(),
+                v.last_modified,
+                Arc::clone(&v.etag),
+                v.size,
+            ))
         })
         .collect();
 
@@ -1344,7 +1349,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
 
     // Single-pass: collect (key, last_modified, etag, size) for all matching objects.
     // list_objects() returns in sorted key order (BTreeMap), so no sort needed.
-    type ObjMeta1 = (String, chrono::DateTime<chrono::Utc>, String, u64);
+    type ObjMeta1 = (String, chrono::DateTime<chrono::Utc>, Arc<str>, u64);
     let mut all_items: Vec<ObjMeta1> = store
         .list_objects(&bucket)
         .into_iter()
@@ -1353,7 +1358,12 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
             if !obj.key.starts_with(&prefix) {
                 return None;
             }
-            Some((obj.key.clone(), v.last_modified, v.etag.clone(), v.size))
+            Some((
+                obj.key.clone(),
+                v.last_modified,
+                Arc::clone(&v.etag),
+                v.size,
+            ))
         })
         .collect();
     if !marker.is_empty() {
@@ -1898,8 +1908,8 @@ async fn handle_complete_multipart_upload_async(
     let version = crate::store::ObjectVersion {
         version_id: version_id.clone(),
         last_modified: chrono::Utc::now(),
-        etag: etag.clone(),
-        content_type: content_type.clone(),
+        etag: Arc::from(etag.as_str()),
+        content_type: Arc::from(content_type.as_str()),
         content_encoding: None,
         content_disposition: None,
         cache_control: None,
