@@ -1,1 +1,26 @@
-[]
+[
+  {
+    "id": "kd-ecr-lifecycle-localstack-not-implemented",
+    "service": "ecr",
+    "scenario_id": "ecr-lifecycle",
+    "step_id": "*",
+    "path": "*",
+    "rationale": "LocalStack free tier does not implement ECR (pro feature only); openstack provides full ECR support",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-03-28",
+    "expires_on": "2027-03-28"
+  },
+  {
+    "id": "kd-events-lifecycle-localstack-not-enabled",
+    "service": "events",
+    "scenario_id": "events-lifecycle",
+    "step_id": "*",
+    "path": "*",
+    "rationale": "LocalStack free tier does not enable EventBridge in embedded mode; openstack provides full EventBridge support",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-03-28",
+    "expires_on": "2027-03-28"
+  }
+]
