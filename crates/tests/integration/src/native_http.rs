@@ -1189,6 +1189,11 @@ fn translate_events(op: &str, command: &[String]) -> Result<NativeHttpPlan, Tran
                 .take_while(|s| !s.starts_with('-'))
                 .map(|s| serde_json::Value::String(s.clone()))
                 .collect();
+            if ids.is_empty() {
+                return Err(TranslationOutcome::Invalid(
+                    "remove-targets requires at least one ID via --ids".to_string(),
+                ));
+            }
             let mut body = json!({
                 "Rule": required_flag(command, "--rule")?,
                 "Ids": ids,
