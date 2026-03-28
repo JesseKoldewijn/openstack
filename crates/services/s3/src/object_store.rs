@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashSet;
 use sha2::{Digest, Sha256};
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
 use xxhash_rust::xxh3::xxh3_128;
@@ -212,6 +213,20 @@ impl ObjectFileStore {
 
     /// Write object data from a reader (async), streaming to disk.
     ///
+    /// Uses a single [`tokio::task::spawn_blocking`] call for all disk I/O
+    /// regardless of object size, bridged via an `mpsc` channel.  This
+    /// eliminates the per-write blocking-pool round-trips that
+    /// `tokio::fs::File` would otherwise incur and reduces blocking-thread
+    /// saturation under high concurrency.
+    ///
+    /// Data flows:
+    /// - **Async side** (tokio worker): reads 2 MiB chunks from `reader` and
+    ///   sends them through a bounded channel (capacity 4 × 2 MiB = 8 MiB
+    ///   max in-flight per request).
+    /// - **Blocking side** (single `spawn_blocking`): drains the channel,
+    ///   writes each chunk through a `BufWriter<std::fs::File>`, then flushes
+    ///   and returns the byte count.
+    ///
     /// Returns `(final_path, bytes_written)`.
     pub async fn write_object_from_reader<R>(
         &self,
@@ -232,19 +247,75 @@ impl ObjectFileStore {
         let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
-        let file = fs::File::create(&tmp_path).await?;
+        // Bounded channel: 4 slots × 2 MiB = 8 MiB max in-flight per request.
+        // The backpressure keeps memory bounded while the blocking writer drains.
+        const CHUNK: usize = 2 * 1024 * 1024; // 2 MiB read/write chunk
+        const CHAN_DEPTH: usize = 4;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CHAN_DEPTH);
 
-        // Read the network stream in 512 KiB chunks; batch writes through a
-        // 2 MiB BufWriter so that each tokio-fs blocking-pool dispatch covers
-        // 2 MiB instead of 512 KiB — reducing blocking-thread-pool pressure
-        // by ~4× under high concurrency.
-        const READ_BUF: usize = 512 * 1024;
-        const WRITE_BUF: usize = 2 * 1024 * 1024;
-        let mut buf_writer = tokio::io::BufWriter::with_capacity(WRITE_BUF, file);
-        let mut buf_reader = tokio::io::BufReader::with_capacity(READ_BUF, reader);
-        let bytes_written = tokio::io::copy_buf(&mut buf_reader, &mut buf_writer).await?;
-        buf_writer.flush().await?;
-        // buf_writer (and its inner file) are dropped here, closing the fd.
+        // Spawn the single blocking task that owns all disk I/O for this object.
+        let tmp_path_blocking = tmp_path.clone();
+        let write_handle = tokio::task::spawn_blocking(move || {
+            use std::io::Write as _;
+
+            let file = std::fs::File::create(&tmp_path_blocking)?;
+            // BufWriter batches the channel chunks into larger OS write(2) calls.
+            let mut buf_writer = std::io::BufWriter::with_capacity(CHUNK, file);
+            let mut bytes_written = 0u64;
+
+            // Block on the sync side of the channel.  `recv` returns None when
+            // the sender is dropped (async side finished or errored out).
+            let mut rx = rx;
+            while let Some(chunk) = rx.blocking_recv() {
+                buf_writer.write_all(&chunk)?;
+                bytes_written += chunk.len() as u64;
+            }
+
+            buf_writer.flush()?;
+            // Drop buf_writer (closes the fd) before rename.
+            drop(buf_writer);
+
+            io::Result::Ok(bytes_written)
+        });
+
+        // Async read loop: read CHUNK-sized buffers from the network stream
+        // and forward them to the blocking writer via the channel.
+        let mut buf = vec![0u8; CHUNK];
+        let mut send_error: Option<io::Error> = None;
+        loop {
+            let n = match reader.read(&mut buf).await {
+                Ok(0) => break, // EOF
+                Ok(n) => n,
+                Err(e) => {
+                    send_error = Some(e);
+                    break;
+                }
+            };
+            // Send a clone of the filled slice; drop tx on error so the
+            // blocking task exits cleanly.
+            if tx.send(buf[..n].to_vec()).await.is_err() {
+                // Receiver dropped — blocking task must have failed.
+                // We'll surface its error below via write_handle.
+                break;
+            }
+        }
+
+        // Dropping tx signals EOF to the blocking side.
+        drop(tx);
+
+        // Wait for the blocking task and collect its result.
+        let bytes_written = match write_handle.await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e),
+            Err(join_err) => {
+                return Err(io::Error::other(join_err));
+            }
+        };
+
+        // Surface any async-side read error after the blocking task has exited.
+        if let Some(e) = send_error {
+            return Err(e);
+        }
 
         fs::rename(&tmp_path, &final_path).await?;
 
