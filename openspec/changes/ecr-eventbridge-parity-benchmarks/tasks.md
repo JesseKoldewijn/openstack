@@ -30,6 +30,6 @@
 
 - [x] 5.1 Run `cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke` and confirm `ecr-lifecycle` passes for both targets (or surface any real parity mismatches)
 - [x] 5.2 Run the same parity suite and confirm `events-lifecycle` passes for both targets (or surface any real parity mismatches)
-- [ ] 5.3 Run `./tests/bench/bench_services.sh --services ecr` and confirm the report includes `create_repository`, `describe_repositories`, `list_images`, and `batch_get_image` operations with non-zero metrics for all active targets
-- [ ] 5.4 Run `./tests/bench/bench_services.sh --services eventbridge` and confirm the report includes `put_rule`, `list_event_buses`, `list_rules`, `describe_rule`, and `list_targets_by_rule` operations with non-zero metrics for all active targets
+- [x] 5.3 Run `./tests/bench/bench_services.sh --services ecr` and confirm the report includes `create_repository`, `describe_repositories`, `list_images`, and `batch_get_image` operations with non-zero metrics for all active targets
+- [x] 5.4 Run `./tests/bench/bench_services.sh --services eventbridge` and confirm the report includes `put_rule`, `list_event_buses`, `list_rules`, `describe_rule`, and `list_targets_by_rule` operations with non-zero metrics for all active targets
 - [x] 5.5 Confirm the existing ECR and EventBridge probe scenarios (`ecr-probe`, `events-probe`) still pass in the all-services-smoke run
