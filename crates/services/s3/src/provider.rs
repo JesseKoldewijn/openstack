@@ -473,6 +473,7 @@ async fn handle_put_object_async(
                     &key,
                     &version_id,
                     &mut hashing_reader,
+                    content_length,
                 )
                 .await
             {
@@ -660,7 +661,7 @@ async fn handle_put_object_async(
     }
 }
 
-/// Async GetObject — streams file-backed objects via a channel-bridge.
+/// Async GetObject — streams file-backed objects via ReaderStream.
 async fn handle_get_object_async(
     store_bundle: &AccountRegionBundle<S3Store>,
     ctx: &RequestContext,
@@ -1207,15 +1208,24 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     let skip_after = continuation_token.as_deref().or(start_after.as_deref());
 
     // Use range-based listing: starts from max(prefix, skip_after) and exits
-    // early once enough matching objects are found.  The delimiter case may
-    // collapse many keys into fewer common-prefix slots, so we allow a
-    // larger scan window; for the plain case max_keys + 1 detects truncation.
+    // early once enough matching objects are found.
+    //
+    // Without a delimiter every raw key maps 1-to-1 to an output entry, so
+    // `max_keys + 1` raw keys is the exact scan window needed (the +1 detects
+    // truncation).
+    //
+    // With a delimiter, many raw keys may collapse into a single CommonPrefix
+    // entry.  A heuristic multiplier can cause `list_objects_paged()` to stop
+    // scanning before all keys under the last common prefix have been visited,
+    // which makes the page look non-truncated even when keys remain.  For
+    // correctness we must scan all prefix-matching keys in the delimiter case;
+    // `take_while(starts_with prefix)` in `list_objects_paged()` already
+    // constrains the scan to the relevant key range, so passing `usize::MAX`
+    // is safe and O(matching keys).
     let scan_limit = if delimiter.is_empty() {
         max_keys + 1
     } else {
-        // Upper bound: assume at most 4× max_keys raw keys contribute to
-        // max_keys distinct common-prefix or content results.
-        (max_keys * 4).max(1001)
+        usize::MAX
     };
 
     // Single-pass: collect (key, last_modified, etag, size) for matching objects.
@@ -1597,6 +1607,7 @@ async fn handle_upload_part_async(
                     &format!("__multipart/{upload_id}/{key}"),
                     &part_version_id,
                     &mut hashing_reader,
+                    content_length,
                 )
                 .await
             {
@@ -1647,6 +1658,7 @@ async fn handle_upload_part_async(
                     &format!("__multipart/{upload_id}/{key}"),
                     &part_version_id,
                     &mut hashing_reader,
+                    Some(spooled_len),
                 )
                 .await
             {

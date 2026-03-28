@@ -213,20 +213,24 @@ impl ObjectFileStore {
 
     /// Write object data from a reader (async), streaming to disk.
     ///
-    /// Uses a single [`tokio::task::spawn_blocking`] call for all disk I/O
-    /// regardless of object size, bridged via an `mpsc` channel.  This
-    /// eliminates the per-write blocking-pool round-trips that
-    /// `tokio::fs::File` would otherwise incur and reduces blocking-thread
-    /// saturation under high concurrency.
+    /// Uses a **size-based strategy** to balance throughput vs. overhead:
     ///
-    /// Data flows:
-    /// - **Async side** (tokio worker): accumulates network reads into 1 MiB
-    ///   buffers (loopback reads are typically 8–64 KiB each), then transfers
-    ///   each full buffer ownership into a bounded channel (capacity 2, so at
-    ///   most 2 MiB in flight per request).  Ownership transfer avoids copies.
-    /// - **Blocking side** (single `spawn_blocking`): drains the channel,
-    ///   writes each chunk through a `BufWriter<std::fs::File>`, then flushes
-    ///   and returns the byte count.
+    /// - **Small/medium objects (`< 50 MiB`, or unknown size):** Writes via
+    ///   `tokio::io::copy` into a 2 MiB `BufWriter<tokio::fs::File>`.  This
+    ///   is the simplest path with minimal allocations — ideal for the common
+    ///   case where blocking-pool dispatch count is low (≲ 25 dispatches for
+    ///   a 50 MiB object).
+    ///
+    /// - **Large objects (`≥ 50 MiB`):** Uses a single
+    ///   [`tokio::task::spawn_blocking`] call bridged via a bounded `mpsc`
+    ///   channel (capacity 2 × 1 MiB = 2 MiB in-flight).  The async side
+    ///   accumulates 1 MiB read buffers and transfers them to the blocking
+    ///   side zero-copy.  This eliminates ~50+ blocking-pool round-trips
+    ///   for very large objects and reduces saturation under concurrency.
+    ///
+    /// The `content_length` hint selects the strategy.  When `None` (unknown
+    /// size) the simple `copy` path is used — most S3 PUTs include
+    /// `Content-Length` so unknown-size requests are rare.
     ///
     /// Returns `(final_path, bytes_written)`.
     pub async fn write_object_from_reader<R>(
@@ -237,10 +241,14 @@ impl ObjectFileStore {
         key: &str,
         version_id: &str,
         reader: &mut R,
+        content_length: Option<u64>,
     ) -> io::Result<(PathBuf, u64)>
     where
         R: tokio::io::AsyncRead + Unpin,
     {
+        /// Objects at or above this threshold use the channel-bridge path.
+        const LARGE_THRESHOLD: u64 = 50 * 1024 * 1024; // 50 MiB
+
         let dir = self.object_dir(account_id, region, bucket, key);
         self.ensure_dir_exists(&dir).await?;
 
@@ -248,55 +256,73 @@ impl ObjectFileStore {
         let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
-        // Bounded channel: 2 slots × 1 MiB = 2 MiB max in-flight per request.
-        // The backpressure keeps memory bounded while the blocking writer drains.
-        const CHUNK: usize = 1024 * 1024; // 1 MiB read/write chunk
+        let use_channel = content_length.is_some_and(|len| len >= LARGE_THRESHOLD);
+
+        let bytes_written = if use_channel {
+            self.write_via_channel(reader, &tmp_path).await?
+        } else {
+            write_via_copy(reader, &tmp_path).await?
+        };
+
+        fs::rename(&tmp_path, &final_path).await?;
+
+        debug!(
+            path = %final_path.display(),
+            size = bytes_written,
+            strategy = if use_channel { "channel" } else { "copy" },
+            "Object written to filesystem (streamed)"
+        );
+
+        Ok((final_path, bytes_written))
+    }
+
+    /// Channel-bridge write path for large objects (≥ 50 MiB).
+    ///
+    /// A single `spawn_blocking` task owns all disk I/O.  The async caller
+    /// accumulates 1 MiB read buffers and transfers ownership via a bounded
+    /// mpsc channel (depth 2 → at most 2 MiB in-flight per request).
+    ///
+    /// Includes temp-file cleanup and a `warn!` log on all error paths so
+    /// orphaned `.tmp` files are surfaced without requiring a separate scan.
+    async fn write_via_channel<R>(&self, reader: &mut R, tmp_path: &Path) -> io::Result<u64>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        const CHUNK: usize = 1024 * 1024; // 1 MiB per channel slot
         const CHAN_DEPTH: usize = 2;
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CHAN_DEPTH);
 
-        // Spawn the single blocking task that owns all disk I/O for this object.
-        let tmp_path_blocking = tmp_path.clone();
+        let tmp_path_blocking = tmp_path.to_path_buf();
         let write_handle = tokio::task::spawn_blocking(move || {
             use std::io::Write as _;
 
             let file = std::fs::File::create(&tmp_path_blocking)?;
-            // BufWriter batches the channel chunks into larger OS write(2) calls.
-            let mut buf_writer = std::io::BufWriter::with_capacity(CHUNK, file);
+            let mut bw = std::io::BufWriter::with_capacity(CHUNK, file);
             let mut bytes_written = 0u64;
 
-            // Block on the sync side of the channel.  `recv` returns None when
-            // the sender is dropped (async side finished or errored out).
             let mut rx = rx;
             while let Some(chunk) = rx.blocking_recv() {
-                buf_writer.write_all(&chunk)?;
+                bw.write_all(&chunk)?;
                 bytes_written += chunk.len() as u64;
             }
 
-            buf_writer.flush()?;
-            // Drop buf_writer (closes the fd) before rename.
-            drop(buf_writer);
+            bw.flush()?;
+            drop(bw); // close fd before caller renames
 
             io::Result::Ok(bytes_written)
         });
 
-        // Async read loop: accumulate CHUNK-sized buffers from the network
-        // stream and forward them to the blocking writer via the channel.
-        //
-        // A single `reader.read()` call returns however many bytes the OS has
-        // ready — typically 8–64 KiB on a loopback socket, far less than the
-        // 1 MiB CHUNK target.  Sending each partial read individually would
-        // saturate the depth-2 channel with ~800 messages for a 50 MiB object
-        // instead of ~50, causing constant backpressure stalls and high tail
-        // latency.  We therefore accumulate bytes into `buf` until it is full
-        // (or EOF), then transfer ownership into the channel (zero extra copy).
+        // Accumulate CHUNK-sized buffers before sending to bound channel.
+        // Loopback reads are typically 8–64 KiB; we batch them to ~1 MiB so
+        // the depth-2 channel sees ~object_size/1MiB messages rather than
+        // ~object_size/64KiB, avoiding constant backpressure stalls.
         let mut buf = vec![0u8; CHUNK];
         let mut filled = 0usize;
         let mut send_error: Option<io::Error> = None;
         'read: loop {
-            // Fill as much of buf as possible before yielding to the channel.
             while filled < CHUNK {
                 match reader.read(&mut buf[filled..]).await {
-                    Ok(0) => break 'read, // EOF — flush whatever is in buf below
+                    Ok(0) => break 'read,
                     Ok(n) => filled += n,
                     Err(e) => {
                         send_error = Some(e);
@@ -304,47 +330,47 @@ impl ObjectFileStore {
                     }
                 }
             }
-            // buf is full: move it into the channel (no memcpy) and
-            // replace with a fresh allocation for the next chunk.
             let full = std::mem::replace(&mut buf, vec![0u8; CHUNK]);
             filled = 0;
             if tx.send(full).await.is_err() {
-                // Receiver dropped — blocking task must have failed.
-                break;
+                break; // receiver dropped — blocking task failed
             }
         }
-        // Flush any partial final chunk.
         if send_error.is_none() && filled > 0 {
             buf.truncate(filled);
-            let _ = tx.send(buf).await; // ignore send error; handle via join
+            let _ = tx.send(buf).await;
         }
+        drop(tx); // signal EOF to blocking side
 
-        // Dropping tx signals EOF to the blocking side.
-        drop(tx);
+        // Helper: try to remove a stale tmp file and warn on failure.
+        let cleanup = |path: &Path| {
+            // Best-effort — we're about to return an error anyway.
+            if path.exists() {
+                warn!(
+                    path = %path.display(),
+                    "Orphaned temp file left behind after write error"
+                );
+            }
+        };
 
-        // Wait for the blocking task and collect its result.
         let bytes_written = match write_handle.await {
             Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(e),
+            Ok(Err(e)) => {
+                cleanup(tmp_path);
+                return Err(e);
+            }
             Err(join_err) => {
+                cleanup(tmp_path);
                 return Err(io::Error::other(join_err));
             }
         };
 
-        // Surface any async-side read error after the blocking task has exited.
         if let Some(e) = send_error {
+            cleanup(tmp_path);
             return Err(e);
         }
 
-        fs::rename(&tmp_path, &final_path).await?;
-
-        debug!(
-            path = %final_path.display(),
-            size = bytes_written,
-            "Object written to filesystem (streamed)"
-        );
-
-        Ok((final_path, bytes_written))
+        Ok(bytes_written)
     }
 
     /// Write object data from a synchronous reader, streaming to disk.
@@ -633,6 +659,28 @@ impl ObjectFileStore {
         let _ = fs::remove_dir(path).await;
     }
 }
+
+/// Simple write path for small/medium objects (< 50 MiB or unknown size).
+///
+/// Uses `tokio::io::copy` into a 2 MiB `BufWriter<tokio::fs::File>`.
+/// tokio::fs::File dispatches to the blocking pool internally, but for
+/// objects under 50 MiB the number of dispatches is low enough that this
+/// straightforward approach outperforms the channel-bridge alternative.
+async fn write_via_copy<R>(reader: &mut R, tmp_path: &Path) -> io::Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    const WRITE_BUF: usize = 2 * 1024 * 1024; // 2 MiB
+
+    let file = fs::File::create(tmp_path).await?;
+    let mut bw = tokio::io::BufWriter::with_capacity(WRITE_BUF, file);
+    let bytes_written = tokio::io::copy(reader, &mut bw).await?;
+    bw.flush().await?;
+    drop(bw); // close fd before caller renames
+
+    Ok(bytes_written)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -678,7 +726,7 @@ mod tests {
         let mut cursor = tokio::io::BufReader::new(&data[..]);
 
         let (path, n) = store
-            .write_object_from_reader("acct1", "us-east-1", "bkt", "key1", "v1", &mut cursor)
+            .write_object_from_reader("acct1", "us-east-1", "bkt", "key1", "v1", &mut cursor, None)
             .await
             .unwrap();
 
