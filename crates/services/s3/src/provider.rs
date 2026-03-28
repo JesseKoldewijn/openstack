@@ -1200,31 +1200,31 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     let continuation_token = ctx.query_params.get("continuation-token").cloned();
     let start_after = ctx.query_params.get("start-after").cloned();
 
-    // Single-pass: collect (key, last_modified, etag, size) for all matching objects.
-    // list_objects() returns in sorted key order (BTreeMap), so no sort needed.
-    type ObjMeta = (String, chrono::DateTime<chrono::Utc>, Arc<str>, u64);
-    let mut all_items: Vec<ObjMeta> = store
-        .list_objects(&bucket)
-        .into_iter()
-        .filter_map(|obj| {
-            let v = obj.current()?;
-            if !obj.key.starts_with(&prefix) {
-                return None;
-            }
-            Some((
-                obj.key.clone(),
-                v.last_modified,
-                Arc::clone(&v.etag),
-                v.size,
-            ))
-        })
-        .collect();
-
-    // Apply start_after / continuation_token
+    // Apply start_after / continuation_token (used as an exclusive lower bound).
     let skip_after = continuation_token.as_deref().or(start_after.as_deref());
-    if let Some(skip) = skip_after {
-        all_items.retain(|(k, ..)| k.as_str() > skip);
-    }
+
+    // Use range-based listing: starts from max(prefix, skip_after) and exits
+    // early once enough matching objects are found.  The delimiter case may
+    // collapse many keys into fewer common-prefix slots, so we allow a
+    // larger scan window; for the plain case max_keys + 1 detects truncation.
+    let scan_limit = if delimiter.is_empty() {
+        max_keys + 1
+    } else {
+        // Upper bound: assume at most 4× max_keys raw keys contribute to
+        // max_keys distinct common-prefix or content results.
+        (max_keys * 4).max(1001)
+    };
+
+    // Single-pass: collect (key, last_modified, etag, size) for matching objects.
+    // list_objects_paged() applies prefix + start-after filters server-side,
+    // visiting only relevant keys and holding the DashMap lock briefly.
+    type ObjMeta = (String, chrono::DateTime<chrono::Utc>, Arc<str>, u64);
+    let mut all_items: Vec<ObjMeta> = store.list_objects_paged(
+        &bucket,
+        &prefix,
+        skip_after,
+        scan_limit,
+    );
 
     // Common prefix (delimiter) handling
     let mut common_prefixes: BTreeSet<String> = BTreeSet::new();
@@ -1280,7 +1280,13 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
 
     let key_count = content_items.len() + cp_vec.len();
 
-    let mut xml = format!(
+    // Pre-size the XML buffer to avoid repeated reallocations.
+    // Rough estimate: ~250 bytes per Content entry + ~80 bytes per CommonPrefix
+    // + ~400 bytes for the fixed header/footer.
+    let cap = 400 + content_items.len() * 250 + cp_vec.len() * 80;
+    let mut xml = String::with_capacity(cap);
+    write!(
+        xml,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Name>{}</Name><Prefix>{}</Prefix><MaxKeys>{}</MaxKeys>\
@@ -1290,7 +1296,8 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
         max_keys,
         key_count,
         truncated
-    );
+    )
+    .unwrap();
 
     if let Some(ref t) = next_token {
         write!(

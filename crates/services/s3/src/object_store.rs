@@ -232,14 +232,19 @@ impl ObjectFileStore {
         let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
-        let mut file = fs::File::create(&tmp_path).await?;
+        let file = fs::File::create(&tmp_path).await?;
 
-        // 512 KiB keeps throughput strong while reducing per-request RSS.
-        const COPY_BUF: usize = 512 * 1024;
-        let mut buf_reader = tokio::io::BufReader::with_capacity(COPY_BUF, reader);
-        let bytes_written = tokio::io::copy_buf(&mut buf_reader, &mut file).await?;
-        file.flush().await?;
-        drop(file);
+        // Read the network stream in 512 KiB chunks; batch writes through a
+        // 2 MiB BufWriter so that each tokio-fs blocking-pool dispatch covers
+        // 2 MiB instead of 512 KiB — reducing blocking-thread-pool pressure
+        // by ~4× under high concurrency.
+        const READ_BUF: usize = 512 * 1024;
+        const WRITE_BUF: usize = 2 * 1024 * 1024;
+        let mut buf_writer = tokio::io::BufWriter::with_capacity(WRITE_BUF, file);
+        let mut buf_reader = tokio::io::BufReader::with_capacity(READ_BUF, reader);
+        let bytes_written = tokio::io::copy_buf(&mut buf_reader, &mut buf_writer).await?;
+        buf_writer.flush().await?;
+        // buf_writer (and its inner file) are dropped here, closing the fd.
 
         fs::rename(&tmp_path, &final_path).await?;
 
@@ -279,21 +284,28 @@ impl ObjectFileStore {
         let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
-        let mut file = std::fs::File::create(&tmp_path)?;
+        let file = std::fs::File::create(&tmp_path)?;
 
-        // 512 KiB keeps throughput strong while reducing per-request RSS.
-        let mut buf = vec![0u8; 512 * 1024];
+        // Batch writes via a 2 MiB BufWriter to reduce write(2) syscall
+        // overhead.  Read buffer stays at 512 KiB (fits L3 cache); four reads
+        // fill the write buffer before a single OS flush is issued.
+        const READ_BUF: usize = 512 * 1024;
+        const WRITE_BUF: usize = 2 * 1024 * 1024;
+        let mut buf_writer = std::io::BufWriter::with_capacity(WRITE_BUF, file);
+        let mut buf = vec![0u8; READ_BUF];
         let mut bytes_written = 0u64;
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
             }
-            file.write_all(&buf[..n])?;
+            buf_writer.write_all(&buf[..n])?;
             bytes_written += n as u64;
         }
-        file.flush()?;
-        drop(file);
+        buf_writer.flush()?;
+        // Ensure the file is closed before rename (important on Windows;
+        // harmless on Linux).
+        drop(buf_writer);
 
         std::fs::rename(&tmp_path, &final_path)?;
 

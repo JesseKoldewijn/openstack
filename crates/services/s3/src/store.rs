@@ -467,21 +467,28 @@ impl S3Store {
         key: &str,
         version: ObjectVersion,
     ) -> Option<ObjectDataRef> {
-        let mut objects = self.objects.entry(bucket.to_string()).or_default();
-        if let Some(obj) = objects.get_mut(key) {
-            let prev = obj.versions.first().map(|v| v.data.clone());
-            if version.version_id == "null" {
-                // Non-versioned bucket: overwrite current object in place.
-                obj.versions.clear();
-                obj.versions.push(Arc::new(version));
-            } else {
-                obj.versions.insert(0, Arc::new(version));
+        // Fast path: bucket already exists — avoid allocating a String key
+        // for the DashMap entry lookup (get_mut accepts &str via Borrow).
+        if let Some(mut objects) = self.objects.get_mut(bucket) {
+            if let Some(obj) = objects.get_mut(key) {
+                let prev = obj.versions.first().map(|v| v.data.clone());
+                if version.version_id == "null" {
+                    obj.versions.clear();
+                    obj.versions.push(Arc::new(version));
+                } else {
+                    obj.versions.insert(0, Arc::new(version));
+                }
+                return prev;
             }
-            prev
-        } else {
             objects.insert(key.to_string(), S3Object::new(key, version));
-            None
+            return None;
         }
+
+        // Slow path: bucket not yet in the map (should not happen after the
+        // handler's bucket-existence check, but handle gracefully).
+        let mut objects = self.objects.entry(bucket.to_string()).or_default();
+        objects.insert(key.to_string(), S3Object::new(key, version));
+        None
     }
 
     pub fn get_object(&self, bucket: &str, key: &str) -> Option<Arc<ObjectVersion>> {
@@ -569,6 +576,55 @@ impl S3Store {
             .get(bucket)
             .map(|m| m.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Return object metadata for ListObjectsV2 with server-side filtering.
+    ///
+    /// Unlike [`list_objects`], this method:
+    /// - Uses `BTreeMap::range` to start from the right position (skipping keys
+    ///   before `prefix` or `start_after_exclusive`).
+    /// - Stops scanning after `max_results` matching objects (early exit).
+    /// - Holds the DashMap shard read lock only during this focused iteration.
+    /// - Returns only the four fields the handler needs, avoiding a full
+    ///   `S3Object` clone per entry.
+    ///
+    /// Keys are returned in sorted (BTreeMap) order.
+    pub fn list_objects_paged(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        start_after_exclusive: Option<&str>,
+        max_results: usize,
+    ) -> Vec<(String, DateTime<Utc>, Arc<str>, u64)> {
+        use std::ops::Bound;
+
+        let Some(m) = self.objects.get(bucket) else {
+            return Vec::new();
+        };
+
+        // Compute the effective lower bound:
+        //   • If start_after_exclusive is lexicographically >= prefix, start
+        //     from there (exclusive) so we skip already-seen keys.
+        //   • Otherwise (start_after is before the prefix range), start from
+        //     prefix (inclusive) so we don't miss any matching keys.
+        let lower: Bound<String> = match start_after_exclusive {
+            Some(s) if !s.is_empty() && s >= prefix => Bound::Excluded(s.to_string()),
+            _ if !prefix.is_empty() => Bound::Included(prefix.to_string()),
+            _ => Bound::Unbounded,
+        };
+
+        m.range((lower, Bound::Unbounded))
+            // BTreeMap is sorted: once a key no longer starts with `prefix`
+            // no subsequent key will either, so we stop early.
+            .take_while(|(k, _)| prefix.is_empty() || k.starts_with(prefix))
+            .filter_map(|(key, obj)| {
+                // current_arc() returns None for delete markers and missing
+                // current versions.
+                let v = obj.current_arc()?;
+                Some((key.clone(), v.last_modified, Arc::clone(&v.etag), v.size))
+            })
+            .take(max_results)
+            .collect()
     }
 
     // --- multipart helpers -------------------------------------------------
