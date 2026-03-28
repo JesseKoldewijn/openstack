@@ -1118,8 +1118,16 @@ fn translate_events(op: &str, command: &[String]) -> Result<NativeHttpPlan, Tran
         "put-rule" => {
             let mut body = json!({
                 "Name": required_flag(command, "--name")?,
-                "ScheduleExpression": required_flag(command, "--schedule-expression")?,
             });
+            if let Some(schedule) = extract_flag_value(command, "--schedule-expression") {
+                body["ScheduleExpression"] = serde_json::Value::String(schedule);
+            } else if let Some(pattern) = extract_flag_value(command, "--event-pattern") {
+                body["EventPattern"] = serde_json::Value::String(pattern);
+            } else {
+                return Err(TranslationOutcome::Invalid(
+                    "put-rule requires --schedule-expression or --event-pattern".to_string(),
+                ));
+            }
             if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
                 body["EventBusName"] = serde_json::Value::String(bus);
             }
@@ -1145,9 +1153,25 @@ fn translate_events(op: &str, command: &[String]) -> Result<NativeHttpPlan, Tran
             body
         }
         "put-targets" => {
+            let targets = match parse_json_flag(command, "--targets")? {
+                serde_json::Value::Array(arr) if !arr.is_empty() => arr,
+                _ => {
+                    return Err(TranslationOutcome::Invalid(
+                        "put-targets requires --targets to be a non-empty JSON array".to_string(),
+                    ));
+                }
+            };
+            if targets
+                .iter()
+                .any(|t| t.get("Id").and_then(serde_json::Value::as_str).is_none())
+            {
+                return Err(TranslationOutcome::Invalid(
+                    "each put-targets entry must include a string Id".to_string(),
+                ));
+            }
             let mut body = json!({
                 "Rule": required_flag(command, "--rule")?,
-                "Targets": parse_json_flag(command, "--targets")?,
+                "Targets": targets,
             });
             if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
                 body["EventBusName"] = serde_json::Value::String(bus);
@@ -1298,6 +1322,11 @@ fn translate_ecr(op: &str, command: &[String]) -> Result<NativeHttpPlan, Transla
                     }
                 })
                 .collect();
+            if image_ids.is_empty() {
+                return Err(TranslationOutcome::Invalid(
+                    "batch-get-image requires at least one ID via --image-ids".to_string(),
+                ));
+            }
             json!({
                 "repositoryName": repo,
                 "imageIds": image_ids,
