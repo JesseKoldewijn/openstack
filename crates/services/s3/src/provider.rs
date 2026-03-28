@@ -1219,12 +1219,8 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     // list_objects_paged() applies prefix + start-after filters server-side,
     // visiting only relevant keys and holding the DashMap lock briefly.
     type ObjMeta = (String, chrono::DateTime<chrono::Utc>, Arc<str>, u64);
-    let mut all_items: Vec<ObjMeta> = store.list_objects_paged(
-        &bucket,
-        &prefix,
-        skip_after,
-        scan_limit,
-    );
+    let mut all_items: Vec<ObjMeta> =
+        store.list_objects_paged(&bucket, &prefix, skip_after, scan_limit);
 
     // Common prefix (delimiter) handling
     let mut common_prefixes: BTreeSet<String> = BTreeSet::new();
