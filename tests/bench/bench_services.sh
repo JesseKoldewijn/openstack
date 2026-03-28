@@ -1391,11 +1391,55 @@ if is_active "ecr"; then
   log_section "ECR (JSON)"
 
   ECR_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
+  _ecr_repo="bench-ecr-$$"
+  _ecr_tag="bench-img-$$"
+  # Minimal valid OCI image manifest (stored as a string; jq encodes it properly
+  # when embedding as a JSON string value — raw interpolation breaks on the inner quotes)
+  _ecr_manifest='{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","size":0,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"layers":[]}'
+  _ecr_put_image_body=$(jq -n \
+    --arg repo "$_ecr_repo" \
+    --arg manifest "$_ecr_manifest" \
+    --arg tag "$_ecr_tag" \
+    '{"repositoryName":$repo,"imageManifest":$manifest,"imageTag":$tag}')
 
-  bench_targets "ecr" "describe_repositories" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    "${ECR_HEADERS[@]}" \
-    -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.DescribeRepositories" \
-    -d '{}'
+  if seed_all_targets "ecr" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-amz-json-1.1" \
+       -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.CreateRepository" \
+       -d '{"repositoryName":"'"$_ecr_repo"'"}'; then
+
+    # Seed image in repository so read benchmarks have data (best-effort; read
+    # benchmarks run regardless and simply return empty results if this fails)
+    seed_all_targets "ecr" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-amz-json-1.1" \
+      -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.PutImage" \
+      -d "$_ecr_put_image_body" || true
+
+    # CreateRepository — unique name per iteration; 0 errors expected
+    bench_dynamic_targets "ecr" "create_repository" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      '{"repositoryName":"bench-ecr-'"$$"'-{i}"}' \
+      -H "Content-Type: application/x-amz-json-1.1" \
+      -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.CreateRepository"
+
+    # DescribeRepositories
+    bench_targets "ecr" "describe_repositories" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${ECR_HEADERS[@]}" \
+      -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.DescribeRepositories" \
+      -d '{}'
+
+    # ListImages
+    bench_targets "ecr" "list_images" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${ECR_HEADERS[@]}" \
+      -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.ListImages" \
+      -d '{"repositoryName":"'"$_ecr_repo"'"}'
+
+    # BatchGetImage
+    bench_targets "ecr" "batch_get_image" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${ECR_HEADERS[@]}" \
+      -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.BatchGetImage" \
+      -d '{"repositoryName":"'"$_ecr_repo"'","imageIds":[{"imageTag":"'"$_ecr_tag"'"}]}'
+  else
+    skip_service "ecr" "Failed to create seed ECR repository"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1407,11 +1451,58 @@ if is_active "eventbridge"; then
   log_section "EventBridge (JSON)"
 
   EVENTS_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
+  _eb_bus="bench-bus-$$"
+  _eb_rule="bench-rule-$$"
 
-  bench_targets "eventbridge" "list_event_buses" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    "${EVENTS_HEADERS[@]}" \
-    -H "X-Amz-Target: AWSEvents.ListEventBuses" \
-    -d '{}'
+  if seed_all_targets "eventbridge" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-amz-json-1.1" \
+       -H "X-Amz-Target: AWSEvents.CreateEventBus" \
+       -d '{"Name":"'"$_eb_bus"'"}'; then
+
+    # Seed a rule on the custom bus
+    seed_all_targets "eventbridge" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-amz-json-1.1" \
+      -H "X-Amz-Target: AWSEvents.PutRule" \
+      -d '{"Name":"'"$_eb_rule"'","ScheduleExpression":"rate(5 minutes)","EventBusName":"'"$_eb_bus"'"}'
+
+    # Seed a target on the rule
+    seed_all_targets "eventbridge" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-amz-json-1.1" \
+      -H "X-Amz-Target: AWSEvents.PutTargets" \
+      -d '{"Rule":"'"$_eb_rule"'","EventBusName":"'"$_eb_bus"'","Targets":[{"Id":"t1","Arn":"arn:aws:sqs:us-east-1:000000000000:bench-queue"}]}'
+
+    # PutRule — unique name per iteration; 0 errors expected
+    bench_dynamic_targets "eventbridge" "put_rule" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      '{"Name":"bench-rule-'"$$"'-{i}","ScheduleExpression":"rate(5 minutes)","EventBusName":"'"$_eb_bus"'"}' \
+      -H "Content-Type: application/x-amz-json-1.1" \
+      -H "X-Amz-Target: AWSEvents.PutRule"
+
+    # ListEventBuses
+    bench_targets "eventbridge" "list_event_buses" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${EVENTS_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSEvents.ListEventBuses" \
+      -d '{}'
+
+    # ListRules
+    bench_targets "eventbridge" "list_rules" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${EVENTS_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSEvents.ListRules" \
+      -d '{"EventBusName":"'"$_eb_bus"'"}'
+
+    # DescribeRule
+    bench_targets "eventbridge" "describe_rule" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${EVENTS_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSEvents.DescribeRule" \
+      -d '{"Name":"'"$_eb_rule"'","EventBusName":"'"$_eb_bus"'"}'
+
+    # ListTargetsByRule
+    bench_targets "eventbridge" "list_targets_by_rule" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${EVENTS_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSEvents.ListTargetsByRule" \
+      -d '{"Rule":"'"$_eb_rule"'","EventBusName":"'"$_eb_bus"'"}'
+  else
+    skip_service "eventbridge" "Failed to create seed EventBridge bus"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

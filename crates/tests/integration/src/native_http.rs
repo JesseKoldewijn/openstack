@@ -1115,13 +1115,127 @@ fn translate_events(op: &str, command: &[String]) -> Result<NativeHttpPlan, Tran
         "list-rules" => json!({
             "Limit": extract_flag_value(command, "--limit").and_then(|v| v.parse::<u64>().ok()).unwrap_or(50),
         }),
-        "put-rule" => json!({
-            "Name": required_flag(command, "--name")?,
-            "ScheduleExpression": required_flag(command, "--schedule-expression")?,
-        }),
+        "put-rule" => {
+            let mut body = json!({
+                "Name": required_flag(command, "--name")?,
+            });
+            if let Some(schedule) = extract_flag_value(command, "--schedule-expression") {
+                body["ScheduleExpression"] = serde_json::Value::String(schedule);
+            } else if let Some(pattern) = extract_flag_value(command, "--event-pattern") {
+                body["EventPattern"] = serde_json::Value::String(pattern);
+            } else {
+                return Err(TranslationOutcome::Invalid(
+                    "put-rule requires --schedule-expression or --event-pattern".to_string(),
+                ));
+            }
+            if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
+                body["EventBusName"] = serde_json::Value::String(bus);
+            }
+            body
+        }
         "put-events" => json!({
             "Entries": [{"Source": "benchmark", "DetailType": "native-http", "Detail": "{}"}],
         }),
+        "create-event-bus" => json!({
+            "Name": required_flag(command, "--name")?,
+        }),
+        "delete-event-bus" => json!({
+            "Name": required_flag(command, "--name")?,
+        }),
+        "list-event-buses" => json!({}),
+        "describe-rule" => {
+            let mut body = json!({
+                "Name": required_flag(command, "--name")?,
+            });
+            if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
+                body["EventBusName"] = serde_json::Value::String(bus);
+            }
+            body
+        }
+        "put-targets" => {
+            let targets = match parse_json_flag(command, "--targets")? {
+                serde_json::Value::Array(arr) if !arr.is_empty() => arr,
+                _ => {
+                    return Err(TranslationOutcome::Invalid(
+                        "put-targets requires --targets to be a non-empty JSON array".to_string(),
+                    ));
+                }
+            };
+            if targets
+                .iter()
+                .any(|t| t.get("Id").and_then(serde_json::Value::as_str).is_none())
+            {
+                return Err(TranslationOutcome::Invalid(
+                    "each put-targets entry must include a string Id".to_string(),
+                ));
+            }
+            let mut body = json!({
+                "Rule": required_flag(command, "--rule")?,
+                "Targets": targets,
+            });
+            if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
+                body["EventBusName"] = serde_json::Value::String(bus);
+            }
+            body
+        }
+        "list-targets-by-rule" => {
+            let mut body = json!({
+                "Rule": required_flag(command, "--rule")?,
+            });
+            if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
+                body["EventBusName"] = serde_json::Value::String(bus);
+            }
+            body
+        }
+        "disable-rule" => {
+            let mut body = json!({
+                "Name": required_flag(command, "--name")?,
+            });
+            if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
+                body["EventBusName"] = serde_json::Value::String(bus);
+            }
+            body
+        }
+        "enable-rule" => {
+            let mut body = json!({
+                "Name": required_flag(command, "--name")?,
+            });
+            if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
+                body["EventBusName"] = serde_json::Value::String(bus);
+            }
+            body
+        }
+        "remove-targets" => {
+            let ids: Vec<serde_json::Value> = command
+                .iter()
+                .skip_while(|s| s.as_str() != "--ids")
+                .skip(1)
+                .take_while(|s| !s.starts_with('-'))
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect();
+            if ids.is_empty() {
+                return Err(TranslationOutcome::Invalid(
+                    "remove-targets requires at least one ID via --ids".to_string(),
+                ));
+            }
+            let mut body = json!({
+                "Rule": required_flag(command, "--rule")?,
+                "Ids": ids,
+            });
+            if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
+                body["EventBusName"] = serde_json::Value::String(bus);
+            }
+            body
+        }
+        "delete-rule" => {
+            let mut body = json!({
+                "Name": required_flag(command, "--name")?,
+            });
+            if let Some(bus) = extract_flag_value(command, "--event-bus-name") {
+                body["EventBusName"] = serde_json::Value::String(bus);
+            }
+            body
+        }
         _ => {
             return Err(TranslationOutcome::Unsupported(format!(
                 "native HTTP translator not implemented for 'events' '{op}'"
@@ -1172,6 +1286,52 @@ fn translate_ecr(op: &str, command: &[String]) -> Result<NativeHttpPlan, Transla
         "create-repository" => json!({
             "repositoryName": required_flag(command, "--repository-name")?,
         }),
+        "delete-repository" => json!({
+            "repositoryName": required_flag(command, "--repository-name")?,
+        }),
+        "list-images" => json!({
+            "repositoryName": required_flag(command, "--repository-name")?,
+        }),
+        "put-image" => {
+            let repo = required_flag(command, "--repository-name")?;
+            let manifest = required_flag(command, "--image-manifest")?;
+            let mut body = json!({
+                "repositoryName": repo,
+                "imageManifest": manifest,
+            });
+            if let Some(tag) = extract_flag_value(command, "--image-tag") {
+                body["imageTag"] = serde_json::Value::String(tag);
+            }
+            body
+        }
+        "batch-get-image" => {
+            let repo = required_flag(command, "--repository-name")?;
+            // --image-ids accepts "imageTag=<tag>" or "imageDigest=<digest>" key=value pairs
+            let image_ids: Vec<serde_json::Value> = command
+                .iter()
+                .skip_while(|s| s.as_str() != "--image-ids")
+                .skip(1)
+                .take_while(|s| !s.starts_with('-'))
+                .map(|s| {
+                    if let Some(tag) = s.strip_prefix("imageTag=") {
+                        json!({"imageTag": tag})
+                    } else if let Some(digest) = s.strip_prefix("imageDigest=") {
+                        json!({"imageDigest": digest})
+                    } else {
+                        json!({"imageTag": s})
+                    }
+                })
+                .collect();
+            if image_ids.is_empty() {
+                return Err(TranslationOutcome::Invalid(
+                    "batch-get-image requires at least one ID via --image-ids".to_string(),
+                ));
+            }
+            json!({
+                "repositoryName": repo,
+                "imageIds": image_ids,
+            })
+        }
         "describe-images" => json!({
             "repositoryName": extract_flag_value(command, "--repository-name").unwrap_or_else(|| "missing-repository".to_string()),
         }),
