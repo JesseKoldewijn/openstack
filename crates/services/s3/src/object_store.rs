@@ -13,12 +13,9 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
 
-use bytes::Bytes;
 use dashmap::DashSet;
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -223,10 +220,10 @@ impl ObjectFileStore {
     /// saturation under high concurrency.
     ///
     /// Data flows:
-    /// - **Async side** (tokio worker): accumulates network reads into 2 MiB
+    /// - **Async side** (tokio worker): accumulates network reads into 1 MiB
     ///   buffers (loopback reads are typically 8–64 KiB each), then transfers
-    ///   each full buffer ownership into a bounded channel (capacity 4, so at
-    ///   most 8 MiB in flight per request).  Ownership transfer avoids copies.
+    ///   each full buffer ownership into a bounded channel (capacity 2, so at
+    ///   most 2 MiB in flight per request).  Ownership transfer avoids copies.
     /// - **Blocking side** (single `spawn_blocking`): drains the channel,
     ///   writes each chunk through a `BufWriter<std::fs::File>`, then flushes
     ///   and returns the byte count.
@@ -251,10 +248,10 @@ impl ObjectFileStore {
         let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
-        // Bounded channel: 4 slots × 2 MiB = 8 MiB max in-flight per request.
+        // Bounded channel: 2 slots × 1 MiB = 2 MiB max in-flight per request.
         // The backpressure keeps memory bounded while the blocking writer drains.
-        const CHUNK: usize = 2 * 1024 * 1024; // 2 MiB read/write chunk
-        const CHAN_DEPTH: usize = 4;
+        const CHUNK: usize = 1024 * 1024; // 1 MiB read/write chunk
+        const CHAN_DEPTH: usize = 2;
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CHAN_DEPTH);
 
         // Spawn the single blocking task that owns all disk I/O for this object.
@@ -287,9 +284,9 @@ impl ObjectFileStore {
         //
         // A single `reader.read()` call returns however many bytes the OS has
         // ready — typically 8–64 KiB on a loopback socket, far less than the
-        // 2 MiB CHUNK target.  Sending each partial read individually would
-        // saturate the depth-4 channel with ~800 messages for a 50 MiB object
-        // instead of ~25, causing constant backpressure stalls and high tail
+        // 1 MiB CHUNK target.  Sending each partial read individually would
+        // saturate the depth-2 channel with ~800 messages for a 50 MiB object
+        // instead of ~50, causing constant backpressure stalls and high tail
         // latency.  We therefore accumulate bytes into `buf` until it is full
         // (or EOF), then transfer ownership into the channel (zero extra copy).
         let mut buf = vec![0u8; CHUNK];
@@ -434,75 +431,6 @@ impl ObjectFileStore {
     /// Open an object file by its stored path.
     pub async fn read_object_at(path: &Path) -> io::Result<fs::File> {
         fs::File::open(path).await
-    }
-
-    /// Stream an object file from `path` using a single `spawn_blocking` task.
-    ///
-    /// Reading with `tokio::fs::File` dispatches every read to the blocking
-    /// thread pool.  For a 100 MiB object that's ~50 dispatches at 2 MiB
-    /// each; under 20-way concurrency that's ~1 000 total blocking-pool
-    /// round-trips.
-    ///
-    /// This method spawns **one** blocking task that reads the entire file in
-    /// 2 MiB chunks and sends them through a bounded channel.  The caller
-    /// receives a [`Stream`](futures_core::Stream) backed by that channel,
-    /// which can be fed directly into [`ResponseBody::Streaming`].
-    ///
-    /// Channel depth 4 × 2 MiB = 8 MiB max in-flight per GetObject; the
-    /// blocking reader keeps the channel full while the network drains it.
-    pub fn stream_object_from_path(
-        path: PathBuf,
-    ) -> Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, io::Error>> + Send>> {
-        const CHUNK: usize = 2 * 1024 * 1024; // 2 MiB
-        const CHAN_DEPTH: usize = 4;
-
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(CHAN_DEPTH);
-
-        tokio::task::spawn_blocking(move || {
-            use std::io::Read as _;
-
-            let file = match std::fs::File::open(&path) {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = tx.blocking_send(Err(e));
-                    return;
-                }
-            };
-            let mut reader = std::io::BufReader::with_capacity(CHUNK, file);
-            let mut buf = vec![0u8; CHUNK];
-
-            loop {
-                // read_exact-style loop: fill buf before sending.
-                let mut filled = 0usize;
-                loop {
-                    match reader.read(&mut buf[filled..]) {
-                        Ok(0) => break, // EOF or buf full
-                        Ok(n) => filled += n,
-                        Err(e) => {
-                            let _ = tx.blocking_send(Err(e));
-                            return;
-                        }
-                    }
-                    if filled == CHUNK {
-                        break;
-                    }
-                }
-
-                if filled == 0 {
-                    break; // clean EOF
-                }
-
-                // Copy the filled slice into a Bytes and send.
-                // Using Bytes::copy_from_slice avoids unsafe but costs one
-                // allocation per chunk — acceptable at 2 MiB granularity.
-                let chunk = Bytes::copy_from_slice(&buf[..filled]);
-                if tx.blocking_send(Ok(chunk)).is_err() {
-                    break; // receiver dropped (client disconnected)
-                }
-            }
-        });
-
-        Box::pin(MpscReceiverStream { rx })
     }
 
     // ── Delete ──────────────────────────────────────────────────────
@@ -705,26 +633,7 @@ impl ObjectFileStore {
         let _ = fs::remove_dir(path).await;
     }
 }
-
-// ── Stream adapter ────────────────────────────────────────────────────────────
-
-/// Wraps a `tokio::sync::mpsc::Receiver<Result<Bytes, io::Error>>` and
-/// implements [`futures_core::Stream`] so it can be used as a
-/// `ResponseBody::Streaming` source without the `tokio-stream` crate.
-///
-/// `poll_next` delegates to [`Receiver::poll_recv`] which is cancel-safe and
-/// returns `None` when the sender is dropped (clean EOF).
-struct MpscReceiverStream {
-    rx: tokio::sync::mpsc::Receiver<Result<Bytes, io::Error>>,
-}
-
-impl futures_core::Stream for MpscReceiverStream {
-    type Item = Result<Bytes, io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

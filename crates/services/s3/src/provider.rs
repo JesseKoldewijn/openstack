@@ -15,6 +15,7 @@ use openstack_service_framework::traits::{
 };
 use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
+use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
 
 use crate::object_store::{ObjectFileStore, ObjectLocation};
@@ -758,16 +759,23 @@ async fn handle_get_object_async(
                             }
                         }
                     } else {
-                        // Stream via a single spawn_blocking task that reads
-                        // 2 MiB chunks and sends them through a bounded
-                        // mpsc channel.  This reduces blocking-pool dispatches
-                        // from ~50 (ReaderStream at 512 KiB) to 1 per GetObject
-                        // regardless of object size, eliminating pool saturation
-                        // under high concurrency.
-                        let stream = ObjectFileStore::stream_object_from_path(path);
-                        ResponseBody::Streaming {
-                            stream,
-                            content_length: Some(size),
+                        // Stream via ReaderStream with a 1 MiB read buffer.
+                        // This halves blocking-pool dispatches vs the original
+                        // 512 KiB capacity while keeping memory overhead minimal
+                        // (no channel allocation, no extra allocation per chunk).
+                        match ObjectFileStore::read_object_at(&path).await {
+                            Ok(file) => {
+                                const READ_BUF: usize = 1024 * 1024; // 1 MiB
+                                let stream = ReaderStream::with_capacity(file, READ_BUF);
+                                ResponseBody::Streaming {
+                                    stream: Box::pin(stream),
+                                    content_length: Some(size),
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, path = %path.display(), "Failed to open object file for streaming");
+                                return s3_error("InternalError", "Failed to read object", 500);
+                            }
                         }
                     }
                 }
