@@ -618,9 +618,10 @@ impl S3Store {
             // no subsequent key will either, so we stop early.
             .take_while(|(k, _)| prefix.is_empty() || k.starts_with(prefix))
             .filter_map(|(key, obj)| {
-                // current_arc() returns None for delete markers and missing
-                // current versions.
-                let v = obj.current_arc()?;
+                // current() borrows the version without bumping the Arc
+                // refcount — saves one atomic op per entry while the shard
+                // lock is held.
+                let v = obj.current()?;
                 Some((key.clone(), v.last_modified, Arc::clone(&v.etag), v.size))
             })
             .take(max_results)

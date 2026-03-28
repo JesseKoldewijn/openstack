@@ -15,7 +15,6 @@ use openstack_service_framework::traits::{
 };
 use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
-use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
 
 use crate::object_store::{ObjectFileStore, ObjectLocation};
@@ -660,7 +659,7 @@ async fn handle_put_object_async(
     }
 }
 
-/// Async GetObject — streams file-backed objects via ReaderStream.
+/// Async GetObject — streams file-backed objects via a channel-bridge.
 async fn handle_get_object_async(
     store_bundle: &AccountRegionBundle<S3Store>,
     ctx: &RequestContext,
@@ -748,8 +747,8 @@ async fn handle_get_object_async(
                 ObjectDataRef::Inline(bytes) => ResponseBody::Buffered(bytes),
                 ObjectDataRef::FileRef(path) => {
                     // For small objects read the entire file into memory and
-                    // return a buffered response — this avoids the spawn_blocking
-                    // overhead of ReaderStream for tiny payloads.
+                    // return a buffered response — this avoids spawn_blocking
+                    // overhead for tiny payloads.
                     if size <= inline_object_threshold() {
                         match tokio::fs::read(&path).await {
                             Ok(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
@@ -759,20 +758,16 @@ async fn handle_get_object_async(
                             }
                         }
                     } else {
-                        match ObjectFileStore::read_object_at(&path).await {
-                            Ok(file) => {
-                                // Stream directly through ReaderStream.
-                                const READ_BUF: usize = 512 * 1024;
-                                let stream = ReaderStream::with_capacity(file, READ_BUF);
-                                ResponseBody::Streaming {
-                                    stream: Box::pin(stream),
-                                    content_length: Some(size),
-                                }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, path = %path.display(), "Failed to open object file for streaming");
-                                return s3_error("InternalError", "Failed to read object", 500);
-                            }
+                        // Stream via a single spawn_blocking task that reads
+                        // 2 MiB chunks and sends them through a bounded
+                        // mpsc channel.  This reduces blocking-pool dispatches
+                        // from ~50 (ReaderStream at 512 KiB) to 1 per GetObject
+                        // regardless of object size, eliminating pool saturation
+                        // under high concurrency.
+                        let stream = ObjectFileStore::stream_object_from_path(path);
+                        ResponseBody::Streaming {
+                            stream,
+                            content_length: Some(size),
                         }
                     }
                 }
