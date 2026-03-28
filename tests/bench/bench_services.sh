@@ -1393,19 +1393,26 @@ if is_active "ecr"; then
   ECR_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
   _ecr_repo="bench-ecr-$$"
   _ecr_tag="bench-img-$$"
-  # Minimal valid OCI image manifest
+  # Minimal valid OCI image manifest (stored as a string; jq encodes it properly
+  # when embedding as a JSON string value — raw interpolation breaks on the inner quotes)
   _ecr_manifest='{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","size":0,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"layers":[]}'
+  _ecr_put_image_body=$(jq -n \
+    --arg repo "$_ecr_repo" \
+    --arg manifest "$_ecr_manifest" \
+    --arg tag "$_ecr_tag" \
+    '{"repositoryName":$repo,"imageManifest":$manifest,"imageTag":$tag}')
 
   if seed_all_targets "ecr" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        -H "Content-Type: application/x-amz-json-1.1" \
        -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.CreateRepository" \
        -d '{"repositoryName":"'"$_ecr_repo"'"}'; then
 
-    # Seed image in repository so read benchmarks have data
+    # Seed image in repository so read benchmarks have data (best-effort; read
+    # benchmarks run regardless and simply return empty results if this fails)
     seed_all_targets "ecr" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-amz-json-1.1" \
       -H "X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.PutImage" \
-      -d '{"repositoryName":"'"$_ecr_repo"'","imageManifest":"'"$_ecr_manifest"'","imageTag":"'"$_ecr_tag"'"}'
+      -d "$_ecr_put_image_body" || true
 
     # CreateRepository — unique name per iteration; 0 errors expected
     bench_dynamic_targets "ecr" "create_repository" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
