@@ -1564,8 +1564,7 @@ async fn smoke_s3_concurrent_put_same_key() {
 async fn smoke_s3_large_put_no_deadlock() {
     use std::time::Duration;
 
-    let harness =
-        openstack_integration_tests::harness::TestHarness::start_services("s3").await;
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("s3").await;
 
     // Create bucket
     let resp = harness
