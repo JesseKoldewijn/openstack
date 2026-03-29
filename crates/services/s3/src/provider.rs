@@ -523,20 +523,39 @@ async fn handle_put_object_async(
             //
             // Unlike spawn_blocking this does not require Send because the closure
             // runs on the same OS thread, so we can borrow reader_guard/ctx directly.
+            //
+            // On single-threaded runtimes (e.g. #[tokio::test] without multi_thread),
+            // block_in_place panics.  Detect the runtime flavor and fall back to the
+            // async write path in that case.
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
-            let result = tokio::task::block_in_place(|| {
-                let mut sync_reader = tokio_util::io::SyncIoBridge::new(&mut hashing_reader);
-                file_store.write_object_from_sync_reader(
-                    &ctx.account_id,
-                    &ctx.region,
-                    &bucket,
-                    &key,
-                    &version_id,
-                    &mut sync_reader,
-                    content_length,
-                )
-            });
-            // sync_reader dropped here → &mut hashing_reader released
+            let result = if tokio::runtime::Handle::current().runtime_flavor()
+                == tokio::runtime::RuntimeFlavor::MultiThread
+            {
+                tokio::task::block_in_place(|| {
+                    let mut sync_reader = tokio_util::io::SyncIoBridge::new(&mut hashing_reader);
+                    file_store.write_object_from_sync_reader(
+                        &ctx.account_id,
+                        &ctx.region,
+                        &bucket,
+                        &key,
+                        &version_id,
+                        &mut sync_reader,
+                        content_length,
+                    )
+                })
+            } else {
+                file_store
+                    .write_object_from_reader(
+                        &ctx.account_id,
+                        &ctx.region,
+                        &bucket,
+                        &key,
+                        &version_id,
+                        &mut hashing_reader,
+                        content_length,
+                    )
+                    .await
+            };
             let (file_path, bytes_written) = match result {
                 Ok(r) => r,
                 Err(e) => {
@@ -1627,18 +1646,34 @@ async fn handle_upload_part_async(
             let part_version_id = format!("part-{}", part_number);
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
             let multipart_key = format!("__multipart/{upload_id}/{key}");
-            let result = tokio::task::block_in_place(|| {
-                let mut sync_reader = tokio_util::io::SyncIoBridge::new(&mut hashing_reader);
-                file_store.write_object_from_sync_reader(
-                    &ctx.account_id,
-                    &ctx.region,
-                    &bucket,
-                    &multipart_key,
-                    &part_version_id,
-                    &mut sync_reader,
-                    content_length,
-                )
-            });
+            let result = if tokio::runtime::Handle::current().runtime_flavor()
+                == tokio::runtime::RuntimeFlavor::MultiThread
+            {
+                tokio::task::block_in_place(|| {
+                    let mut sync_reader = tokio_util::io::SyncIoBridge::new(&mut hashing_reader);
+                    file_store.write_object_from_sync_reader(
+                        &ctx.account_id,
+                        &ctx.region,
+                        &bucket,
+                        &multipart_key,
+                        &part_version_id,
+                        &mut sync_reader,
+                        content_length,
+                    )
+                })
+            } else {
+                file_store
+                    .write_object_from_reader(
+                        &ctx.account_id,
+                        &ctx.region,
+                        &bucket,
+                        &multipart_key,
+                        &part_version_id,
+                        &mut hashing_reader,
+                        content_length,
+                    )
+                    .await
+            };
             let (file_path, bytes_written) = match result {
                 Ok(r) => r,
                 Err(e) => {
