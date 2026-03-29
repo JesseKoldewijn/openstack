@@ -253,8 +253,20 @@ impl ObjectFileStore {
 
     /// Write object data from a synchronous reader, streaming to disk.
     ///
-    /// Intended for use inside [`tokio::task::spawn_blocking`] closures so
-    /// that disk I/O does not block tokio worker threads.
+    /// Intended for use inside [`tokio::task::spawn_blocking`] or
+    /// [`tokio::task::block_in_place`] closures so that disk I/O does not
+    /// block tokio worker threads.
+    ///
+    /// When `content_length` is known the file is pre-allocated with
+    /// `set_len` to avoid filesystem block re-allocation, and the write
+    /// buffer is scaled to match the object size:
+    ///
+    /// | Content-Length    | Write buffer |
+    /// |------------------|--------------|
+    /// | < 4 MiB or None  | 2 MiB        |
+    /// | 4 MiB – 50 MiB   | 4 MiB        |
+    /// | 50 MiB – 128 MiB | 8 MiB        |
+    /// | > 128 MiB        | 16 MiB       |
     ///
     /// Returns `(final_path, bytes_written)`.
     pub fn write_object_from_sync_reader<R>(
@@ -265,6 +277,7 @@ impl ObjectFileStore {
         key: &str,
         version_id: &str,
         reader: &mut R,
+        content_length: Option<u64>,
     ) -> io::Result<(PathBuf, u64)>
     where
         R: std::io::Read,
@@ -280,12 +293,23 @@ impl ObjectFileStore {
 
         let file = std::fs::File::create(&tmp_path)?;
 
-        // This path is only taken for objects larger than inline_object_threshold
-        // (4 MiB).  Use a large 8 MiB write buffer to reduce write(2) syscall
-        // overhead.  Read buffer stays at 512 KiB (fits L2/L3 cache).
+        // Pre-allocate to avoid block-level fragmentation on ext4/xfs.
+        if let Some(len) = content_length
+            && len > 0
+        {
+            file.set_len(len)?;
+        }
+
+        // Adaptive write buffer: scale with expected object size to reduce
+        // write(2) syscall overhead. Read buffer stays at 512 KiB.
         const READ_BUF: usize = 512 * 1024; // 512 KiB
-        const WRITE_BUF: usize = 8 * 1024 * 1024; // 8 MiB
-        let mut buf_writer = std::io::BufWriter::with_capacity(WRITE_BUF, file);
+        let write_buf: usize = match content_length {
+            Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
+            Some(len) if len > 50 * 1024 * 1024 => 8 * 1024 * 1024,   //  8 MiB for > 50 MiB
+            Some(len) if len > 4 * 1024 * 1024 => 4 * 1024 * 1024,    //  4 MiB for > 4 MiB
+            _ => 2 * 1024 * 1024,                                     //  2 MiB default
+        };
+        let mut buf_writer = std::io::BufWriter::with_capacity(write_buf, file);
         let mut buf = vec![0u8; READ_BUF];
         let mut bytes_written = 0u64;
         loop {
@@ -545,11 +569,12 @@ impl ObjectFileStore {
 /// through an adaptive `BufWriter` whose size scales with the expected
 /// object size:
 ///
-/// | Content-Length   | Write buffer | Approx. `spawn_blocking` dispatches |
-/// |-----------------|--------------|-------------------------------------|
-/// | < 4 MiB or None | 2 MiB        | ≤ 2                                 |
-/// | 4 MiB – 64 MiB  | 4 MiB        | ≤ 16                                |
-/// | > 64 MiB        | 8 MiB        | ≤ 13 per 100 MiB                   |
+/// | Content-Length    | Write buffer | Approx. `spawn_blocking` dispatches |
+/// |------------------|--------------|-------------------------------------|
+/// | < 4 MiB or None  | 2 MiB        | ≤ 2                                 |
+/// | 4 MiB – 50 MiB   | 4 MiB        | ≤ 13                                |
+/// | 50 MiB – 128 MiB | 8 MiB        | ≤ 16                                |
+/// | > 128 MiB        | 16 MiB       | ≤ 8 per 128 MiB                    |
 ///
 /// Fewer dispatches → fewer blocking-pool round-trips → lower p95 latency
 /// for large objects without extra heap allocation for small objects.
@@ -569,9 +594,10 @@ where
     // Read buffer stays at 512 KiB (fits L2/L3 cache well).
     const READ_BUF: usize = 512 * 1024; // 512 KiB
     let write_buf: usize = match content_length {
-        Some(len) if len > 64 * 1024 * 1024 => 8 * 1024 * 1024, // 8 MiB for > 64 MiB
-        Some(len) if len > 4 * 1024 * 1024 => 4 * 1024 * 1024,  // 4 MiB for > 4 MiB
-        _ => 2 * 1024 * 1024,                                   // 2 MiB default
+        Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
+        Some(len) if len > 50 * 1024 * 1024 => 8 * 1024 * 1024,   //  8 MiB for > 50 MiB
+        Some(len) if len > 4 * 1024 * 1024 => 4 * 1024 * 1024,    //  4 MiB for > 4 MiB
+        _ => 2 * 1024 * 1024,                                     //  2 MiB default
     };
 
     let file = fs::File::create(tmp_path).await?;

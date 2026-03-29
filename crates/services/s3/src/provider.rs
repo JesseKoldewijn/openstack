@@ -511,20 +511,33 @@ async fn handle_put_object_async(
             let size = body_bytes.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
         } else {
-            // Large object (or unknown size): stream directly to disk.
+            // Large object (or unknown size): use block_in_place + SyncIoBridge
+            // to drive the write loop synchronously on the current worker thread.
+            //
+            // block_in_place calls exit_runtime() which sets the tokio context to
+            // NotEntered, allowing SyncIoBridge to call Handle::block_on() inside
+            // the closure without panicking.  This eliminates all spawn_blocking
+            // dispatch overhead that tokio::fs::File would otherwise require
+            // (one dispatch per BufWriter flush).  block_in_place also spawns a
+            // replacement worker thread so other tasks keep running.
+            //
+            // Unlike spawn_blocking this does not require Send because the closure
+            // runs on the same OS thread, so we can borrow reader_guard/ctx directly.
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
-            let (file_path, bytes_written) = match file_store
-                .write_object_from_reader(
+            let result = tokio::task::block_in_place(|| {
+                let mut sync_reader = tokio_util::io::SyncIoBridge::new(&mut hashing_reader);
+                file_store.write_object_from_sync_reader(
                     &ctx.account_id,
                     &ctx.region,
                     &bucket,
                     &key,
                     &version_id,
-                    &mut hashing_reader,
+                    &mut sync_reader,
                     content_length,
                 )
-                .await
-            {
+            });
+            // sync_reader dropped here → &mut hashing_reader released
+            let (file_path, bytes_written) = match result {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(error = %e, "Failed to stream body_reader to filesystem");
@@ -581,6 +594,7 @@ async fn handle_put_object_async(
                     &key_c,
                     &version_id_c,
                     &mut md5_reader,
+                    Some(spooled_len),
                 )?;
                 let digest = md5_reader.finalize();
                 let etag = format_etag(digest.as_slice());
@@ -1612,19 +1626,21 @@ async fn handle_upload_part_async(
         } else {
             let part_version_id = format!("part-{}", part_number);
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
-            let (file_path, bytes_written) = match file_store
-                .write_object_from_reader(
+            let multipart_key = format!("__multipart/{upload_id}/{key}");
+            let result = tokio::task::block_in_place(|| {
+                let mut sync_reader = tokio_util::io::SyncIoBridge::new(&mut hashing_reader);
+                file_store.write_object_from_sync_reader(
                     &ctx.account_id,
                     &ctx.region,
                     &bucket,
-                    &format!("__multipart/{upload_id}/{key}"),
+                    &multipart_key,
                     &part_version_id,
-                    &mut hashing_reader,
+                    &mut sync_reader,
                     content_length,
                 )
-                .await
-            {
-                Ok(result) => result,
+            });
+            let (file_path, bytes_written) = match result {
+                Ok(r) => r,
                 Err(e) => {
                     warn!(error = %e, "Failed to stream body_reader upload part to filesystem");
                     return s3_error("InternalError", "Failed to store part", 500);
@@ -1662,28 +1678,43 @@ async fn handle_upload_part_async(
             (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
         } else {
             let part_version_id = format!("part-{}", part_number);
-            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
-            let (file_path, bytes_written) = match file_store
-                .write_object_from_reader(
-                    &ctx.account_id,
-                    &ctx.region,
-                    &bucket,
-                    &format!("__multipart/{upload_id}/{key}"),
+            // SpooledBody implements std::io::Read directly — no SyncIoBridge needed.
+            // Use spawn_blocking so the sync write loop doesn't block a worker thread.
+            let file_store_clone = file_store.clone();
+            let account_id_c = ctx.account_id.clone();
+            let region_c = ctx.region.clone();
+            let bucket_c = bucket.clone();
+            let multipart_key = format!("__multipart/{upload_id}/{key}");
+
+            let result = tokio::task::spawn_blocking(move || {
+                let mut md5_reader = Md5Read::new(spooled);
+                let (file_path, bytes_written) = file_store_clone.write_object_from_sync_reader(
+                    &account_id_c,
+                    &region_c,
+                    &bucket_c,
+                    &multipart_key,
                     &part_version_id,
-                    &mut hashing_reader,
+                    &mut md5_reader,
                     Some(spooled_len),
-                )
-                .await
-            {
-                Ok(result) => result,
-                Err(e) => {
+                )?;
+                let digest = md5_reader.finalize();
+                let etag = format_etag(digest.as_slice());
+                io::Result::Ok((etag, bytes_written, file_path))
+            })
+            .await;
+
+            match result {
+                Ok(Ok((etag, bytes_written, file_path))) => {
+                    (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+                }
+                Ok(Err(e)) => {
                     warn!(error = %e, "Failed to stream upload part to filesystem");
                     return s3_error("InternalError", "Failed to store part", 500);
                 }
-            };
-            let digest = hashing_reader.finalize();
-            let etag = format_etag(digest.as_slice());
-            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+                Err(_) => {
+                    return s3_error("InternalError", "Upload part write task panicked", 500);
+                }
+            }
         }
     } else {
         // Fallback for unit-test contexts where spooled_body is None.
@@ -1896,6 +1927,7 @@ async fn handle_complete_multipart_upload_async(
                 &key_cloned,
                 &version_id_cloned,
                 &mut hashing_reader,
+                Some(estimated_size),
             )?;
             let digest = hashing_reader.finalize();
             Ok::<(PathBuf, u64, md5::digest::Output<md5::Md5>), io::Error>((
