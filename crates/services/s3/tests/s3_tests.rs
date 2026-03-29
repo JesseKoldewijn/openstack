@@ -910,7 +910,7 @@ fn test_store_non_versioned_overwrite_keeps_single_version() {
     let objs = store.list_objects("bucket");
     let obj = objs.into_iter().find(|o| o.key == "k").unwrap();
     assert_eq!(obj.versions.len(), 1);
-    assert_eq!(obj.versions[0].version_id, "null");
+    assert_eq!(obj.versions[0].version_id.as_ref(), "null");
     assert_eq!(
         obj.versions[0].data,
         ObjectDataRef::Inline(Bytes::from_static(b"v2"))

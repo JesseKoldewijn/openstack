@@ -638,7 +638,7 @@ async fn handle_put_object_async(
 
     // Build version and store in S3Store (short-lived guard)
     let version = crate::store::ObjectVersion {
-        version_id: version_id.clone(),
+        version_id: Arc::from(version_id.as_str()),
         last_modified: chrono::Utc::now(),
         etag: Arc::from(etag.as_str()),
         content_type: Arc::from(content_type.as_str()),
@@ -647,7 +647,7 @@ async fn handle_put_object_async(
         cache_control: None,
         size,
         metadata: Arc::new(metadata),
-        acl: "private".to_string(),
+        acl: std::borrow::Cow::Borrowed("private"),
         data: object_data,
         delete_marker: false,
     };
@@ -773,8 +773,8 @@ async fn handle_get_object_async(
                 ),
                 ("Content-Length".to_string(), size.to_string()),
             ];
-            if version_id != "null" {
-                headers.push(("x-amz-version-id".to_string(), version_id));
+            if version_id.as_ref() != "null" {
+                headers.push(("x-amz-version-id".to_string(), version_id.to_string()));
             }
             for (mk, mv) in metadata.iter() {
                 headers.push((format!("x-amz-meta-{mk}"), mv.clone()));
@@ -864,8 +864,8 @@ fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse
                 ),
                 ("Content-Length".to_string(), v.size.to_string()),
             ];
-            if v.version_id != "null" {
-                headers.push(("x-amz-version-id".to_string(), v.version_id.clone()));
+            if v.version_id.as_ref() != "null" {
+                headers.push(("x-amz-version-id".to_string(), v.version_id.to_string()));
             }
             for (mk, mv) in v.metadata.iter() {
                 headers.push((format!("x-amz-meta-{mk}"), mv.clone()));
@@ -929,7 +929,7 @@ async fn handle_delete_object_async(
                 headers.push(("x-amz-delete-marker".to_string(), "true".to_string()));
                 headers.push((
                     "x-amz-version-id".to_string(),
-                    deleted_version.version_id.clone(),
+                    deleted_version.version_id.to_string(),
                 ));
             }
         }
@@ -1175,7 +1175,7 @@ async fn handle_copy_object_async(
 
     // Build version and store
     let version = crate::store::ObjectVersion {
-        version_id: dest_version_id.clone(),
+        version_id: Arc::from(dest_version_id.as_str()),
         last_modified: chrono::Utc::now(),
         etag: src_etag.clone(),
         content_type: ct,
@@ -1184,7 +1184,7 @@ async fn handle_copy_object_async(
         cache_control: None,
         size: src_size,
         metadata: meta,
-        acl: "private".to_string(),
+        acl: std::borrow::Cow::Borrowed("private"),
         data: dest_data,
         delete_marker: false,
     };
@@ -1947,7 +1947,7 @@ async fn handle_complete_multipart_upload_async(
 
     // Build version and store in S3Store
     let version = crate::store::ObjectVersion {
-        version_id: version_id.clone(),
+        version_id: Arc::from(version_id.as_str()),
         last_modified: chrono::Utc::now(),
         etag: Arc::from(etag.as_str()),
         content_type: Arc::from(content_type.as_str()),
@@ -1956,7 +1956,7 @@ async fn handle_complete_multipart_upload_async(
         cache_control: None,
         size,
         metadata: Arc::new(metadata),
-        acl: "private".to_string(),
+        acl: std::borrow::Cow::Borrowed("private"),
         data: assembled_data,
         delete_marker: false,
     };

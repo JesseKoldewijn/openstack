@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -152,7 +153,7 @@ impl Bucket {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectVersion {
     /// version-id string; "null" when versioning is disabled
-    pub version_id: String,
+    pub version_id: Arc<str>,
     pub last_modified: DateTime<Utc>,
     /// ETag stored as a shared string — clone is O(1) (atomic refcount).
     pub etag: Arc<str>,
@@ -166,7 +167,7 @@ pub struct ObjectVersion {
     /// Wrapped in `Arc` so cloning while holding a store guard is O(1).
     pub metadata: Arc<HashMap<String, String>>,
     /// ACL canned string
-    pub acl: String,
+    pub acl: Cow<'static, str>,
     /// The actual object data (inline or file-backed)
     #[serde(with = "serde_object_data_ref")]
     pub data: ObjectDataRef,
@@ -184,10 +185,10 @@ impl ObjectVersion {
     ) -> Self {
         let etag_str = format!("\"{}\"", hex::encode(md5_bytes(&data)));
         let size = data.len() as u64;
-        let version_id = if versioning_enabled {
-            Uuid::new_v4().to_string()
+        let version_id: Arc<str> = if versioning_enabled {
+            Arc::from(Uuid::new_v4().to_string().as_str())
         } else {
-            "null".to_string()
+            Arc::from("null")
         };
         Self {
             version_id,
@@ -199,7 +200,7 @@ impl ObjectVersion {
             cache_control: None,
             size,
             metadata: Arc::new(metadata),
-            acl: "private".to_string(),
+            acl: Cow::Borrowed("private"),
             data: ObjectDataRef::Inline(data),
             delete_marker: false,
         }
@@ -215,10 +216,10 @@ impl ObjectVersion {
         metadata: HashMap<String, String>,
         versioning_enabled: bool,
     ) -> Self {
-        let version_id = if versioning_enabled {
-            Uuid::new_v4().to_string()
+        let version_id: Arc<str> = if versioning_enabled {
+            Arc::from(Uuid::new_v4().to_string().as_str())
         } else {
-            "null".to_string()
+            Arc::from("null")
         };
         Self {
             version_id,
@@ -230,7 +231,7 @@ impl ObjectVersion {
             cache_control: None,
             size,
             metadata: Arc::new(metadata),
-            acl: "private".to_string(),
+            acl: Cow::Borrowed("private"),
             data: ObjectDataRef::FileRef(file_path),
             delete_marker: false,
         }
@@ -463,7 +464,7 @@ impl S3Store {
 
         if let Some(obj) = objects.get_mut(key) {
             let prev = obj.versions.first().map(|v| v.data.clone());
-            if version.version_id == "null" {
+            if version.version_id.as_ref() == "null" {
                 // Non-versioned bucket: overwrite current object in place.
                 obj.versions.clear();
                 obj.versions.push(Arc::new(version));
@@ -492,7 +493,7 @@ impl S3Store {
         if let Some(mut objects) = self.objects.get_mut(bucket) {
             if let Some(obj) = objects.get_mut(key) {
                 let prev = obj.versions.first().map(|v| v.data.clone());
-                if version.version_id == "null" {
+                if version.version_id.as_ref() == "null" {
                     obj.versions.clear();
                     obj.versions.push(Arc::new(version));
                 } else {
@@ -527,7 +528,7 @@ impl S3Store {
             objs.get(key).and_then(|obj| {
                 obj.versions
                     .iter()
-                    .find(|v| v.version_id == version_id)
+                    .find(|v| v.version_id.as_ref() == version_id)
                     .cloned()
             })
         })
@@ -545,7 +546,7 @@ impl S3Store {
         if versioning {
             // Insert a delete marker
             let marker = ObjectVersion {
-                version_id: Uuid::new_v4().to_string(),
+                version_id: Arc::from(Uuid::new_v4().to_string().as_str()),
                 last_modified: Utc::now(),
                 etag: Arc::from(""),
                 content_type: Arc::from(""),
@@ -554,7 +555,7 @@ impl S3Store {
                 cache_control: None,
                 size: 0,
                 metadata: Arc::new(HashMap::new()),
-                acl: String::new(),
+                acl: Cow::Borrowed(""),
                 data: ObjectDataRef::Inline(Bytes::new()),
                 delete_marker: true,
             };
@@ -583,7 +584,7 @@ impl S3Store {
         let pos = obj
             .versions
             .iter()
-            .position(|v| v.version_id == version_id)?;
+            .position(|v| v.version_id.as_ref() == version_id)?;
         let removed = obj.versions.remove(pos);
         if obj.versions.is_empty() {
             objects.remove(key);
@@ -854,7 +855,7 @@ impl S3Store {
 
         let mut objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
-            if version.version_id == "null" {
+            if version.version_id.as_ref() == "null" {
                 obj.versions.clear();
                 obj.versions.push(Arc::new(version));
             } else {
@@ -886,7 +887,7 @@ impl S3Store {
         let mut objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
             let prev = obj.versions.first().map(|v| v.data.clone());
-            if version.version_id == "null" {
+            if version.version_id.as_ref() == "null" {
                 obj.versions.clear();
                 obj.versions.push(Arc::new(version));
             } else {
