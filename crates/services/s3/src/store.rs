@@ -334,6 +334,25 @@ pub struct NotificationConfig {
 // S3Store  (per-account-region shard)
 // ---------------------------------------------------------------------------
 
+/// Result of a paged listing operation with optional delimiter grouping.
+///
+/// See [`S3Store::list_objects_paged`] for details.
+#[derive(Debug, Default)]
+pub struct ListPagedResult {
+    /// Raw content items (keys that do NOT contain the delimiter after the
+    /// prefix, or all keys when delimiter is empty).
+    pub contents: Vec<(String, DateTime<Utc>, Arc<str>, u64)>,
+    /// Common prefix → **last raw key seen under that prefix**.
+    ///
+    /// The last raw key is the correct cursor for the next page when the
+    /// final kept output is a common prefix — it ensures the next page
+    /// starts strictly after all keys under that prefix, preventing
+    /// duplicate prefix entries across pages.
+    ///
+    /// Empty when `delimiter` is empty.
+    pub common_prefixes: BTreeMap<String, String>,
+}
+
 /// Per-account-region S3 data store.
 ///
 /// `objects` uses a [`DashMap`] keyed by bucket name so that concurrent
@@ -579,28 +598,35 @@ impl S3Store {
             .unwrap_or_default()
     }
 
-    /// Return object metadata for ListObjectsV2 with server-side filtering.
+    /// Return object metadata for a paged ListObjectsV2 listing.
     ///
     /// Unlike [`list_objects`], this method:
-    /// - Uses `BTreeMap::range` to start from the right position (skipping keys
-    ///   before `prefix` or `start_after_exclusive`).
-    /// - Stops scanning after `max_results` matching objects (early exit).
+    /// - Uses `BTreeMap::range` to start from the right position (skipping
+    ///   keys before `prefix` or `start_after_exclusive`).
+    /// - Performs delimiter grouping **inside** the store so that the scan
+    ///   stops after at most `max_results` **distinct** outputs
+    ///   (Contents + unique CommonPrefixes), rather than raw keys.  This
+    ///   prevents the `usize::MAX` raw-key scan that would otherwise be
+    ///   needed to correctly compute `IsTruncated` for delimiter requests.
+    /// - When the scan stops on a newly-discovered common prefix, continues
+    ///   scanning the remaining keys under that prefix (without counting them
+    ///   as new outputs) to record the truly last raw key — essential for
+    ///   producing a correct continuation cursor.
     /// - Holds the DashMap shard read lock only during this focused iteration.
-    /// - Returns only the four fields the handler needs, avoiding a full
-    ///   `S3Object` clone per entry.
     ///
-    /// Keys are returned in sorted (BTreeMap) order.
+    /// Keys / prefixes are returned in sorted (BTreeMap) order.
     pub fn list_objects_paged(
         &self,
         bucket: &str,
         prefix: &str,
         start_after_exclusive: Option<&str>,
         max_results: usize,
-    ) -> Vec<(String, DateTime<Utc>, Arc<str>, u64)> {
+        delimiter: &str,
+    ) -> ListPagedResult {
         use std::ops::Bound;
 
         let Some(m) = self.objects.get(bucket) else {
-            return Vec::new();
+            return ListPagedResult::default();
         };
 
         // Compute the effective lower bound:
@@ -614,19 +640,78 @@ impl S3Store {
             _ => Bound::Unbounded,
         };
 
-        m.range((lower, Bound::Unbounded))
-            // BTreeMap is sorted: once a key no longer starts with `prefix`
-            // no subsequent key will either, so we stop early.
+        let mut result = ListPagedResult::default();
+        let mut distinct_count = 0usize;
+        // The common prefix whose key range we are scanning for cursor purposes
+        // after distinct_count has already reached max_results.
+        let mut last_new_cp: Option<String> = None;
+        // The last raw key seen while scanning for the cursor (avoids cloning
+        // `last_new_cp` on every iteration — only the key String is cloned).
+        let mut cursor_update: Option<String> = None;
+
+        for (key, obj) in m
+            .range((lower, Bound::Unbounded))
             .take_while(|(k, _)| prefix.is_empty() || k.starts_with(prefix))
-            .filter_map(|(key, obj)| {
-                // current() borrows the version without bumping the Arc
-                // refcount — saves one atomic op per entry while the shard
-                // lock is held.
-                let v = obj.current()?;
-                Some((key.clone(), v.last_modified, Arc::clone(&v.etag), v.size))
-            })
-            .take(max_results)
-            .collect()
+        {
+            // ── Cursor-finding mode ──────────────────────────────────────────
+            // We already have max_results distinct outputs; scan forward
+            // through the remaining keys under the last common prefix so we
+            // can record its truly last raw key as the cursor.
+            if let Some(ref lcp) = last_new_cp {
+                if !key.starts_with(lcp.as_str()) {
+                    break; // exited the prefix's key range — done
+                }
+                // Include delete-marker keys: they define the correct cursor
+                // boundary even though they don't appear in listings.
+                cursor_update = Some(key.clone());
+                continue;
+            }
+
+            // ── Normal mode: skip delete markers ────────────────────────────
+            if obj.current().is_none() {
+                continue;
+            }
+
+            // ── Delimiter grouping ───────────────────────────────────────────
+            if !delimiter.is_empty() {
+                let suffix = &key[prefix.len()..];
+                if let Some(pos) = suffix.find(delimiter) {
+                    let cp = format!("{}{}{}", prefix, &suffix[..pos], delimiter);
+                    let is_new = !result.common_prefixes.contains_key(&cp);
+                    // Always record the latest raw key under this prefix.
+                    result.common_prefixes.insert(cp.clone(), key.clone());
+                    if is_new {
+                        distinct_count += 1;
+                        if distinct_count >= max_results {
+                            // Switch to cursor-finding mode for remaining keys
+                            // under this prefix (so `cp_map[cp]` ends up with
+                            // the truly last key, not just the first one seen).
+                            last_new_cp = Some(cp);
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // ── Content item ─────────────────────────────────────────────────
+            // current() already confirmed above (not None).
+            let v = obj.current().unwrap();
+            result
+                .contents
+                .push((key.clone(), v.last_modified, Arc::clone(&v.etag), v.size));
+            distinct_count += 1;
+            if distinct_count >= max_results {
+                break; // content item is the +1 trigger; its key IS the cursor
+            }
+        }
+
+        // If cursor-finding mode found additional keys under the last prefix,
+        // update cp_map so the caller gets the correct continuation cursor.
+        if let (Some(lcp), Some(last_key)) = (last_new_cp, cursor_update) {
+            result.common_prefixes.insert(lcp, last_key);
+        }
+
+        result
     }
 
     // --- multipart helpers -------------------------------------------------

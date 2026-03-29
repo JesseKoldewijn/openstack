@@ -19,7 +19,7 @@ use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
 
 use crate::object_store::{ObjectFileStore, ObjectLocation};
-use crate::store::{ObjectDataRef, S3Store};
+use crate::store::{ListPagedResult, ObjectDataRef, S3Store};
 
 /// Returns the threshold (in bytes) below which objects are stored inline
 /// in memory rather than written to disk.  Objects at or below this size
@@ -183,8 +183,28 @@ impl S3Provider {
 // XML helpers
 // ---------------------------------------------------------------------------
 
-fn xml_ok(xml: &str) -> DispatchResponse {
-    DispatchResponse::ok_xml(xml.to_string())
+fn xml_ok(xml: String) -> DispatchResponse {
+    DispatchResponse::ok_xml(xml)
+}
+
+// ---------------------------------------------------------------------------
+// ETag helpers
+// ---------------------------------------------------------------------------
+
+/// Format a 16-byte MD5 digest as a quoted ETag string (`"<hex>"`).
+///
+/// Uses a single allocation of exactly 34 bytes (1 quote + 32 hex chars + 1
+/// quote), avoiding the two-allocation chain of `hex::encode` + `format!`.
+#[inline]
+fn format_etag(digest: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(2 + digest.len() * 2);
+    s.push('"');
+    for b in digest {
+        write!(s, "{b:02x}").unwrap();
+    }
+    s.push('"');
+    s
 }
 
 fn xml_response(status: u16, xml: String) -> DispatchResponse {
@@ -252,6 +272,24 @@ fn key_from_path(path: &str) -> String {
     let path = path.trim_start_matches('/');
     let slash = path.find('/').unwrap_or(path.len());
     path[slash..].trim_start_matches('/').to_string()
+}
+
+/// Returns `true` if the path contains a non-empty key segment (after the bucket).
+#[inline]
+fn path_has_key(path: &str) -> bool {
+    let path = path.trim_start_matches('/');
+    let slash = path.find('/').unwrap_or(path.len());
+    !path[slash..].trim_start_matches('/').is_empty()
+}
+
+/// Returns `true` if the path contains a non-empty bucket segment.
+#[inline]
+fn path_has_bucket(path: &str) -> bool {
+    let path = path.trim_start_matches('/');
+    path.split('/')
+        .next()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +388,7 @@ fn handle_list_buckets(store: &S3Store, _ctx: &RequestContext) -> DispatchRespon
         .unwrap();
     }
     xml.push_str("</Buckets></ListAllMyBucketsResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 fn handle_get_bucket_location(store: &S3Store, ctx: &RequestContext) -> DispatchResponse {
@@ -378,7 +416,7 @@ fn handle_get_bucket_location(store: &S3Store, ctx: &RequestContext) -> Dispatch
         b.region.clone()
     };
 
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{location}</LocationConstraint>"
     ))
@@ -469,7 +507,7 @@ async fn handle_put_object_async(
                 return s3_error("InternalError", "Failed to read request body", 500);
             }
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             let size = body_bytes.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
         } else {
@@ -494,7 +532,7 @@ async fn handle_put_object_async(
                 }
             };
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             (etag, bytes_written, ObjectDataRef::FileRef(file_path))
         }
     } else if let Some(mutex) = ctx.spooled_body.as_ref() {
@@ -521,7 +559,7 @@ async fn handle_put_object_async(
                 return s3_error("InternalError", "Failed to read request body", 500);
             }
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             let size = body_bytes.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
         } else {
@@ -545,7 +583,7 @@ async fn handle_put_object_async(
                     &mut md5_reader,
                 )?;
                 let digest = md5_reader.finalize();
-                let etag = format!("\"{}\"", hex::encode(digest));
+                let etag = format_etag(digest.as_slice());
                 io::Result::Ok((etag, bytes_written, file_path))
             })
             .await;
@@ -566,7 +604,7 @@ async fn handle_put_object_async(
     } else {
         // Fallback for unit-test contexts where spooled_body is None.
         let body_bytes = ctx.raw_body_bytes().to_vec();
-        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&body_bytes)));
+        let etag = format_etag(&md5::Md5::digest(&body_bytes));
         let size = body_bytes.len() as u64;
         let object_data = if size <= inline_object_threshold() {
             ObjectDataRef::Inline(Bytes::from(body_bytes))
@@ -981,12 +1019,16 @@ async fn handle_delete_objects_async(
         }
     }
 
-    // Clean up files (async I/O — no store guard held)
-    for path in &files_to_delete {
-        let _ = tokio::fs::remove_file(path).await;
+    // Clean up files in parallel (async I/O — no store guard held)
+    if !files_to_delete.is_empty() {
+        let mut cleanup_set = tokio::task::JoinSet::new();
+        for path in files_to_delete {
+            cleanup_set.spawn(async move { tokio::fs::remove_file(path).await });
+        }
+        while cleanup_set.join_next().await.is_some() {}
     }
 
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{deleted_xml}</DeleteResult>"
     ))
@@ -1176,7 +1218,7 @@ async fn handle_copy_object_async(
         let _ = tokio::fs::remove_file(path).await;
     }
 
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <CopyObjectResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <LastModified>{}</LastModified><ETag>{}</ETag></CopyObjectResult>",
@@ -1217,79 +1259,40 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     // Apply start_after / continuation_token (used as an exclusive lower bound).
     let skip_after = continuation_token.as_deref().or(start_after.as_deref());
 
-    // Use range-based listing: starts from max(prefix, skip_after) and exits
-    // early once enough matching objects are found.
-    //
-    // Without a delimiter every raw key maps 1-to-1 to an output entry, so
-    // `max_keys + 1` raw keys is the exact scan window needed (the +1 detects
-    // truncation).
-    //
-    // With a delimiter, many raw keys may collapse into a single CommonPrefix
-    // entry.  A heuristic multiplier can cause `list_objects_paged()` to stop
-    // scanning before all keys under the last common prefix have been visited,
-    // which makes the page look non-truncated even when keys remain.  For
-    // correctness we must scan all prefix-matching keys in the delimiter case;
-    // `take_while(starts_with prefix)` in `list_objects_paged()` already
-    // constrains the scan to the relevant key range, so passing `usize::MAX`
-    // is safe and O(matching keys).
-    let scan_limit = if delimiter.is_empty() {
-        max_keys + 1
-    } else {
-        usize::MAX
-    };
+    // Use range-based listing with server-side delimiter grouping.
+    // list_objects_paged() stops after max_keys + 1 **distinct** outputs
+    // (Contents + unique CommonPrefixes), so we never scan more raw keys
+    // than needed — even for delimiter requests with many keys per prefix.
+    let ListPagedResult {
+        contents: mut content_items,
+        common_prefixes: cp_map,
+    } = store.list_objects_paged(&bucket, &prefix, skip_after, max_keys + 1, &delimiter);
 
-    // Single-pass: collect (key, last_modified, etag, size) for matching objects.
-    // list_objects_paged() applies prefix + start-after filters server-side,
-    // visiting only relevant keys and holding the DashMap lock briefly.
-    type ObjMeta = (String, chrono::DateTime<chrono::Utc>, Arc<str>, u64);
-    let mut all_items: Vec<ObjMeta> =
-        store.list_objects_paged(&bucket, &prefix, skip_after, scan_limit);
+    let truncated = content_items.len() + cp_map.len() > max_keys;
 
-    // Common prefix (delimiter) handling
-    let mut common_prefixes: BTreeSet<String> = BTreeSet::new();
-    let mut content_items: Vec<ObjMeta> = Vec::new();
-
-    if delimiter.is_empty() {
-        content_items = std::mem::take(&mut all_items);
-    } else {
-        for item in &all_items {
-            let suffix = &item.0[prefix.len()..];
-            if let Some(pos) = suffix.find(&*delimiter) {
-                common_prefixes.insert(format!("{}{}{}", prefix, &suffix[..pos], delimiter));
-            } else {
-                content_items.push(item.clone());
-            }
-        }
-    }
-
-    let truncated = content_items.len() + common_prefixes.len() > max_keys;
-    // Truncate common_prefixes first (BTreeSet order = sorted), then
-    // give the remaining MaxKeys budget to content_items.
-    let mut cp_vec: Vec<String> = common_prefixes.into_iter().collect();
-    if cp_vec.len() > max_keys {
-        cp_vec.truncate(max_keys);
-    }
-    let remaining = max_keys.saturating_sub(cp_vec.len());
+    // Truncate: common prefixes first (BTreeMap is already sorted), then
+    // give the remaining MaxKeys budget to content items.
+    let cp_count_kept = cp_map.len().min(max_keys);
+    let remaining = max_keys.saturating_sub(cp_count_kept);
     content_items.truncate(remaining);
 
-    let next_token = if truncated {
-        // Prefer the last content key.  When the page was filled entirely by
-        // common prefixes (content_items is empty), we must NOT use the
-        // synthetic prefix string (e.g. "dir/") as the cursor: every key
-        // under "dir/" is lexicographically greater than "dir/", so the
-        // retain filter on the next request would keep them all and they
-        // would collapse into "dir/" again — an infinite loop.
-        //
-        // Instead, find the last raw object key in `all_items` that was
-        // grouped into the last kept common prefix.  That key IS a valid
-        // cursor because all remaining keys come strictly after it.
+    // Collect the kept common prefix strings (BTreeMap keys are sorted).
+    let cp_vec: Vec<&str> = cp_map
+        .keys()
+        .take(cp_count_kept)
+        .map(String::as_str)
+        .collect();
+
+    let next_token: Option<String> = if truncated {
+        // Prefer the last kept content key as cursor.  When the page was
+        // filled entirely by common prefixes, use the last raw key seen
+        // under the last common prefix — this is stored in cp_map so the
+        // next page starts strictly after all keys under that prefix,
+        // preventing duplicate prefix entries across pages.
         if let Some((k, ..)) = content_items.last() {
             Some(k.clone())
-        } else if let Some(last_cp) = cp_vec.last() {
-            all_items
-                .iter()
-                .rfind(|(k, ..)| k.starts_with(last_cp.as_str()))
-                .map(|(k, ..)| k.clone())
+        } else if let Some(last_cp) = cp_vec.last().copied() {
+            cp_map.get(last_cp).cloned()
         } else {
             None
         }
@@ -1355,7 +1358,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     }
 
     xml.push_str("</ListBucketResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 // ListObjectsV1 (backwards compat)
@@ -1491,7 +1494,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     }
 
     xml.push_str("</ListBucketResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 // ---------------------------------------------------------------------------
@@ -1528,7 +1531,7 @@ fn handle_create_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -> 
 
     let upload_id = store.create_multipart_upload(&bucket, &key, content_type, metadata);
 
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Bucket>{bucket}</Bucket><Key>{key}</Key><UploadId>{upload_id}</UploadId>\
@@ -1603,7 +1606,7 @@ async fn handle_upload_part_async(
                 return s3_error("InternalError", "Failed to read request body", 500);
             }
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             let size = data.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
         } else {
@@ -1628,7 +1631,7 @@ async fn handle_upload_part_async(
                 }
             };
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             (etag, bytes_written, ObjectDataRef::FileRef(file_path))
         }
     } else if let Some(mutex) = ctx.spooled_body.as_ref() {
@@ -1654,7 +1657,7 @@ async fn handle_upload_part_async(
                 return s3_error("InternalError", "Failed to read request body", 500);
             }
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             let size = data.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
         } else {
@@ -1679,13 +1682,13 @@ async fn handle_upload_part_async(
                 }
             };
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             (etag, bytes_written, ObjectDataRef::FileRef(file_path))
         }
     } else {
         // Fallback for unit-test contexts where spooled_body is None.
         let data = ctx.raw_body_bytes().to_vec();
-        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&data)));
+        let etag = format_etag(&md5::Md5::digest(&data));
         let size = data.len() as u64;
         let part_data = if size <= inline_object_threshold() {
             ObjectDataRef::Inline(Bytes::from(data))
@@ -1855,7 +1858,7 @@ async fn handle_complete_multipart_upload_async(
         }
 
         let etag = if multipart_etag.is_empty() {
-            format!("\"{}\"", hex::encode(md5::Md5::digest(&combined)))
+            format_etag(&md5::Md5::digest(&combined))
         } else {
             multipart_etag.clone()
         };
@@ -1928,7 +1931,7 @@ async fn handle_complete_multipart_upload_async(
         while cleanup_set.join_next().await.is_some() {}
 
         let etag = if multipart_etag.is_empty() {
-            format!("\"{}\"", hex::encode(digest))
+            format_etag(digest.as_slice())
         } else {
             multipart_etag
         };
@@ -1982,7 +1985,7 @@ async fn handle_complete_multipart_upload_async(
     }
 
     let location = format!("http://localhost:4566/{bucket}/{key}");
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Location>{location}</Location>\
@@ -2046,7 +2049,7 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
     }
 
     xml.push_str("</ListMultipartUploadsResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 // ---------------------------------------------------------------------------
@@ -2076,7 +2079,7 @@ fn handle_get_bucket_acl(store: &S3Store, ctx: &RequestContext) -> DispatchRespo
     if !store.bucket_exists(&bucket) {
         return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
     }
-    xml_ok(&default_acl_xml(&ctx.account_id))
+    xml_ok(default_acl_xml(&ctx.account_id))
 }
 
 fn handle_put_bucket_acl(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
@@ -2111,7 +2114,7 @@ fn handle_get_object_acl(store: &S3Store, ctx: &RequestContext) -> DispatchRespo
     if store.get_object(&bucket, &key).is_none() {
         return s3_error("NoSuchKey", "The specified key does not exist", 404);
     }
-    xml_ok(&default_acl_xml(&ctx.account_id))
+    xml_ok(default_acl_xml(&ctx.account_id))
 }
 
 fn handle_put_object_acl(store: &S3Store, ctx: &RequestContext) -> DispatchResponse {
@@ -2201,7 +2204,7 @@ fn handle_get_bucket_versioning(store: &S3Store, ctx: &RequestContext) -> Dispat
             } else {
                 format!("<Status>{}</Status>", b.versioning)
             };
-            xml_ok(&format!(
+            xml_ok(format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{status_xml}</VersioningConfiguration>"
             ))
@@ -2297,7 +2300,7 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
     }
 
     xml.push_str("</ListVersionsResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 // ---------------------------------------------------------------------------
@@ -2321,7 +2324,8 @@ fn handle_get_bucket_notification(store: &S3Store, ctx: &RequestContext) -> Disp
     }
     xml_ok(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></NotificationConfiguration>",
+<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></NotificationConfiguration>"
+            .to_string(),
     )
 }
 
@@ -2450,7 +2454,8 @@ impl ServiceProvider for S3Provider {
                         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Owner><ID>000000000000</ID><DisplayName>localstack</DisplayName></Owner>\
-<Buckets></Buckets></ListAllMyBucketsResult>",
+<Buckets></Buckets></ListAllMyBucketsResult>"
+                            .to_string(),
                     )
                 }
             }
@@ -2661,9 +2666,9 @@ impl ServiceProvider for S3Provider {
 // ---------------------------------------------------------------------------
 
 fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
-    let method = ctx.method.to_uppercase();
-    let has_key = !key_from_path(&ctx.path).is_empty();
-    let has_bucket = bucket_from_path(&ctx.path).is_some();
+    let method = ctx.method.as_str();
+    let has_key = path_has_key(&ctx.path);
+    let has_bucket = path_has_bucket(&ctx.path);
 
     // Query param presence flags
     let q = &ctx.query_params;
@@ -2681,7 +2686,7 @@ fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
     let has_x_amz_sig = q.contains_key("X-Amz-Signature") || q.contains_key("x-amz-signature");
     let has_copy_source = ctx.headers.contains_key("x-amz-copy-source");
 
-    match (method.as_str(), has_bucket, has_key) {
+    match (method, has_bucket, has_key) {
         ("GET", false, _) => Cow::Borrowed("ListBuckets"),
         ("GET", true, false) => {
             if has_location {
