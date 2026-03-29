@@ -496,7 +496,9 @@ seed_request() {
   local target="$1" method="$2" url="$3"
   shift 3
   local response http_code body
-  response=$(curl -s -w "\n%{http_code}" -X "$method" "$@" "$url" 2>/dev/null) || true
+  # Connect timeout: 5s.  Max total time: 120s (enough for a 100 MiB seed on
+  # a resource-constrained CI runner while still aborting on a server deadlock).
+  response=$(curl -s --connect-timeout 5 --max-time 120 -w "\n%{http_code}" -X "$method" "$@" "$url" 2>/dev/null) || true
   http_code="${response##*$'\n'}"
   body="${response%$'\n'*}"
 

@@ -511,51 +511,34 @@ async fn handle_put_object_async(
             let size = body_bytes.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
         } else {
-            // Large object (or unknown size): use block_in_place + SyncIoBridge
-            // to drive the write loop synchronously on the current worker thread.
+            // Large object (or unknown size): stream directly to disk via the
+            // async write path.
             //
-            // block_in_place calls exit_runtime() which sets the tokio context to
-            // NotEntered, allowing SyncIoBridge to call Handle::block_on() inside
-            // the closure without panicking.  This eliminates all spawn_blocking
-            // dispatch overhead that tokio::fs::File would otherwise require
-            // (one dispatch per BufWriter flush).  block_in_place also spawns a
-            // replacement worker thread so other tasks keep running.
+            // We MUST NOT use block_in_place + SyncIoBridge here.  The
+            // body_reader is backed by the live hyper HTTP/1.1 connection.
+            // axum::serve runs each connection as a single tokio task that
+            // drives both socket I/O (reading TCP frames, pushing body data
+            // through an internal channel to the handler) and the request
+            // handler itself.  block_in_place freezes the entire task — the
+            // socket-I/O half stops running, so body data can never arrive,
+            // and SyncIoBridge::read() (which calls Handle::block_on) parks
+            // the OS thread forever: a permanent deadlock.
             //
-            // Unlike spawn_blocking this does not require Send because the closure
-            // runs on the same OS thread, so we can borrow reader_guard/ctx directly.
-            //
-            // On single-threaded runtimes (e.g. #[tokio::test] without multi_thread),
-            // block_in_place panics.  Detect the runtime flavor and fall back to the
-            // async write path in that case.
+            // The async path uses tokio::fs::File with an adaptive BufWriter
+            // (up to 16 MiB), requiring only ~12 spawn_blocking dispatches
+            // for a 100 MiB file — overhead is negligible vs. actual I/O.
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
-            let result = if tokio::runtime::Handle::current().runtime_flavor()
-                == tokio::runtime::RuntimeFlavor::MultiThread
-            {
-                tokio::task::block_in_place(|| {
-                    let mut sync_reader = tokio_util::io::SyncIoBridge::new(&mut hashing_reader);
-                    file_store.write_object_from_sync_reader(
-                        &ctx.account_id,
-                        &ctx.region,
-                        &bucket,
-                        &key,
-                        &version_id,
-                        &mut sync_reader,
-                        content_length,
-                    )
-                })
-            } else {
-                file_store
-                    .write_object_from_reader(
-                        &ctx.account_id,
-                        &ctx.region,
-                        &bucket,
-                        &key,
-                        &version_id,
-                        &mut hashing_reader,
-                        content_length,
-                    )
-                    .await
-            };
+            let result = file_store
+                .write_object_from_reader(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &key,
+                    &version_id,
+                    &mut hashing_reader,
+                    content_length,
+                )
+                .await;
             let (file_path, bytes_written) = match result {
                 Ok(r) => r,
                 Err(e) => {
@@ -1643,37 +1626,23 @@ async fn handle_upload_part_async(
             let size = data.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
         } else {
+            // Large part (or unknown size): stream directly to disk via the
+            // async write path.  See the PutObject comment above for why
+            // block_in_place + SyncIoBridge cannot be used with body_reader.
             let part_version_id = format!("part-{}", part_number);
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
             let multipart_key = format!("__multipart/{upload_id}/{key}");
-            let result = if tokio::runtime::Handle::current().runtime_flavor()
-                == tokio::runtime::RuntimeFlavor::MultiThread
-            {
-                tokio::task::block_in_place(|| {
-                    let mut sync_reader = tokio_util::io::SyncIoBridge::new(&mut hashing_reader);
-                    file_store.write_object_from_sync_reader(
-                        &ctx.account_id,
-                        &ctx.region,
-                        &bucket,
-                        &multipart_key,
-                        &part_version_id,
-                        &mut sync_reader,
-                        content_length,
-                    )
-                })
-            } else {
-                file_store
-                    .write_object_from_reader(
-                        &ctx.account_id,
-                        &ctx.region,
-                        &bucket,
-                        &multipart_key,
-                        &part_version_id,
-                        &mut hashing_reader,
-                        content_length,
-                    )
-                    .await
-            };
+            let result = file_store
+                .write_object_from_reader(
+                    &ctx.account_id,
+                    &ctx.region,
+                    &bucket,
+                    &multipart_key,
+                    &part_version_id,
+                    &mut hashing_reader,
+                    content_length,
+                )
+                .await;
             let (file_path, bytes_written) = match result {
                 Ok(r) => r,
                 Err(e) => {

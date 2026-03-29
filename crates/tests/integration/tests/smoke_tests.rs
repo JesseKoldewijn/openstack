@@ -1536,3 +1536,87 @@ async fn smoke_s3_concurrent_put_same_key() {
 
     harness.shutdown();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S3 Large PutObject — no deadlock on multi-thread runtime (regression guard)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Uploads a 5 MiB object through a *real* HTTP connection on the multi-thread
+/// tokio runtime.
+///
+/// This specifically guards against the `block_in_place` + `SyncIoBridge`
+/// deadlock that was introduced in commit `dcb3bdc`.  The root cause:
+///
+/// - `axum::serve` runs each HTTP/1.1 connection as a **single tokio task**
+///   that drives both socket I/O *and* the request handler.
+/// - When `block_in_place` is called inside the handler, the entire task is
+///   frozen — including the hyper I/O loop that reads body frames from the
+///   TCP socket and pushes them through an internal channel to the handler.
+/// - `SyncIoBridge::read()` calls `Handle::block_on(body.read())`, waiting
+///   for data that can only arrive via the frozen I/O loop — permanent
+///   deadlock.
+///
+/// The test uses `flavor = "multi_thread"` to trigger the runtime-flavor
+/// check that gates `block_in_place` (on `current_thread` tests the code
+/// already falls back to the async path, masking the bug).  A 10-second
+/// `tokio::time::timeout` converts an infinite hang into a clean failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn smoke_s3_large_put_no_deadlock() {
+    use std::time::Duration;
+
+    let harness =
+        openstack_integration_tests::harness::TestHarness::start_services("s3").await;
+
+    // Create bucket
+    let resp = harness
+        .aws_put("/large-put-bucket", "s3", "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "CreateBucket failed");
+
+    // 5 MiB body — exceeds the 4 MiB inline threshold, forcing the
+    // large-object write path which previously called block_in_place.
+    let size = 5 * 1024 * 1024usize;
+    let body: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+
+    // The timeout converts an infinite deadlock into a test failure with a
+    // clear message rather than a silent CI hang.
+    let put_resp = tokio::time::timeout(
+        Duration::from_secs(10),
+        harness
+            .aws_put("/large-put-bucket/5mb.bin", "s3", "us-east-1")
+            .header("content-type", "application/octet-stream")
+            .body(body.clone())
+            .send(),
+    )
+    .await
+    .expect("PutObject 5 MiB deadlocked — timed out after 10s")
+    .expect("PutObject 5 MiB HTTP error");
+    assert_eq!(
+        put_resp.status().as_u16(),
+        200,
+        "PutObject 5 MiB: unexpected status"
+    );
+    assert!(
+        put_resp.headers().contains_key("etag"),
+        "PutObject 5 MiB: ETag header missing"
+    );
+
+    // Verify byte-level round-trip.
+    let get_resp = harness
+        .aws_get("/large-put-bucket/5mb.bin", "s3", "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get_resp.status().as_u16(),
+        200,
+        "GetObject 5 MiB: unexpected status"
+    );
+    let got = get_resp.bytes().await.unwrap();
+    assert_eq!(got.len(), size, "GetObject 5 MiB: length mismatch");
+    assert_eq!(&got[..], &body[..], "GetObject 5 MiB: content mismatch");
+
+    harness.shutdown();
+}
