@@ -162,8 +162,9 @@ pub struct ObjectVersion {
     pub content_disposition: Option<String>,
     pub cache_control: Option<String>,
     pub size: u64,
-    /// User-defined metadata (x-amz-meta-* headers, stored without the prefix)
-    pub metadata: HashMap<String, String>,
+    /// User-defined metadata (x-amz-meta-* headers, stored without the prefix).
+    /// Wrapped in `Arc` so cloning while holding a store guard is O(1).
+    pub metadata: Arc<HashMap<String, String>>,
     /// ACL canned string
     pub acl: String,
     /// The actual object data (inline or file-backed)
@@ -197,7 +198,7 @@ impl ObjectVersion {
             content_disposition: None,
             cache_control: None,
             size,
-            metadata,
+            metadata: Arc::new(metadata),
             acl: "private".to_string(),
             data: ObjectDataRef::Inline(data),
             delete_marker: false,
@@ -228,7 +229,7 @@ impl ObjectVersion {
             content_disposition: None,
             cache_control: None,
             size,
-            metadata,
+            metadata: Arc::new(metadata),
             acl: "private".to_string(),
             data: ObjectDataRef::FileRef(file_path),
             delete_marker: false,
@@ -533,7 +534,7 @@ impl S3Store {
                 content_disposition: None,
                 cache_control: None,
                 size: 0,
-                metadata: HashMap::new(),
+                metadata: Arc::new(HashMap::new()),
                 acl: String::new(),
                 data: ObjectDataRef::Inline(Bytes::new()),
                 delete_marker: true,

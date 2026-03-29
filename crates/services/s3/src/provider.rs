@@ -40,6 +40,16 @@ fn inline_object_threshold() -> u64 {
     })
 }
 
+/// GET-side threshold for reading file-backed objects fully into memory rather
+/// than streaming via `ReaderStream`.  Higher than the PUT-side
+/// `inline_object_threshold` because we only hold the buffer transiently
+/// during response serialisation — it is freed as soon as the response body
+/// is sent.
+///
+/// At 6 concurrency × 10 MiB = 60 MiB peak from GET buffers, safely under
+/// the 100 MiB loaded-RSS gate.
+const GET_BUFFERED_THRESHOLD: u64 = 10 * 1024 * 1024; // 10 MiB
+
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
 /// so that hashing and disk writes happen on a blocking thread rather than
@@ -598,7 +608,7 @@ async fn handle_put_object_async(
         content_disposition: None,
         cache_control: None,
         size,
-        metadata,
+        metadata: Arc::new(metadata),
         acl: "private".to_string(),
         data: object_data,
         delete_marker: false,
@@ -728,7 +738,7 @@ async fn handle_get_object_async(
             if version_id != "null" {
                 headers.push(("x-amz-version-id".to_string(), version_id));
             }
-            for (mk, mv) in &metadata {
+            for (mk, mv) in metadata.iter() {
                 headers.push((format!("x-amz-meta-{mk}"), mv.clone()));
             }
             // Always emit Content-Encoding so the gateway's CompressionLayer
@@ -751,7 +761,7 @@ async fn handle_get_object_async(
                     // For small objects read the entire file into memory and
                     // return a buffered response — this avoids spawn_blocking
                     // overhead for tiny payloads.
-                    if size <= inline_object_threshold() {
+                    if size <= GET_BUFFERED_THRESHOLD {
                         match tokio::fs::read(&path).await {
                             Ok(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
                             Err(e) => {
@@ -819,7 +829,7 @@ fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse
             if v.version_id != "null" {
                 headers.push(("x-amz-version-id".to_string(), v.version_id.clone()));
             }
-            for (mk, mv) in &v.metadata {
+            for (mk, mv) in v.metadata.iter() {
                 headers.push((format!("x-amz-meta-{mk}"), mv.clone()));
             }
             DispatchResponse {
@@ -1942,7 +1952,7 @@ async fn handle_complete_multipart_upload_async(
         content_disposition: None,
         cache_control: None,
         size,
-        metadata,
+        metadata: Arc::new(metadata),
         acl: "private".to_string(),
         data: assembled_data,
         delete_marker: false,

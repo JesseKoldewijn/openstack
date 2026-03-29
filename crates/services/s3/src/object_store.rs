@@ -246,8 +246,11 @@ impl ObjectFileStore {
     where
         R: tokio::io::AsyncRead + Unpin,
     {
-        /// Objects at or above this threshold use the channel-bridge path.
-        const LARGE_THRESHOLD: u64 = 50 * 1024 * 1024; // 50 MiB
+        // The channel-bridge path (write_via_channel) was benchmarked at 6
+        // concurrency and found to regress all object sizes vs. the copy path.
+        // It is kept for future evaluation under higher concurrency / stress
+        // profiles but disabled here (use_channel is always false).
+        let use_channel = false;
 
         let dir = self.object_dir(account_id, region, bucket, key);
         self.ensure_dir_exists(&dir).await?;
@@ -256,12 +259,10 @@ impl ObjectFileStore {
         let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
-        let use_channel = content_length.is_some_and(|len| len >= LARGE_THRESHOLD);
-
         let bytes_written = if use_channel {
             self.write_via_channel(reader, &tmp_path).await?
         } else {
-            write_via_copy(reader, &tmp_path).await?
+            write_via_copy(reader, &tmp_path, content_length).await?
         };
 
         fs::rename(&tmp_path, &final_path).await?;
@@ -660,21 +661,37 @@ impl ObjectFileStore {
     }
 }
 
-/// Simple write path for small/medium objects (< 50 MiB or unknown size).
+/// Simple write path for all objects.
 ///
-/// Uses `tokio::io::copy` into a 2 MiB `BufWriter<tokio::fs::File>`.
-/// tokio::fs::File dispatches to the blocking pool internally, but for
-/// objects under 50 MiB the number of dispatches is low enough that this
-/// straightforward approach outperforms the channel-bridge alternative.
-async fn write_via_copy<R>(reader: &mut R, tmp_path: &Path) -> io::Result<u64>
+/// Wraps the reader in a 512 KiB `BufReader` so `copy_buf` issues ~20
+/// reads per 10 MiB (vs. the 8 KiB internal buffer of `tokio::io::copy`
+/// which would issue ~1,280).  Writes are flushed via a 2 MiB `BufWriter`.
+///
+/// When `content_length` is known the file is pre-allocated with
+/// `set_len` to avoid filesystem block re-allocation during sequential writes.
+async fn write_via_copy<R>(
+    reader: &mut R,
+    tmp_path: &Path,
+    content_length: Option<u64>,
+) -> io::Result<u64>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    const READ_BUF: usize = 512 * 1024; // 512 KiB — ~20 reads per 10 MiB
     const WRITE_BUF: usize = 2 * 1024 * 1024; // 2 MiB
 
     let file = fs::File::create(tmp_path).await?;
+
+    // Pre-allocate to avoid block-level fragmentation on ext4/xfs.
+    if let Some(len) = content_length
+        && len > 0
+    {
+        file.set_len(len).await?;
+    }
+
     let mut bw = tokio::io::BufWriter::with_capacity(WRITE_BUF, file);
-    let bytes_written = tokio::io::copy(reader, &mut bw).await?;
+    let mut br = tokio::io::BufReader::with_capacity(READ_BUF, reader);
+    let bytes_written = tokio::io::copy_buf(&mut br, &mut bw).await?;
     bw.flush().await?;
     drop(bw); // close fd before caller renames
 
