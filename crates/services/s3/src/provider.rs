@@ -19,7 +19,7 @@ use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
 
 use crate::object_store::{ObjectFileStore, ObjectLocation};
-use crate::store::{ObjectDataRef, S3Store};
+use crate::store::{ListPagedResult, ObjectDataRef, S3Store};
 
 /// Returns the threshold (in bytes) below which objects are stored inline
 /// in memory rather than written to disk.  Objects at or below this size
@@ -39,6 +39,16 @@ fn inline_object_threshold() -> u64 {
             .unwrap_or(4 * 1024 * 1024) // 4 MiB default
     })
 }
+
+/// GET-side threshold for reading file-backed objects fully into memory rather
+/// than streaming via `ReaderStream`.  Higher than the PUT-side
+/// `inline_object_threshold` because we only hold the buffer transiently
+/// during response serialisation — it is freed as soon as the response body
+/// is sent.
+///
+/// At 6 concurrency × 10 MiB = 60 MiB peak from GET buffers, safely under
+/// the 100 MiB loaded-RSS gate.
+const GET_BUFFERED_THRESHOLD: u64 = 10 * 1024 * 1024; // 10 MiB
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
@@ -173,8 +183,28 @@ impl S3Provider {
 // XML helpers
 // ---------------------------------------------------------------------------
 
-fn xml_ok(xml: &str) -> DispatchResponse {
-    DispatchResponse::ok_xml(xml.to_string())
+fn xml_ok(xml: String) -> DispatchResponse {
+    DispatchResponse::ok_xml(xml)
+}
+
+// ---------------------------------------------------------------------------
+// ETag helpers
+// ---------------------------------------------------------------------------
+
+/// Format a 16-byte MD5 digest as a quoted ETag string (`"<hex>"`).
+///
+/// Uses a single allocation of exactly 34 bytes (1 quote + 32 hex chars + 1
+/// quote), avoiding the two-allocation chain of `hex::encode` + `format!`.
+#[inline]
+fn format_etag(digest: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(2 + digest.len() * 2);
+    s.push('"');
+    for b in digest {
+        write!(s, "{b:02x}").unwrap();
+    }
+    s.push('"');
+    s
 }
 
 fn xml_response(status: u16, xml: String) -> DispatchResponse {
@@ -242,6 +272,24 @@ fn key_from_path(path: &str) -> String {
     let path = path.trim_start_matches('/');
     let slash = path.find('/').unwrap_or(path.len());
     path[slash..].trim_start_matches('/').to_string()
+}
+
+/// Returns `true` if the path contains a non-empty key segment (after the bucket).
+#[inline]
+fn path_has_key(path: &str) -> bool {
+    let path = path.trim_start_matches('/');
+    let slash = path.find('/').unwrap_or(path.len());
+    !path[slash..].trim_start_matches('/').is_empty()
+}
+
+/// Returns `true` if the path contains a non-empty bucket segment.
+#[inline]
+fn path_has_bucket(path: &str) -> bool {
+    let path = path.trim_start_matches('/');
+    path.split('/')
+        .next()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +388,7 @@ fn handle_list_buckets(store: &S3Store, _ctx: &RequestContext) -> DispatchRespon
         .unwrap();
     }
     xml.push_str("</Buckets></ListAllMyBucketsResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 fn handle_get_bucket_location(store: &S3Store, ctx: &RequestContext) -> DispatchResponse {
@@ -368,7 +416,7 @@ fn handle_get_bucket_location(store: &S3Store, ctx: &RequestContext) -> Dispatch
         b.region.clone()
     };
 
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{location}</LocationConstraint>"
     ))
@@ -459,13 +507,28 @@ async fn handle_put_object_async(
                 return s3_error("InternalError", "Failed to read request body", 500);
             }
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             let size = body_bytes.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
         } else {
-            // Large object (or unknown size): stream directly to disk.
+            // Large object (or unknown size): stream directly to disk via the
+            // async write path.
+            //
+            // We MUST NOT use block_in_place + SyncIoBridge here.  The
+            // body_reader is backed by the live hyper HTTP/1.1 connection.
+            // axum::serve runs each connection as a single tokio task that
+            // drives both socket I/O (reading TCP frames, pushing body data
+            // through an internal channel to the handler) and the request
+            // handler itself.  block_in_place freezes the entire task — the
+            // socket-I/O half stops running, so body data can never arrive,
+            // and SyncIoBridge::read() (which calls Handle::block_on) parks
+            // the OS thread forever: a permanent deadlock.
+            //
+            // The async path uses tokio::fs::File with an adaptive BufWriter
+            // (up to 16 MiB), requiring only ~12 spawn_blocking dispatches
+            // for a 100 MiB file — overhead is negligible vs. actual I/O.
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
-            let (file_path, bytes_written) = match file_store
+            let result = file_store
                 .write_object_from_reader(
                     &ctx.account_id,
                     &ctx.region,
@@ -473,9 +536,10 @@ async fn handle_put_object_async(
                     &key,
                     &version_id,
                     &mut hashing_reader,
+                    content_length,
                 )
-                .await
-            {
+                .await;
+            let (file_path, bytes_written) = match result {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(error = %e, "Failed to stream body_reader to filesystem");
@@ -483,7 +547,7 @@ async fn handle_put_object_async(
                 }
             };
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             (etag, bytes_written, ObjectDataRef::FileRef(file_path))
         }
     } else if let Some(mutex) = ctx.spooled_body.as_ref() {
@@ -510,7 +574,7 @@ async fn handle_put_object_async(
                 return s3_error("InternalError", "Failed to read request body", 500);
             }
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             let size = body_bytes.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(body_bytes)))
         } else {
@@ -532,9 +596,10 @@ async fn handle_put_object_async(
                     &key_c,
                     &version_id_c,
                     &mut md5_reader,
+                    Some(spooled_len),
                 )?;
                 let digest = md5_reader.finalize();
-                let etag = format!("\"{}\"", hex::encode(digest));
+                let etag = format_etag(digest.as_slice());
                 io::Result::Ok((etag, bytes_written, file_path))
             })
             .await;
@@ -555,7 +620,7 @@ async fn handle_put_object_async(
     } else {
         // Fallback for unit-test contexts where spooled_body is None.
         let body_bytes = ctx.raw_body_bytes().to_vec();
-        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&body_bytes)));
+        let etag = format_etag(&md5::Md5::digest(&body_bytes));
         let size = body_bytes.len() as u64;
         let object_data = if size <= inline_object_threshold() {
             ObjectDataRef::Inline(Bytes::from(body_bytes))
@@ -589,7 +654,7 @@ async fn handle_put_object_async(
 
     // Build version and store in S3Store (short-lived guard)
     let version = crate::store::ObjectVersion {
-        version_id: version_id.clone(),
+        version_id: Arc::from(version_id.as_str()),
         last_modified: chrono::Utc::now(),
         etag: Arc::from(etag.as_str()),
         content_type: Arc::from(content_type.as_str()),
@@ -597,8 +662,8 @@ async fn handle_put_object_async(
         content_disposition: None,
         cache_control: None,
         size,
-        metadata,
-        acl: "private".to_string(),
+        metadata: Arc::new(metadata),
+        acl: std::borrow::Cow::Borrowed("private"),
         data: object_data,
         delete_marker: false,
     };
@@ -724,10 +789,10 @@ async fn handle_get_object_async(
                 ),
                 ("Content-Length".to_string(), size.to_string()),
             ];
-            if version_id != "null" {
-                headers.push(("x-amz-version-id".to_string(), version_id));
+            if version_id.as_ref() != "null" {
+                headers.push(("x-amz-version-id".to_string(), version_id.to_string()));
             }
-            for (mk, mv) in &metadata {
+            for (mk, mv) in metadata.iter() {
                 headers.push((format!("x-amz-meta-{mk}"), mv.clone()));
             }
             // Always emit Content-Encoding so the gateway's CompressionLayer
@@ -748,9 +813,9 @@ async fn handle_get_object_async(
                 ObjectDataRef::Inline(bytes) => ResponseBody::Buffered(bytes),
                 ObjectDataRef::FileRef(path) => {
                     // For small objects read the entire file into memory and
-                    // return a buffered response — this avoids the spawn_blocking
-                    // overhead of ReaderStream for tiny payloads.
-                    if size <= inline_object_threshold() {
+                    // return a buffered response — this avoids spawn_blocking
+                    // overhead for tiny payloads.
+                    if size <= GET_BUFFERED_THRESHOLD {
                         match tokio::fs::read(&path).await {
                             Ok(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
                             Err(e) => {
@@ -759,10 +824,13 @@ async fn handle_get_object_async(
                             }
                         }
                     } else {
+                        // Stream via ReaderStream with a 1 MiB read buffer.
+                        // This halves blocking-pool dispatches vs the original
+                        // 512 KiB capacity while keeping memory overhead minimal
+                        // (no channel allocation, no extra allocation per chunk).
                         match ObjectFileStore::read_object_at(&path).await {
                             Ok(file) => {
-                                // Stream directly through ReaderStream.
-                                const READ_BUF: usize = 512 * 1024;
+                                const READ_BUF: usize = 1024 * 1024; // 1 MiB
                                 let stream = ReaderStream::with_capacity(file, READ_BUF);
                                 ResponseBody::Streaming {
                                     stream: Box::pin(stream),
@@ -812,10 +880,10 @@ fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse
                 ),
                 ("Content-Length".to_string(), v.size.to_string()),
             ];
-            if v.version_id != "null" {
-                headers.push(("x-amz-version-id".to_string(), v.version_id.clone()));
+            if v.version_id.as_ref() != "null" {
+                headers.push(("x-amz-version-id".to_string(), v.version_id.to_string()));
             }
-            for (mk, mv) in &v.metadata {
+            for (mk, mv) in v.metadata.iter() {
                 headers.push((format!("x-amz-meta-{mk}"), mv.clone()));
             }
             DispatchResponse {
@@ -877,7 +945,7 @@ async fn handle_delete_object_async(
                 headers.push(("x-amz-delete-marker".to_string(), "true".to_string()));
                 headers.push((
                     "x-amz-version-id".to_string(),
-                    deleted_version.version_id.clone(),
+                    deleted_version.version_id.to_string(),
                 ));
             }
         }
@@ -967,12 +1035,16 @@ async fn handle_delete_objects_async(
         }
     }
 
-    // Clean up files (async I/O — no store guard held)
-    for path in &files_to_delete {
-        let _ = tokio::fs::remove_file(path).await;
+    // Clean up files in parallel (async I/O — no store guard held)
+    if !files_to_delete.is_empty() {
+        let mut cleanup_set = tokio::task::JoinSet::new();
+        for path in files_to_delete {
+            cleanup_set.spawn(async move { tokio::fs::remove_file(path).await });
+        }
+        while cleanup_set.join_next().await.is_some() {}
     }
 
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{deleted_xml}</DeleteResult>"
     ))
@@ -1119,7 +1191,7 @@ async fn handle_copy_object_async(
 
     // Build version and store
     let version = crate::store::ObjectVersion {
-        version_id: dest_version_id.clone(),
+        version_id: Arc::from(dest_version_id.as_str()),
         last_modified: chrono::Utc::now(),
         etag: src_etag.clone(),
         content_type: ct,
@@ -1128,7 +1200,7 @@ async fn handle_copy_object_async(
         cache_control: None,
         size: src_size,
         metadata: meta,
-        acl: "private".to_string(),
+        acl: std::borrow::Cow::Borrowed("private"),
         data: dest_data,
         delete_marker: false,
     };
@@ -1162,7 +1234,7 @@ async fn handle_copy_object_async(
         let _ = tokio::fs::remove_file(path).await;
     }
 
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <CopyObjectResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <LastModified>{}</LastModified><ETag>{}</ETag></CopyObjectResult>",
@@ -1200,77 +1272,43 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     let continuation_token = ctx.query_params.get("continuation-token").cloned();
     let start_after = ctx.query_params.get("start-after").cloned();
 
-    // Single-pass: collect (key, last_modified, etag, size) for all matching objects.
-    // list_objects() returns in sorted key order (BTreeMap), so no sort needed.
-    type ObjMeta = (String, chrono::DateTime<chrono::Utc>, Arc<str>, u64);
-    let mut all_items: Vec<ObjMeta> = store
-        .list_objects(&bucket)
-        .into_iter()
-        .filter_map(|obj| {
-            let v = obj.current()?;
-            if !obj.key.starts_with(&prefix) {
-                return None;
-            }
-            Some((
-                obj.key.clone(),
-                v.last_modified,
-                Arc::clone(&v.etag),
-                v.size,
-            ))
-        })
-        .collect();
-
-    // Apply start_after / continuation_token
+    // Apply start_after / continuation_token (used as an exclusive lower bound).
     let skip_after = continuation_token.as_deref().or(start_after.as_deref());
-    if let Some(skip) = skip_after {
-        all_items.retain(|(k, ..)| k.as_str() > skip);
-    }
 
-    // Common prefix (delimiter) handling
-    let mut common_prefixes: BTreeSet<String> = BTreeSet::new();
-    let mut content_items: Vec<ObjMeta> = Vec::new();
+    // Use range-based listing with server-side delimiter grouping.
+    // list_objects_paged() stops after max_keys + 1 **distinct** outputs
+    // (Contents + unique CommonPrefixes), so we never scan more raw keys
+    // than needed — even for delimiter requests with many keys per prefix.
+    let ListPagedResult {
+        contents: mut content_items,
+        common_prefixes: cp_map,
+    } = store.list_objects_paged(&bucket, &prefix, skip_after, max_keys + 1, &delimiter);
 
-    if delimiter.is_empty() {
-        content_items = std::mem::take(&mut all_items);
-    } else {
-        for item in &all_items {
-            let suffix = &item.0[prefix.len()..];
-            if let Some(pos) = suffix.find(&*delimiter) {
-                common_prefixes.insert(format!("{}{}{}", prefix, &suffix[..pos], delimiter));
-            } else {
-                content_items.push(item.clone());
-            }
-        }
-    }
+    let truncated = content_items.len() + cp_map.len() > max_keys;
 
-    let truncated = content_items.len() + common_prefixes.len() > max_keys;
-    // Truncate common_prefixes first (BTreeSet order = sorted), then
-    // give the remaining MaxKeys budget to content_items.
-    let mut cp_vec: Vec<String> = common_prefixes.into_iter().collect();
-    if cp_vec.len() > max_keys {
-        cp_vec.truncate(max_keys);
-    }
-    let remaining = max_keys.saturating_sub(cp_vec.len());
+    // Truncate: common prefixes first (BTreeMap is already sorted), then
+    // give the remaining MaxKeys budget to content items.
+    let cp_count_kept = cp_map.len().min(max_keys);
+    let remaining = max_keys.saturating_sub(cp_count_kept);
     content_items.truncate(remaining);
 
-    let next_token = if truncated {
-        // Prefer the last content key.  When the page was filled entirely by
-        // common prefixes (content_items is empty), we must NOT use the
-        // synthetic prefix string (e.g. "dir/") as the cursor: every key
-        // under "dir/" is lexicographically greater than "dir/", so the
-        // retain filter on the next request would keep them all and they
-        // would collapse into "dir/" again — an infinite loop.
-        //
-        // Instead, find the last raw object key in `all_items` that was
-        // grouped into the last kept common prefix.  That key IS a valid
-        // cursor because all remaining keys come strictly after it.
+    // Collect the kept common prefix strings (BTreeMap keys are sorted).
+    let cp_vec: Vec<&str> = cp_map
+        .keys()
+        .take(cp_count_kept)
+        .map(String::as_str)
+        .collect();
+
+    let next_token: Option<String> = if truncated {
+        // Prefer the last kept content key as cursor.  When the page was
+        // filled entirely by common prefixes, use the last raw key seen
+        // under the last common prefix — this is stored in cp_map so the
+        // next page starts strictly after all keys under that prefix,
+        // preventing duplicate prefix entries across pages.
         if let Some((k, ..)) = content_items.last() {
             Some(k.clone())
-        } else if let Some(last_cp) = cp_vec.last() {
-            all_items
-                .iter()
-                .rfind(|(k, ..)| k.starts_with(last_cp.as_str()))
-                .map(|(k, ..)| k.clone())
+        } else if let Some(last_cp) = cp_vec.last().copied() {
+            cp_map.get(last_cp).cloned()
         } else {
             None
         }
@@ -1280,7 +1318,13 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
 
     let key_count = content_items.len() + cp_vec.len();
 
-    let mut xml = format!(
+    // Pre-size the XML buffer to avoid repeated reallocations.
+    // Rough estimate: ~250 bytes per Content entry + ~80 bytes per CommonPrefix
+    // + ~400 bytes for the fixed header/footer.
+    let cap = 400 + content_items.len() * 250 + cp_vec.len() * 80;
+    let mut xml = String::with_capacity(cap);
+    write!(
+        xml,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Name>{}</Name><Prefix>{}</Prefix><MaxKeys>{}</MaxKeys>\
@@ -1290,7 +1334,8 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
         max_keys,
         key_count,
         truncated
-    );
+    )
+    .unwrap();
 
     if let Some(ref t) = next_token {
         write!(
@@ -1329,7 +1374,7 @@ fn handle_list_objects_v2(store: &S3Store, ctx: &RequestContext) -> DispatchResp
     }
 
     xml.push_str("</ListBucketResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 // ListObjectsV1 (backwards compat)
@@ -1465,7 +1510,7 @@ fn handle_list_objects(store: &S3Store, ctx: &RequestContext) -> DispatchRespons
     }
 
     xml.push_str("</ListBucketResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 // ---------------------------------------------------------------------------
@@ -1502,7 +1547,7 @@ fn handle_create_multipart_upload(store: &mut S3Store, ctx: &RequestContext) -> 
 
     let upload_id = store.create_multipart_upload(&bucket, &key, content_type, metadata);
 
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Bucket>{bucket}</Bucket><Key>{key}</Key><UploadId>{upload_id}</UploadId>\
@@ -1577,31 +1622,36 @@ async fn handle_upload_part_async(
                 return s3_error("InternalError", "Failed to read request body", 500);
             }
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             let size = data.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
         } else {
+            // Large part (or unknown size): stream directly to disk via the
+            // async write path.  See the PutObject comment above for why
+            // block_in_place + SyncIoBridge cannot be used with body_reader.
             let part_version_id = format!("part-{}", part_number);
             let mut hashing_reader = HashingReader::<md5::Md5, _>::new(&mut *reader_guard);
-            let (file_path, bytes_written) = match file_store
+            let multipart_key = format!("__multipart/{upload_id}/{key}");
+            let result = file_store
                 .write_object_from_reader(
                     &ctx.account_id,
                     &ctx.region,
                     &bucket,
-                    &format!("__multipart/{upload_id}/{key}"),
+                    &multipart_key,
                     &part_version_id,
                     &mut hashing_reader,
+                    content_length,
                 )
-                .await
-            {
-                Ok(result) => result,
+                .await;
+            let (file_path, bytes_written) = match result {
+                Ok(r) => r,
                 Err(e) => {
                     warn!(error = %e, "Failed to stream body_reader upload part to filesystem");
                     return s3_error("InternalError", "Failed to store part", 500);
                 }
             };
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             (etag, bytes_written, ObjectDataRef::FileRef(file_path))
         }
     } else if let Some(mutex) = ctx.spooled_body.as_ref() {
@@ -1627,37 +1677,53 @@ async fn handle_upload_part_async(
                 return s3_error("InternalError", "Failed to read request body", 500);
             }
             let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
+            let etag = format_etag(digest.as_slice());
             let size = data.len() as u64;
             (etag, size, ObjectDataRef::Inline(Bytes::from(data)))
         } else {
             let part_version_id = format!("part-{}", part_number);
-            let mut hashing_reader = HashingReader::<md5::Md5, _>::new(spooled.into_reader());
-            let (file_path, bytes_written) = match file_store
-                .write_object_from_reader(
-                    &ctx.account_id,
-                    &ctx.region,
-                    &bucket,
-                    &format!("__multipart/{upload_id}/{key}"),
+            // SpooledBody implements std::io::Read directly — no SyncIoBridge needed.
+            // Use spawn_blocking so the sync write loop doesn't block a worker thread.
+            let file_store_clone = file_store.clone();
+            let account_id_c = ctx.account_id.clone();
+            let region_c = ctx.region.clone();
+            let bucket_c = bucket.clone();
+            let multipart_key = format!("__multipart/{upload_id}/{key}");
+
+            let result = tokio::task::spawn_blocking(move || {
+                let mut md5_reader = Md5Read::new(spooled);
+                let (file_path, bytes_written) = file_store_clone.write_object_from_sync_reader(
+                    &account_id_c,
+                    &region_c,
+                    &bucket_c,
+                    &multipart_key,
                     &part_version_id,
-                    &mut hashing_reader,
-                )
-                .await
-            {
-                Ok(result) => result,
-                Err(e) => {
+                    &mut md5_reader,
+                    Some(spooled_len),
+                )?;
+                let digest = md5_reader.finalize();
+                let etag = format_etag(digest.as_slice());
+                io::Result::Ok((etag, bytes_written, file_path))
+            })
+            .await;
+
+            match result {
+                Ok(Ok((etag, bytes_written, file_path))) => {
+                    (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+                }
+                Ok(Err(e)) => {
                     warn!(error = %e, "Failed to stream upload part to filesystem");
                     return s3_error("InternalError", "Failed to store part", 500);
                 }
-            };
-            let digest = hashing_reader.finalize();
-            let etag = format!("\"{}\"", hex::encode(digest));
-            (etag, bytes_written, ObjectDataRef::FileRef(file_path))
+                Err(_) => {
+                    return s3_error("InternalError", "Upload part write task panicked", 500);
+                }
+            }
         }
     } else {
         // Fallback for unit-test contexts where spooled_body is None.
         let data = ctx.raw_body_bytes().to_vec();
-        let etag = format!("\"{}\"", hex::encode(md5::Md5::digest(&data)));
+        let etag = format_etag(&md5::Md5::digest(&data));
         let size = data.len() as u64;
         let part_data = if size <= inline_object_threshold() {
             ObjectDataRef::Inline(Bytes::from(data))
@@ -1827,7 +1893,7 @@ async fn handle_complete_multipart_upload_async(
         }
 
         let etag = if multipart_etag.is_empty() {
-            format!("\"{}\"", hex::encode(md5::Md5::digest(&combined)))
+            format_etag(&md5::Md5::digest(&combined))
         } else {
             multipart_etag.clone()
         };
@@ -1865,6 +1931,7 @@ async fn handle_complete_multipart_upload_async(
                 &key_cloned,
                 &version_id_cloned,
                 &mut hashing_reader,
+                Some(estimated_size),
             )?;
             let digest = hashing_reader.finalize();
             Ok::<(PathBuf, u64, md5::digest::Output<md5::Md5>), io::Error>((
@@ -1900,7 +1967,7 @@ async fn handle_complete_multipart_upload_async(
         while cleanup_set.join_next().await.is_some() {}
 
         let etag = if multipart_etag.is_empty() {
-            format!("\"{}\"", hex::encode(digest))
+            format_etag(digest.as_slice())
         } else {
             multipart_etag
         };
@@ -1916,7 +1983,7 @@ async fn handle_complete_multipart_upload_async(
 
     // Build version and store in S3Store
     let version = crate::store::ObjectVersion {
-        version_id: version_id.clone(),
+        version_id: Arc::from(version_id.as_str()),
         last_modified: chrono::Utc::now(),
         etag: Arc::from(etag.as_str()),
         content_type: Arc::from(content_type.as_str()),
@@ -1924,8 +1991,8 @@ async fn handle_complete_multipart_upload_async(
         content_disposition: None,
         cache_control: None,
         size,
-        metadata,
-        acl: "private".to_string(),
+        metadata: Arc::new(metadata),
+        acl: std::borrow::Cow::Borrowed("private"),
         data: assembled_data,
         delete_marker: false,
     };
@@ -1954,7 +2021,7 @@ async fn handle_complete_multipart_upload_async(
     }
 
     let location = format!("http://localhost:4566/{bucket}/{key}");
-    xml_ok(&format!(
+    xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Location>{location}</Location>\
@@ -2018,7 +2085,7 @@ fn handle_list_multipart_uploads(store: &S3Store, ctx: &RequestContext) -> Dispa
     }
 
     xml.push_str("</ListMultipartUploadsResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 // ---------------------------------------------------------------------------
@@ -2048,7 +2115,7 @@ fn handle_get_bucket_acl(store: &S3Store, ctx: &RequestContext) -> DispatchRespo
     if !store.bucket_exists(&bucket) {
         return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
     }
-    xml_ok(&default_acl_xml(&ctx.account_id))
+    xml_ok(default_acl_xml(&ctx.account_id))
 }
 
 fn handle_put_bucket_acl(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
@@ -2083,7 +2150,7 @@ fn handle_get_object_acl(store: &S3Store, ctx: &RequestContext) -> DispatchRespo
     if store.get_object(&bucket, &key).is_none() {
         return s3_error("NoSuchKey", "The specified key does not exist", 404);
     }
-    xml_ok(&default_acl_xml(&ctx.account_id))
+    xml_ok(default_acl_xml(&ctx.account_id))
 }
 
 fn handle_put_object_acl(store: &S3Store, ctx: &RequestContext) -> DispatchResponse {
@@ -2173,7 +2240,7 @@ fn handle_get_bucket_versioning(store: &S3Store, ctx: &RequestContext) -> Dispat
             } else {
                 format!("<Status>{}</Status>", b.versioning)
             };
-            xml_ok(&format!(
+            xml_ok(format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{status_xml}</VersioningConfiguration>"
             ))
@@ -2269,7 +2336,7 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
     }
 
     xml.push_str("</ListVersionsResult>");
-    xml_ok(&xml)
+    xml_ok(xml)
 }
 
 // ---------------------------------------------------------------------------
@@ -2293,7 +2360,8 @@ fn handle_get_bucket_notification(store: &S3Store, ctx: &RequestContext) -> Disp
     }
     xml_ok(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></NotificationConfiguration>",
+<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></NotificationConfiguration>"
+            .to_string(),
     )
 }
 
@@ -2422,7 +2490,8 @@ impl ServiceProvider for S3Provider {
                         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Owner><ID>000000000000</ID><DisplayName>localstack</DisplayName></Owner>\
-<Buckets></Buckets></ListAllMyBucketsResult>",
+<Buckets></Buckets></ListAllMyBucketsResult>"
+                            .to_string(),
                     )
                 }
             }
@@ -2633,9 +2702,9 @@ impl ServiceProvider for S3Provider {
 // ---------------------------------------------------------------------------
 
 fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
-    let method = ctx.method.to_uppercase();
-    let has_key = !key_from_path(&ctx.path).is_empty();
-    let has_bucket = bucket_from_path(&ctx.path).is_some();
+    let method = ctx.method.as_str();
+    let has_key = path_has_key(&ctx.path);
+    let has_bucket = path_has_bucket(&ctx.path);
 
     // Query param presence flags
     let q = &ctx.query_params;
@@ -2653,7 +2722,7 @@ fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
     let has_x_amz_sig = q.contains_key("X-Amz-Signature") || q.contains_key("x-amz-signature");
     let has_copy_source = ctx.headers.contains_key("x-amz-copy-source");
 
-    match (method.as_str(), has_bucket, has_key) {
+    match (method, has_bucket, has_key) {
         ("GET", false, _) => Cow::Borrowed("ListBuckets"),
         ("GET", true, false) => {
             if has_location {

@@ -212,6 +212,11 @@ impl ObjectFileStore {
 
     /// Write object data from a reader (async), streaming to disk.
     ///
+    /// All objects use [`write_via_copy`]: an async read loop with a 512 KiB
+    /// `BufReader` feeding an adaptive `BufWriter` (2–8 MiB depending on
+    /// `content_length`).  Pre-allocates the file with `set_len` when size
+    /// is known to avoid block-level fragmentation.
+    ///
     /// Returns `(final_path, bytes_written)`.
     pub async fn write_object_from_reader<R>(
         &self,
@@ -221,6 +226,7 @@ impl ObjectFileStore {
         key: &str,
         version_id: &str,
         reader: &mut R,
+        content_length: Option<u64>,
     ) -> io::Result<(PathBuf, u64)>
     where
         R: tokio::io::AsyncRead + Unpin,
@@ -232,14 +238,7 @@ impl ObjectFileStore {
         let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
-        let mut file = fs::File::create(&tmp_path).await?;
-
-        // 512 KiB keeps throughput strong while reducing per-request RSS.
-        const COPY_BUF: usize = 512 * 1024;
-        let mut buf_reader = tokio::io::BufReader::with_capacity(COPY_BUF, reader);
-        let bytes_written = tokio::io::copy_buf(&mut buf_reader, &mut file).await?;
-        file.flush().await?;
-        drop(file);
+        let bytes_written = write_via_copy(reader, &tmp_path, content_length).await?;
 
         fs::rename(&tmp_path, &final_path).await?;
 
@@ -254,8 +253,20 @@ impl ObjectFileStore {
 
     /// Write object data from a synchronous reader, streaming to disk.
     ///
-    /// Intended for use inside [`tokio::task::spawn_blocking`] closures so
-    /// that disk I/O does not block tokio worker threads.
+    /// Intended for use inside [`tokio::task::spawn_blocking`] or
+    /// [`tokio::task::block_in_place`] closures so that disk I/O does not
+    /// block tokio worker threads.
+    ///
+    /// When `content_length` is known the file is pre-allocated with
+    /// `set_len` to avoid filesystem block re-allocation, and the write
+    /// buffer is scaled to match the object size:
+    ///
+    /// | Content-Length    | Write buffer |
+    /// |------------------|--------------|
+    /// | < 4 MiB or None  | 2 MiB        |
+    /// | 4 MiB – 50 MiB   | 4 MiB        |
+    /// | 50 MiB – 128 MiB | 8 MiB        |
+    /// | > 128 MiB        | 16 MiB       |
     ///
     /// Returns `(final_path, bytes_written)`.
     pub fn write_object_from_sync_reader<R>(
@@ -266,6 +277,7 @@ impl ObjectFileStore {
         key: &str,
         version_id: &str,
         reader: &mut R,
+        content_length: Option<u64>,
     ) -> io::Result<(PathBuf, u64)>
     where
         R: std::io::Read,
@@ -279,21 +291,39 @@ impl ObjectFileStore {
         let tmp_id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_path = dir.join(format!("{version_id}-{tmp_id}.tmp"));
 
-        let mut file = std::fs::File::create(&tmp_path)?;
+        let file = std::fs::File::create(&tmp_path)?;
 
-        // 512 KiB keeps throughput strong while reducing per-request RSS.
-        let mut buf = vec![0u8; 512 * 1024];
+        // Pre-allocate to avoid block-level fragmentation on ext4/xfs.
+        if let Some(len) = content_length
+            && len > 0
+        {
+            file.set_len(len)?;
+        }
+
+        // Adaptive write buffer: scale with expected object size to reduce
+        // write(2) syscall overhead. Read buffer stays at 512 KiB.
+        const READ_BUF: usize = 512 * 1024; // 512 KiB
+        let write_buf: usize = match content_length {
+            Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
+            Some(len) if len > 50 * 1024 * 1024 => 8 * 1024 * 1024,   //  8 MiB for > 50 MiB
+            Some(len) if len > 4 * 1024 * 1024 => 4 * 1024 * 1024,    //  4 MiB for > 4 MiB
+            _ => 2 * 1024 * 1024,                                     //  2 MiB default
+        };
+        let mut buf_writer = std::io::BufWriter::with_capacity(write_buf, file);
+        let mut buf = vec![0u8; READ_BUF];
         let mut bytes_written = 0u64;
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
             }
-            file.write_all(&buf[..n])?;
+            buf_writer.write_all(&buf[..n])?;
             bytes_written += n as u64;
         }
-        file.flush()?;
-        drop(file);
+        buf_writer.flush()?;
+        // Ensure the file is closed before rename (important on Windows;
+        // harmless on Linux).
+        drop(buf_writer);
 
         std::fs::rename(&tmp_path, &final_path)?;
 
@@ -532,6 +562,64 @@ impl ObjectFileStore {
     }
 }
 
+/// Simple write path for all objects.
+///
+/// Wraps the reader in a `BufReader` so `copy_buf` issues large reads
+/// (vs. the 8 KiB internal buffer of `tokio::io::copy`).  Writes go
+/// through an adaptive `BufWriter` whose size scales with the expected
+/// object size:
+///
+/// | Content-Length    | Write buffer | Approx. `spawn_blocking` dispatches |
+/// |------------------|--------------|-------------------------------------|
+/// | < 4 MiB or None  | 2 MiB        | ≤ 2                                 |
+/// | 4 MiB – 50 MiB   | 4 MiB        | ≤ 13                                |
+/// | 50 MiB – 128 MiB | 8 MiB        | ≤ 16                                |
+/// | > 128 MiB        | 16 MiB       | ≤ 8 per 128 MiB                    |
+///
+/// Fewer dispatches → fewer blocking-pool round-trips → lower p95 latency
+/// for large objects without extra heap allocation for small objects.
+///
+/// When `content_length` is known the file is pre-allocated with
+/// `set_len` to avoid filesystem block re-allocation during sequential writes.
+async fn write_via_copy<R>(
+    reader: &mut R,
+    tmp_path: &Path,
+    content_length: Option<u64>,
+) -> io::Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    // Adaptive buffer sizing: scale the write buffer with expected object size
+    // to reduce the number of spawn_blocking dispatches per object.
+    // Read buffer stays at 512 KiB (fits L2/L3 cache well).
+    const READ_BUF: usize = 512 * 1024; // 512 KiB
+    let write_buf: usize = match content_length {
+        Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
+        Some(len) if len > 50 * 1024 * 1024 => 8 * 1024 * 1024,   //  8 MiB for > 50 MiB
+        Some(len) if len > 4 * 1024 * 1024 => 4 * 1024 * 1024,    //  4 MiB for > 4 MiB
+        _ => 2 * 1024 * 1024,                                     //  2 MiB default
+    };
+
+    let file = fs::File::create(tmp_path).await?;
+
+    // Pre-allocate to avoid block-level fragmentation on ext4/xfs.
+    if let Some(len) = content_length
+        && len > 0
+    {
+        file.set_len(len).await?;
+    }
+
+    let mut bw = tokio::io::BufWriter::with_capacity(write_buf, file);
+    let mut br = tokio::io::BufReader::with_capacity(READ_BUF, reader);
+    let bytes_written = tokio::io::copy_buf(&mut br, &mut bw).await?;
+    bw.flush().await?;
+    drop(bw); // close fd before caller renames
+
+    Ok(bytes_written)
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
@@ -575,7 +663,7 @@ mod tests {
         let mut cursor = tokio::io::BufReader::new(&data[..]);
 
         let (path, n) = store
-            .write_object_from_reader("acct1", "us-east-1", "bkt", "key1", "v1", &mut cursor)
+            .write_object_from_reader("acct1", "us-east-1", "bkt", "key1", "v1", &mut cursor, None)
             .await
             .unwrap();
 

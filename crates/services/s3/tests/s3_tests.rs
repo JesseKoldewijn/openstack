@@ -910,7 +910,7 @@ fn test_store_non_versioned_overwrite_keeps_single_version() {
     let objs = store.list_objects("bucket");
     let obj = objs.into_iter().find(|o| o.key == "k").unwrap();
     assert_eq!(obj.versions.len(), 1);
-    assert_eq!(obj.versions[0].version_id, "null");
+    assert_eq!(obj.versions[0].version_id.as_ref(), "null");
     assert_eq!(
         obj.versions[0].data,
         ObjectDataRef::Inline(Bytes::from_static(b"v2"))
@@ -931,6 +931,168 @@ fn test_store_multipart() {
     assert_eq!(
         v.data,
         ObjectDataRef::Inline(Bytes::from(b"part1part2".as_ref()))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R2 — ListObjectsV2 delimiter truncation: many keys under a single prefix
+// (CodeRabbit issue r3005271026)
+// ---------------------------------------------------------------------------
+
+/// Unit test for the exact CodeRabbit scenario:
+///   - 1 001 keys under `a/` (`a/0001` … `a/1001`)
+///   - 1 key after them: `z.txt`
+///   - max-keys=1 (max_results=2 sentinel, matching the +1 logic in the provider)
+///   - delimiter=`/`
+///
+/// Page 1 must return `a/` as a CommonPrefix and `IsTruncated=true`.
+/// The continuation cursor must point past ALL `a/` keys (to `a/1001`),
+/// so that page 2 starts strictly after `a/` and returns `z.txt`.
+#[test]
+fn test_list_objects_paged_delimiter_truncation_many_keys_under_prefix() {
+    use openstack_s3::store::{ObjectDataRef, S3Store};
+
+    let mut store = S3Store::new();
+    store.create_bucket("b", "us-east-1");
+
+    // Insert 1001 keys under a/
+    for i in 1..=1001u32 {
+        let key = format!("a/{i:04}");
+        store.put_object(
+            "b",
+            &key,
+            ObjectDataRef::Inline(bytes::Bytes::from_static(b"x")),
+            "text/plain",
+            std::collections::HashMap::new(),
+        );
+    }
+    // Insert the key that must appear on page 2
+    store.put_object(
+        "b",
+        "z.txt",
+        ObjectDataRef::Inline(bytes::Bytes::from_static(b"z")),
+        "text/plain",
+        std::collections::HashMap::new(),
+    );
+
+    // max_keys=1 → caller passes max_results = max_keys + 1 = 2
+    let page1 = store.list_objects_paged("b", "", None, 2, "/");
+
+    // Page 1: exactly one common prefix `a/`, no content items in result
+    // (the content items vec may have 0 entries — the +1 slot was consumed by
+    // the prefix itself reaching distinct_count=2).
+    assert!(
+        page1.common_prefixes.contains_key("a/"),
+        "page1 must contain common prefix a/"
+    );
+
+    // The cursor stored under `a/` must be the LAST raw key under that prefix
+    // (a/1001 sorts last among a/0001…a/1001).
+    let cursor = page1
+        .common_prefixes
+        .get("a/")
+        .expect("cursor for a/ must be present");
+    assert_eq!(
+        cursor, "a/1001",
+        "cursor must point to the last key under a/, got {cursor:?}"
+    );
+
+    // Page 2: start strictly after the cursor → should find z.txt
+    let page2 = store.list_objects_paged("b", "", Some(cursor.as_str()), 2, "/");
+
+    assert!(
+        page2.common_prefixes.is_empty(),
+        "page2 must have no common prefixes"
+    );
+    assert_eq!(
+        page2.contents.len(),
+        1,
+        "page2 must have exactly one content item"
+    );
+    assert_eq!(
+        page2.contents[0].0, "z.txt",
+        "page2 content must be z.txt, got {:?}",
+        page2.contents[0].0
+    );
+}
+
+/// Integration test: same scenario exercised through the full HTTP dispatch
+/// (ListObjectsV2 with continuation-token pagination).
+#[tokio::test]
+async fn test_list_objects_v2_delimiter_truncation_many_keys_under_prefix() {
+    let provider = new_provider().await;
+
+    // Create bucket
+    let ctx = make_ctx("PUT", "/r2-bucket", b"");
+    provider.dispatch(&ctx).await.unwrap();
+
+    // Insert 1001 keys under a/
+    for i in 1..=1001u32 {
+        let path = format!("/r2-bucket/a/{i:04}");
+        let ctx = make_ctx("PUT", &path, b"x");
+        provider.dispatch(&ctx).await.unwrap();
+    }
+    // Insert the key that must be reachable via pagination
+    let ctx = make_ctx("PUT", "/r2-bucket/z.txt", b"z");
+    provider.dispatch(&ctx).await.unwrap();
+
+    // Page 1: max-keys=1, delimiter=/
+    let mut qp = HashMap::new();
+    qp.insert("list-type".to_string(), "2".to_string());
+    qp.insert("max-keys".to_string(), "1".to_string());
+    qp.insert("delimiter".to_string(), "/".to_string());
+    let ctx = make_ctx_with_query("GET", "/r2-bucket", b"", qp);
+    let resp = provider.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body1 = std::str::from_utf8(resp.body.as_bytes())
+        .unwrap()
+        .to_string();
+
+    assert!(
+        body1.contains("<IsTruncated>true</IsTruncated>"),
+        "page1 must be truncated: {body1}"
+    );
+    assert!(
+        body1.contains("<Prefix>a/</Prefix>"),
+        "page1 must contain common prefix a/: {body1}"
+    );
+    assert!(
+        !body1.contains("z.txt"),
+        "z.txt must NOT appear on page1: {body1}"
+    );
+
+    // Extract the NextContinuationToken from page 1
+    let token = {
+        let start = body1
+            .find("<NextContinuationToken>")
+            .expect("NextContinuationToken missing in page1")
+            + "<NextContinuationToken>".len();
+        let end = body1
+            .find("</NextContinuationToken>")
+            .expect("</NextContinuationToken> missing in page1");
+        body1[start..end].to_string()
+    };
+
+    // Page 2: continue from token
+    let mut qp2 = HashMap::new();
+    qp2.insert("list-type".to_string(), "2".to_string());
+    qp2.insert("max-keys".to_string(), "1".to_string());
+    qp2.insert("delimiter".to_string(), "/".to_string());
+    qp2.insert("continuation-token".to_string(), token);
+    let ctx2 = make_ctx_with_query("GET", "/r2-bucket", b"", qp2);
+    let resp2 = provider.dispatch(&ctx2).await.unwrap();
+    assert_eq!(resp2.status_code, 200);
+    let body2 = std::str::from_utf8(resp2.body.as_bytes())
+        .unwrap()
+        .to_string();
+
+    assert!(
+        body2.contains("<IsTruncated>false</IsTruncated>"),
+        "page2 must not be truncated: {body2}"
+    );
+    assert!(
+        body2.contains("z.txt"),
+        "z.txt must appear on page2: {body2}"
     );
 }
 

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -152,7 +153,7 @@ impl Bucket {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectVersion {
     /// version-id string; "null" when versioning is disabled
-    pub version_id: String,
+    pub version_id: Arc<str>,
     pub last_modified: DateTime<Utc>,
     /// ETag stored as a shared string — clone is O(1) (atomic refcount).
     pub etag: Arc<str>,
@@ -162,10 +163,11 @@ pub struct ObjectVersion {
     pub content_disposition: Option<String>,
     pub cache_control: Option<String>,
     pub size: u64,
-    /// User-defined metadata (x-amz-meta-* headers, stored without the prefix)
-    pub metadata: HashMap<String, String>,
+    /// User-defined metadata (x-amz-meta-* headers, stored without the prefix).
+    /// Wrapped in `Arc` so cloning while holding a store guard is O(1).
+    pub metadata: Arc<HashMap<String, String>>,
     /// ACL canned string
-    pub acl: String,
+    pub acl: Cow<'static, str>,
     /// The actual object data (inline or file-backed)
     #[serde(with = "serde_object_data_ref")]
     pub data: ObjectDataRef,
@@ -183,10 +185,10 @@ impl ObjectVersion {
     ) -> Self {
         let etag_str = format!("\"{}\"", hex::encode(md5_bytes(&data)));
         let size = data.len() as u64;
-        let version_id = if versioning_enabled {
-            Uuid::new_v4().to_string()
+        let version_id: Arc<str> = if versioning_enabled {
+            Arc::from(Uuid::new_v4().to_string().as_str())
         } else {
-            "null".to_string()
+            Arc::from("null")
         };
         Self {
             version_id,
@@ -197,8 +199,8 @@ impl ObjectVersion {
             content_disposition: None,
             cache_control: None,
             size,
-            metadata,
-            acl: "private".to_string(),
+            metadata: Arc::new(metadata),
+            acl: Cow::Borrowed("private"),
             data: ObjectDataRef::Inline(data),
             delete_marker: false,
         }
@@ -214,10 +216,10 @@ impl ObjectVersion {
         metadata: HashMap<String, String>,
         versioning_enabled: bool,
     ) -> Self {
-        let version_id = if versioning_enabled {
-            Uuid::new_v4().to_string()
+        let version_id: Arc<str> = if versioning_enabled {
+            Arc::from(Uuid::new_v4().to_string().as_str())
         } else {
-            "null".to_string()
+            Arc::from("null")
         };
         Self {
             version_id,
@@ -228,8 +230,8 @@ impl ObjectVersion {
             content_disposition: None,
             cache_control: None,
             size,
-            metadata,
-            acl: "private".to_string(),
+            metadata: Arc::new(metadata),
+            acl: Cow::Borrowed("private"),
             data: ObjectDataRef::FileRef(file_path),
             delete_marker: false,
         }
@@ -332,6 +334,25 @@ pub struct NotificationConfig {
 // ---------------------------------------------------------------------------
 // S3Store  (per-account-region shard)
 // ---------------------------------------------------------------------------
+
+/// Result of a paged listing operation with optional delimiter grouping.
+///
+/// See [`S3Store::list_objects_paged`] for details.
+#[derive(Debug, Default)]
+pub struct ListPagedResult {
+    /// Raw content items (keys that do NOT contain the delimiter after the
+    /// prefix, or all keys when delimiter is empty).
+    pub contents: Vec<(String, DateTime<Utc>, Arc<str>, u64)>,
+    /// Common prefix → **last raw key seen under that prefix**.
+    ///
+    /// The last raw key is the correct cursor for the next page when the
+    /// final kept output is a common prefix — it ensures the next page
+    /// starts strictly after all keys under that prefix, preventing
+    /// duplicate prefix entries across pages.
+    ///
+    /// Empty when `delimiter` is empty.
+    pub common_prefixes: BTreeMap<String, String>,
+}
 
 /// Per-account-region S3 data store.
 ///
@@ -443,7 +464,7 @@ impl S3Store {
 
         if let Some(obj) = objects.get_mut(key) {
             let prev = obj.versions.first().map(|v| v.data.clone());
-            if version.version_id == "null" {
+            if version.version_id.as_ref() == "null" {
                 // Non-versioned bucket: overwrite current object in place.
                 obj.versions.clear();
                 obj.versions.push(Arc::new(version));
@@ -467,21 +488,28 @@ impl S3Store {
         key: &str,
         version: ObjectVersion,
     ) -> Option<ObjectDataRef> {
-        let mut objects = self.objects.entry(bucket.to_string()).or_default();
-        if let Some(obj) = objects.get_mut(key) {
-            let prev = obj.versions.first().map(|v| v.data.clone());
-            if version.version_id == "null" {
-                // Non-versioned bucket: overwrite current object in place.
-                obj.versions.clear();
-                obj.versions.push(Arc::new(version));
-            } else {
-                obj.versions.insert(0, Arc::new(version));
+        // Fast path: bucket already exists — avoid allocating a String key
+        // for the DashMap entry lookup (get_mut accepts &str via Borrow).
+        if let Some(mut objects) = self.objects.get_mut(bucket) {
+            if let Some(obj) = objects.get_mut(key) {
+                let prev = obj.versions.first().map(|v| v.data.clone());
+                if version.version_id.as_ref() == "null" {
+                    obj.versions.clear();
+                    obj.versions.push(Arc::new(version));
+                } else {
+                    obj.versions.insert(0, Arc::new(version));
+                }
+                return prev;
             }
-            prev
-        } else {
             objects.insert(key.to_string(), S3Object::new(key, version));
-            None
+            return None;
         }
+
+        // Slow path: bucket not yet in the map (should not happen after the
+        // handler's bucket-existence check, but handle gracefully).
+        let mut objects = self.objects.entry(bucket.to_string()).or_default();
+        objects.insert(key.to_string(), S3Object::new(key, version));
+        None
     }
 
     pub fn get_object(&self, bucket: &str, key: &str) -> Option<Arc<ObjectVersion>> {
@@ -500,7 +528,7 @@ impl S3Store {
             objs.get(key).and_then(|obj| {
                 obj.versions
                     .iter()
-                    .find(|v| v.version_id == version_id)
+                    .find(|v| v.version_id.as_ref() == version_id)
                     .cloned()
             })
         })
@@ -518,7 +546,7 @@ impl S3Store {
         if versioning {
             // Insert a delete marker
             let marker = ObjectVersion {
-                version_id: Uuid::new_v4().to_string(),
+                version_id: Arc::from(Uuid::new_v4().to_string().as_str()),
                 last_modified: Utc::now(),
                 etag: Arc::from(""),
                 content_type: Arc::from(""),
@@ -526,8 +554,8 @@ impl S3Store {
                 content_disposition: None,
                 cache_control: None,
                 size: 0,
-                metadata: HashMap::new(),
-                acl: String::new(),
+                metadata: Arc::new(HashMap::new()),
+                acl: Cow::Borrowed(""),
                 data: ObjectDataRef::Inline(Bytes::new()),
                 delete_marker: true,
             };
@@ -556,7 +584,7 @@ impl S3Store {
         let pos = obj
             .versions
             .iter()
-            .position(|v| v.version_id == version_id)?;
+            .position(|v| v.version_id.as_ref() == version_id)?;
         let removed = obj.versions.remove(pos);
         if obj.versions.is_empty() {
             objects.remove(key);
@@ -569,6 +597,122 @@ impl S3Store {
             .get(bucket)
             .map(|m| m.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Return object metadata for a paged ListObjectsV2 listing.
+    ///
+    /// Unlike [`list_objects`], this method:
+    /// - Uses `BTreeMap::range` to start from the right position (skipping
+    ///   keys before `prefix` or `start_after_exclusive`).
+    /// - Performs delimiter grouping **inside** the store so that the scan
+    ///   stops after at most `max_results` **distinct** outputs
+    ///   (Contents + unique CommonPrefixes), rather than raw keys.  This
+    ///   prevents the `usize::MAX` raw-key scan that would otherwise be
+    ///   needed to correctly compute `IsTruncated` for delimiter requests.
+    /// - When the scan stops on a newly-discovered common prefix, continues
+    ///   scanning the remaining keys under that prefix (without counting them
+    ///   as new outputs) to record the truly last raw key — essential for
+    ///   producing a correct continuation cursor.
+    /// - Holds the DashMap shard read lock only during this focused iteration.
+    ///
+    /// Keys / prefixes are returned in sorted (BTreeMap) order.
+    pub fn list_objects_paged(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        start_after_exclusive: Option<&str>,
+        max_results: usize,
+        delimiter: &str,
+    ) -> ListPagedResult {
+        use std::ops::Bound;
+
+        let Some(m) = self.objects.get(bucket) else {
+            return ListPagedResult::default();
+        };
+
+        // Compute the effective lower bound:
+        //   • If start_after_exclusive is lexicographically >= prefix, start
+        //     from there (exclusive) so we skip already-seen keys.
+        //   • Otherwise (start_after is before the prefix range), start from
+        //     prefix (inclusive) so we don't miss any matching keys.
+        let lower: Bound<String> = match start_after_exclusive {
+            Some(s) if !s.is_empty() && s >= prefix => Bound::Excluded(s.to_string()),
+            _ if !prefix.is_empty() => Bound::Included(prefix.to_string()),
+            _ => Bound::Unbounded,
+        };
+
+        let mut result = ListPagedResult::default();
+        let mut distinct_count = 0usize;
+        // The common prefix whose key range we are scanning for cursor purposes
+        // after distinct_count has already reached max_results.
+        let mut last_new_cp: Option<String> = None;
+        // The last raw key seen while scanning for the cursor (avoids cloning
+        // `last_new_cp` on every iteration — only the key String is cloned).
+        let mut cursor_update: Option<String> = None;
+
+        for (key, obj) in m
+            .range((lower, Bound::Unbounded))
+            .take_while(|(k, _)| prefix.is_empty() || k.starts_with(prefix))
+        {
+            // ── Cursor-finding mode ──────────────────────────────────────────
+            // We already have max_results distinct outputs; scan forward
+            // through the remaining keys under the last common prefix so we
+            // can record its truly last raw key as the cursor.
+            if let Some(ref lcp) = last_new_cp {
+                if !key.starts_with(lcp.as_str()) {
+                    break; // exited the prefix's key range — done
+                }
+                // Include delete-marker keys: they define the correct cursor
+                // boundary even though they don't appear in listings.
+                cursor_update = Some(key.clone());
+                continue;
+            }
+
+            // ── Normal mode: skip delete markers ────────────────────────────
+            if obj.current().is_none() {
+                continue;
+            }
+
+            // ── Delimiter grouping ───────────────────────────────────────────
+            if !delimiter.is_empty() {
+                let suffix = &key[prefix.len()..];
+                if let Some(pos) = suffix.find(delimiter) {
+                    let cp = format!("{}{}{}", prefix, &suffix[..pos], delimiter);
+                    let is_new = !result.common_prefixes.contains_key(&cp);
+                    // Always record the latest raw key under this prefix.
+                    result.common_prefixes.insert(cp.clone(), key.clone());
+                    if is_new {
+                        distinct_count += 1;
+                        if distinct_count >= max_results {
+                            // Switch to cursor-finding mode for remaining keys
+                            // under this prefix (so `cp_map[cp]` ends up with
+                            // the truly last key, not just the first one seen).
+                            last_new_cp = Some(cp);
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // ── Content item ─────────────────────────────────────────────────
+            // current() already confirmed above (not None).
+            let v = obj.current().unwrap();
+            result
+                .contents
+                .push((key.clone(), v.last_modified, Arc::clone(&v.etag), v.size));
+            distinct_count += 1;
+            if distinct_count >= max_results {
+                break; // content item is the +1 trigger; its key IS the cursor
+            }
+        }
+
+        // If cursor-finding mode found additional keys under the last prefix,
+        // update cp_map so the caller gets the correct continuation cursor.
+        if let (Some(lcp), Some(last_key)) = (last_new_cp, cursor_update) {
+            result.common_prefixes.insert(lcp, last_key);
+        }
+
+        result
     }
 
     // --- multipart helpers -------------------------------------------------
@@ -711,7 +855,7 @@ impl S3Store {
 
         let mut objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
-            if version.version_id == "null" {
+            if version.version_id.as_ref() == "null" {
                 obj.versions.clear();
                 obj.versions.push(Arc::new(version));
             } else {
@@ -743,7 +887,7 @@ impl S3Store {
         let mut objects = self.objects.entry(upload.bucket.clone()).or_default();
         if let Some(obj) = objects.get_mut(&upload.key) {
             let prev = obj.versions.first().map(|v| v.data.clone());
-            if version.version_id == "null" {
+            if version.version_id.as_ref() == "null" {
                 obj.versions.clear();
                 obj.versions.push(Arc::new(version));
             } else {
