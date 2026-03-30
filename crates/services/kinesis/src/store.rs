@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -106,6 +106,9 @@ pub struct KinesisStream {
     pub created: DateTime<Utc>,
     pub shards: Vec<Shard>,
     pub shard_id_counter: u64,
+    /// User-defined tags on this stream.
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
 }
 
 impl KinesisStream {
@@ -123,6 +126,7 @@ impl KinesisStream {
             created: Utc::now(),
             shards,
             shard_id_counter: shard_count as u64,
+            tags: HashMap::new(),
         }
     }
 }

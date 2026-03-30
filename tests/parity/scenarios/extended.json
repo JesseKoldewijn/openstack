@@ -15,5 +15,571 @@
     "steps": [],
     "assertions": [],
     "cleanup": []
+  },
+
+  {
+    "id": "kinesis-add-tags-to-stream",
+    "profile": "extended",
+    "service": "kinesis",
+    "setup": [
+      {
+        "id": "create-tagging-stream",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "create-stream", "--stream-name", "tag-parity-stream", "--shard-count", "1"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "add-tags",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "add-tags-to-stream", "--stream-name", "tag-parity-stream", "--tags", "Env=test,Owner=ci"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "list-tags",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "list-tags-for-stream", "--stream-name", "tag-parity-stream"],
+        "expect_success": true,
+        "capture_json": "list_tags_result"
+      }
+    ],
+    "assertions": [
+      { "path": "list_tags_result.Tags[?Key=='Env'].Value | [0]", "equals": "test" },
+      { "path": "list_tags_result.Tags[?Key=='Owner'].Value | [0]", "equals": "ci" }
+    ],
+    "cleanup": [
+      {
+        "id": "delete-tagging-stream",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "delete-stream", "--stream-name", "tag-parity-stream"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+
+  {
+    "id": "kinesis-list-tags-for-stream",
+    "profile": "extended",
+    "service": "kinesis",
+    "setup": [
+      {
+        "id": "create-list-tags-stream",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "create-stream", "--stream-name", "list-tags-parity", "--shard-count", "1"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "seed-tags",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "add-tags-to-stream", "--stream-name", "list-tags-parity", "--tags", "k1=v1,k2=v2"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "list-tags",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "list-tags-for-stream", "--stream-name", "list-tags-parity"],
+        "expect_success": true,
+        "capture_json": "tags_result"
+      }
+    ],
+    "assertions": [
+      { "path": "length(tags_result.Tags)", "gte": 2 }
+    ],
+    "cleanup": [
+      {
+        "id": "delete-list-tags-stream",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "delete-stream", "--stream-name", "list-tags-parity"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+
+  {
+    "id": "kinesis-remove-tags-from-stream",
+    "profile": "extended",
+    "service": "kinesis",
+    "setup": [
+      {
+        "id": "create-rm-tags-stream",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "create-stream", "--stream-name", "rm-tags-parity", "--shard-count", "1"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "add-tags-for-removal",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "add-tags-to-stream", "--stream-name", "rm-tags-parity", "--tags", "ToRemove=yes,Keep=me"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "remove-tag",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "remove-tags-from-stream", "--stream-name", "rm-tags-parity", "--tag-keys", "ToRemove"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "list-after-removal",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "list-tags-for-stream", "--stream-name", "rm-tags-parity"],
+        "expect_success": true,
+        "capture_json": "tags_after"
+      }
+    ],
+    "assertions": [
+      { "path": "tags_after.Tags[?Key=='ToRemove']", "equals": [] },
+      { "path": "tags_after.Tags[?Key=='Keep'].Value | [0]", "equals": "me" }
+    ],
+    "cleanup": [
+      {
+        "id": "delete-rm-tags-stream",
+        "protocol": "json-1.1",
+        "command": ["kinesis", "delete-stream", "--stream-name", "rm-tags-parity"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+
+  {
+    "id": "sts-decode-authorization-message",
+    "profile": "extended",
+    "service": "sts",
+    "setup": [],
+    "steps": [
+      {
+        "id": "decode-message",
+        "protocol": "query",
+        "command": ["sts", "decode-authorization-message", "--encoded-message", "dGVzdC1tZXNzYWdl"],
+        "expect_success": true,
+        "capture_json": "decoded"
+      }
+    ],
+    "assertions": [
+      { "path": "decoded.DecodedMessage", "not_empty": true }
+    ],
+    "cleanup": []
+  },
+
+  {
+    "id": "lambda-add-permission",
+    "profile": "extended",
+    "service": "lambda",
+    "setup": [
+      {
+        "id": "create-function-for-policy",
+        "protocol": "rest-json",
+        "command": [
+          "lambda", "create-function",
+          "--function-name", "policy-test-fn",
+          "--runtime", "python3.11",
+          "--role", "arn:aws:iam::000000000000:role/exec",
+          "--handler", "index.handler",
+          "--zip-file", "fileb:///dev/null"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "add-permission",
+        "protocol": "rest-json",
+        "command": [
+          "lambda", "add-permission",
+          "--function-name", "policy-test-fn",
+          "--statement-id", "AllowS3Invoke",
+          "--action", "lambda:InvokeFunction",
+          "--principal", "s3.amazonaws.com"
+        ],
+        "expect_success": true,
+        "capture_json": "add_result"
+      },
+      {
+        "id": "get-policy",
+        "protocol": "rest-json",
+        "command": ["lambda", "get-policy", "--function-name", "policy-test-fn"],
+        "expect_success": true,
+        "capture_json": "policy_result"
+      }
+    ],
+    "assertions": [
+      { "path": "policy_result.Policy", "contains": "AllowS3Invoke" }
+    ],
+    "cleanup": [
+      {
+        "id": "delete-function-for-policy",
+        "protocol": "rest-json",
+        "command": ["lambda", "delete-function", "--function-name", "policy-test-fn"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+
+  {
+    "id": "lambda-get-policy",
+    "profile": "extended",
+    "service": "lambda",
+    "setup": [
+      {
+        "id": "create-fn-get-policy",
+        "protocol": "rest-json",
+        "command": [
+          "lambda", "create-function",
+          "--function-name", "get-policy-fn",
+          "--runtime", "python3.11",
+          "--role", "arn:aws:iam::000000000000:role/exec",
+          "--handler", "index.handler",
+          "--zip-file", "fileb:///dev/null"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "add-permission-seed",
+        "protocol": "rest-json",
+        "command": [
+          "lambda", "add-permission",
+          "--function-name", "get-policy-fn",
+          "--statement-id", "SeedSid",
+          "--action", "lambda:InvokeFunction",
+          "--principal", "events.amazonaws.com"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "get-policy",
+        "protocol": "rest-json",
+        "command": ["lambda", "get-policy", "--function-name", "get-policy-fn"],
+        "expect_success": true,
+        "capture_json": "policy"
+      }
+    ],
+    "assertions": [
+      { "path": "policy.Policy", "contains": "SeedSid" }
+    ],
+    "cleanup": [
+      {
+        "id": "delete-fn-get-policy",
+        "protocol": "rest-json",
+        "command": ["lambda", "delete-function", "--function-name", "get-policy-fn"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+
+  {
+    "id": "lambda-remove-permission",
+    "profile": "extended",
+    "service": "lambda",
+    "setup": [
+      {
+        "id": "create-fn-remove-perm",
+        "protocol": "rest-json",
+        "command": [
+          "lambda", "create-function",
+          "--function-name", "remove-perm-fn",
+          "--runtime", "python3.11",
+          "--role", "arn:aws:iam::000000000000:role/exec",
+          "--handler", "index.handler",
+          "--zip-file", "fileb:///dev/null"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "add-perm-to-remove",
+        "protocol": "rest-json",
+        "command": [
+          "lambda", "add-permission",
+          "--function-name", "remove-perm-fn",
+          "--statement-id", "ToRemove",
+          "--action", "lambda:InvokeFunction",
+          "--principal", "s3.amazonaws.com"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "remove-permission",
+        "protocol": "rest-json",
+        "command": ["lambda", "remove-permission", "--function-name", "remove-perm-fn", "--statement-id", "ToRemove"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "assertions": [],
+    "cleanup": [
+      {
+        "id": "delete-fn-remove-perm",
+        "protocol": "rest-json",
+        "command": ["lambda", "delete-function", "--function-name", "remove-perm-fn"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+
+  {
+    "id": "ecr-describe-images",
+    "profile": "extended",
+    "service": "ecr",
+    "setup": [
+      {
+        "id": "create-ecr-repo",
+        "protocol": "json-1.1",
+        "command": ["ecr", "create-repository", "--repository-name", "parity-ecr-repo"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "put-image",
+        "protocol": "json-1.1",
+        "command": [
+          "ecr", "put-image",
+          "--repository-name", "parity-ecr-repo",
+          "--image-manifest", "{\"schemaVersion\":2}",
+          "--image-tag", "v1.0"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "describe-images",
+        "protocol": "json-1.1",
+        "command": ["ecr", "describe-images", "--repository-name", "parity-ecr-repo"],
+        "expect_success": true,
+        "capture_json": "images"
+      }
+    ],
+    "assertions": [
+      { "path": "length(images.imageDetails)", "gte": 1 },
+      { "path": "images.imageDetails[0].imageTags | [0]", "equals": "v1.0" }
+    ],
+    "cleanup": [
+      {
+        "id": "delete-ecr-repo",
+        "protocol": "json-1.1",
+        "command": ["ecr", "delete-repository", "--repository-name", "parity-ecr-repo", "--force"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+
+  {
+    "id": "kms-sign",
+    "profile": "extended",
+    "service": "kms",
+    "setup": [
+      {
+        "id": "create-kms-key",
+        "protocol": "json-1.1",
+        "command": ["kms", "create-key", "--description", "parity-sign-key"],
+        "expect_success": true,
+        "capture_json": "key_meta"
+      }
+    ],
+    "steps": [
+      {
+        "id": "sign-message",
+        "protocol": "json-1.1",
+        "command": [
+          "kms", "sign",
+          "--key-id", "${key_meta.KeyMetadata.KeyId}",
+          "--message", "aGVsbG8=",
+          "--message-type", "RAW",
+          "--signing-algorithm", "RSASSA_PKCS1_V1_5_SHA_256"
+        ],
+        "expect_success": true,
+        "capture_json": "sign_result"
+      }
+    ],
+    "assertions": [
+      { "path": "sign_result.Signature", "not_empty": true },
+      { "path": "sign_result.SigningAlgorithm", "equals": "RSASSA_PKCS1_V1_5_SHA_256" }
+    ],
+    "cleanup": []
+  },
+
+  {
+    "id": "kms-verify",
+    "profile": "extended",
+    "service": "kms",
+    "setup": [
+      {
+        "id": "create-kms-key-verify",
+        "protocol": "json-1.1",
+        "command": ["kms", "create-key", "--description", "parity-verify-key"],
+        "expect_success": true,
+        "capture_json": "key_meta"
+      },
+      {
+        "id": "sign-for-verify",
+        "protocol": "json-1.1",
+        "command": [
+          "kms", "sign",
+          "--key-id", "${key_meta.KeyMetadata.KeyId}",
+          "--message", "aGVsbG8=",
+          "--message-type", "RAW",
+          "--signing-algorithm", "RSASSA_PKCS1_V1_5_SHA_256"
+        ],
+        "expect_success": true,
+        "capture_json": "sign_result"
+      }
+    ],
+    "steps": [
+      {
+        "id": "verify-signature",
+        "protocol": "json-1.1",
+        "command": [
+          "kms", "verify",
+          "--key-id", "${key_meta.KeyMetadata.KeyId}",
+          "--message", "aGVsbG8=",
+          "--message-type", "RAW",
+          "--signing-algorithm", "RSASSA_PKCS1_V1_5_SHA_256",
+          "--signature", "${sign_result.Signature}"
+        ],
+        "expect_success": true,
+        "capture_json": "verify_result"
+      }
+    ],
+    "assertions": [
+      { "path": "verify_result.SignatureValid", "equals": true }
+    ],
+    "cleanup": []
+  },
+
+  {
+    "id": "cloudwatch-get-metric-data",
+    "profile": "extended",
+    "service": "cloudwatch",
+    "setup": [
+      {
+        "id": "put-metric-data",
+        "protocol": "query",
+        "command": [
+          "cloudwatch", "put-metric-data",
+          "--namespace", "ParityTest",
+          "--metric-data", "MetricName=Requests,Value=42,Unit=Count"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "get-metric-data",
+        "protocol": "query",
+        "command": [
+          "cloudwatch", "get-metric-data",
+          "--metric-data-queries", "[{\"Id\":\"m1\",\"MetricStat\":{\"Metric\":{\"Namespace\":\"ParityTest\",\"MetricName\":\"Requests\"},\"Period\":60,\"Stat\":\"Sum\"}}]",
+          "--start-time", "2000-01-01T00:00:00Z",
+          "--end-time", "2099-01-01T00:00:00Z"
+        ],
+        "expect_success": true,
+        "capture_json": "metric_result"
+      }
+    ],
+    "assertions": [
+      { "path": "length(metric_result.MetricDataResults)", "gte": 1 },
+      { "path": "metric_result.MetricDataResults[0].Id", "equals": "m1" }
+    ],
+    "cleanup": []
+  },
+
+  {
+    "id": "eventbridge-put-events",
+    "profile": "extended",
+    "service": "events",
+    "setup": [],
+    "steps": [
+      {
+        "id": "put-events",
+        "protocol": "json-1.1",
+        "command": [
+          "events", "put-events",
+          "--entries", "[{\"Source\":\"parity.test\",\"DetailType\":\"TestEvent\",\"Detail\":\"{}\"}]"
+        ],
+        "expect_success": true,
+        "capture_json": "put_result"
+      }
+    ],
+    "assertions": [
+      { "path": "put_result.FailedEntryCount", "equals": 0 }
+    ],
+    "cleanup": []
+  },
+
+  {
+    "id": "s3-put-bucket-notification-configuration",
+    "profile": "extended",
+    "service": "s3",
+    "setup": [
+      {
+        "id": "create-notif-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "create-bucket", "--bucket", "parity-notif-bucket"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "put-notification",
+        "protocol": "rest-xml",
+        "command": [
+          "s3api", "put-bucket-notification-configuration",
+          "--bucket", "parity-notif-bucket",
+          "--notification-configuration",
+          "{\"QueueConfigurations\":[{\"Id\":\"q1\",\"QueueArn\":\"arn:aws:sqs:us-east-1:000000000000:parity-queue\",\"Events\":[\"s3:ObjectCreated:*\"]}]}"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "get-notification",
+        "protocol": "rest-xml",
+        "command": ["s3api", "get-bucket-notification-configuration", "--bucket", "parity-notif-bucket"],
+        "expect_success": true,
+        "capture_json": "notif_result"
+      }
+    ],
+    "assertions": [
+      { "path": "length(notif_result.QueueConfigurations)", "gte": 1 },
+      { "path": "notif_result.QueueConfigurations[0].QueueArn", "contains": "parity-queue" }
+    ],
+    "cleanup": [
+      {
+        "id": "delete-notif-bucket",
+        "protocol": "rest-xml",
+        "command": ["s3api", "delete-bucket", "--bucket", "parity-notif-bucket"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
   }
 ]

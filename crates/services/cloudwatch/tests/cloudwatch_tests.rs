@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_cloudwatch::CloudWatchProvider;
 use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -519,4 +519,192 @@ async fn test_delete_log_group() {
     let b = body(&resp);
     let groups = b["logGroups"].as_array().unwrap();
     assert!(!groups.iter().any(|g| g["logGroupName"] == "/del/g"));
+}
+
+// ---------------------------------------------------------------------------
+// GetMetricData — MetricStat queries
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_metric_data_metric_stat_sum() {
+    let p = CloudWatchProvider::new();
+
+    for v in [10.0f64, 20.0, 30.0] {
+        p.dispatch(&make_ctx(
+            "PutMetricData",
+            json!({
+                "Namespace": "MyApp",
+                "MetricData": [{ "MetricName": "Requests", "Value": v, "Unit": "Count" }]
+            }),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetMetricData",
+            json!({
+                "StartTime": "2000-01-01T00:00:00Z",
+                "EndTime":   "2099-01-01T00:00:00Z",
+                "MetricDataQueries": [
+                    {
+                        "Id": "q1",
+                        "Label": "Total Requests",
+                        "MetricStat": {
+                            "Metric": { "Namespace": "MyApp", "MetricName": "Requests" },
+                            "Period": 60,
+                            "Stat": "Sum",
+                        }
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    let results = b["MetricDataResults"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["Id"], "q1");
+    assert_eq!(results[0]["Label"], "Total Requests");
+    assert_eq!(results[0]["StatusCode"], "Complete");
+    let values = results[0]["Values"].as_array().unwrap();
+    assert_eq!(values.len(), 1, "expected 1 aggregated value");
+    let sum: f64 = values[0].as_f64().unwrap();
+    assert!((sum - 60.0).abs() < 0.001, "Sum should be 60.0, got {sum}");
+}
+
+#[tokio::test]
+async fn test_get_metric_data_metric_stat_average() {
+    let p = CloudWatchProvider::new();
+
+    for v in [100.0f64, 200.0, 300.0] {
+        p.dispatch(&make_ctx(
+            "PutMetricData",
+            json!({
+                "Namespace": "SvcNS",
+                "MetricData": [{ "MetricName": "Latency", "Value": v, "Unit": "Milliseconds" }]
+            }),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetMetricData",
+            json!({
+                "StartTime": "2000-01-01T00:00:00Z",
+                "EndTime":   "2099-01-01T00:00:00Z",
+                "MetricDataQueries": [
+                    {
+                        "Id": "avg_q",
+                        "MetricStat": {
+                            "Metric": { "Namespace": "SvcNS", "MetricName": "Latency" },
+                            "Period": 60,
+                            "Stat": "Average",
+                        }
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    let results = b["MetricDataResults"].as_array().unwrap();
+    let v: f64 = results[0]["Values"][0].as_f64().unwrap();
+    assert!(
+        (v - 200.0).abs() < 0.001,
+        "Average should be 200.0, got {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_metric_data_no_data_returns_empty() {
+    let p = CloudWatchProvider::new();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetMetricData",
+            json!({
+                "StartTime": "2000-01-01T00:00:00Z",
+                "EndTime":   "2099-01-01T00:00:00Z",
+                "MetricDataQueries": [
+                    {
+                        "Id": "empty",
+                        "MetricStat": {
+                            "Metric": { "Namespace": "NonExistent", "MetricName": "Ghost" },
+                            "Period": 60,
+                            "Stat": "Sum",
+                        }
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    let results = b["MetricDataResults"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["Values"].as_array().unwrap().len(), 0);
+    assert_eq!(results[0]["Timestamps"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_get_metric_data_expression_sum_aggregates_metric_results() {
+    let p = CloudWatchProvider::new();
+
+    for v in [5.0f64, 15.0] {
+        p.dispatch(&make_ctx(
+            "PutMetricData",
+            json!({
+                "Namespace": "ExprNS",
+                "MetricData": [{ "MetricName": "Clicks", "Value": v, "Unit": "Count" }]
+            }),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetMetricData",
+            json!({
+                "StartTime": "2000-01-01T00:00:00Z",
+                "EndTime":   "2099-01-01T00:00:00Z",
+                "MetricDataQueries": [
+                    {
+                        "Id": "m1",
+                        "MetricStat": {
+                            "Metric": { "Namespace": "ExprNS", "MetricName": "Clicks" },
+                            "Period": 60,
+                            "Stat": "Sum",
+                        }
+                    },
+                    {
+                        "Id": "total",
+                        "Expression": "SUM(METRICS())",
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    let results = b["MetricDataResults"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "expected 2 result entries");
+    // Find the expression result
+    let expr_result = results
+        .iter()
+        .find(|r| r["Id"] == "total")
+        .expect("expression result 'total' not found");
+    let vals = expr_result["Values"].as_array().unwrap();
+    assert!(!vals.is_empty(), "expression SUM should produce a value");
+    let sum: f64 = vals[0].as_f64().unwrap();
+    // m1 = 5+15 = 20, expression sums over m1 → 20
+    assert!(sum > 0.0, "SUM expression value should be > 0, got {sum}");
 }

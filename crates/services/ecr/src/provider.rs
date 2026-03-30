@@ -8,7 +8,7 @@ use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::store::{EcrStore, Image, Repository};
@@ -314,7 +314,77 @@ impl ServiceProvider for EcrProvider {
             // ----------------------------------------------------------------
             // DescribeImages
             // ----------------------------------------------------------------
-            "DescribeImages" => Ok(localstack_unsupported_error("ecr")),
+            "DescribeImages" => {
+                let repo_name = match str_param(ctx, "repositoryName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidParameterException",
+                            "repositoryName required",
+                            400,
+                        ));
+                    }
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "imageDetails": [] })));
+                };
+                // Optional filter: a list of image IDs (digest or tag)
+                let filter_digests: Vec<String> = ctx
+                    .request_body
+                    .get("imageIds")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|id| {
+                                id.get("imageDigest")
+                                    .and_then(|d| d.as_str())
+                                    .map(String::from)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let filter_tags: Vec<String> = ctx
+                    .request_body
+                    .get("imageIds")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|id| {
+                                id.get("imageTag")
+                                    .and_then(|t| t.as_str())
+                                    .map(String::from)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let image_details: Vec<Value> = store
+                    .images
+                    .values()
+                    .filter(|img| img.repository_name == repo_name)
+                    .filter(|img| {
+                        if filter_digests.is_empty() && filter_tags.is_empty() {
+                            return true;
+                        }
+                        if filter_digests.contains(&img.image_digest) {
+                            return true;
+                        }
+                        img.image_tags.iter().any(|t| filter_tags.contains(t))
+                    })
+                    .map(|img| {
+                        json!({
+                            "repositoryName": img.repository_name,
+                            "registryId": account_id,
+                            "imageDigest": img.image_digest,
+                            "imageTags": img.image_tags,
+                            "imageSizeInBytes": img.size_bytes,
+                            "imagePushedAt": img.pushed_at.timestamp(),
+                            "imageManifestMediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                        })
+                    })
+                    .collect();
+                Ok(json_ok(json!({ "imageDetails": image_details })))
+            }
 
             // ----------------------------------------------------------------
             // ListImages

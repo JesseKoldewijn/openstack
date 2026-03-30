@@ -1,13 +1,16 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use openstack_config::Config;
 use tracing::{error, warn};
 
 use crate::container::ServiceContainer;
 use crate::lifecycle::ServiceState;
-use crate::traits::{DispatchError, DispatchResponse, RequestContext, ServiceProvider};
+use crate::traits::{
+    CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+};
 
 #[derive(Debug, Clone)]
 pub struct ServiceManagerMetrics {
@@ -38,17 +41,16 @@ impl ServicePluginManager {
         let name = service_name.to_lowercase();
 
         // Check for provider override
-        let provider: Arc<dyn ServiceProvider> = if let Some(override_name) =
-            self.config.services.get_override(&name)
-        {
-            warn!(
+        let provider: Arc<dyn ServiceProvider> =
+            if let Some(override_name) = self.config.services.get_override(&name) {
+                warn!(
                 "Provider override for '{}' requested: '{}' (not yet implemented, using default)",
                 name, override_name
             );
-            Arc::new(provider)
-        } else {
-            Arc::new(provider)
-        };
+                Arc::new(provider)
+            } else {
+                Arc::new(provider)
+            };
 
         let container = Arc::new(ServiceContainer::new(provider));
         self.containers.insert(name, container);
@@ -124,5 +126,15 @@ impl ServicePluginManager {
                 error!("Failed to stop service '{}': {}", name, e);
             }
         }
+    }
+}
+
+/// Implement `CrossServiceDispatcher` for the manager so that providers can
+/// fan-out requests to other registered services without depending on the
+/// concrete `ServicePluginManager` type.
+#[async_trait]
+impl CrossServiceDispatcher for ServicePluginManager {
+    async fn dispatch_to(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        self.dispatch(ctx).await
     }
 }

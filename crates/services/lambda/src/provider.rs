@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::docker::{DockerExecutor, InvocationResult};
 use crate::store::{
     EventSourceMapping, FunctionState, LambdaAlias, LambdaFunction, LambdaLayerVersion,
-    LambdaStore, LambdaVersion,
+    LambdaStore, LambdaVersion, PolicyStatement,
 };
 
 pub struct LambdaProvider {
@@ -287,6 +287,7 @@ impl ServiceProvider for LambdaProvider {
                     layers,
                     created: now,
                     modified: now,
+                    policy_statements: Vec::new(),
                 };
 
                 {
@@ -1198,16 +1199,103 @@ impl ServiceProvider for LambdaProvider {
             }
 
             // ----------------------------------------------------------------
-            // AddPermission / GetPolicy / RemovePermission (stubs)
+            // AddPermission / GetPolicy / RemovePermission
             // ----------------------------------------------------------------
-            "AddPermission" => Ok(json_ok(json!({ "Statement": "" }))),
-            "GetPolicy" => Ok(json_ok(json!({ "Policy": "{}", "RevisionId": "" }))),
-            "RemovePermission" => Ok(DispatchResponse {
-                status_code: 204,
-                body: ResponseBody::Buffered(Bytes::new()),
-                content_type: Cow::Borrowed("application/json"),
-                headers: Vec::new(),
-            }),
+            "AddPermission" => {
+                let function_name = function_name_from_path(path)
+                    .or_else(|| str_field(body, "FunctionName"))
+                    .ok_or_else(|| {
+                        DispatchError::NotImplemented("FunctionName required".to_string())
+                    })?;
+                let sid = str_field(body, "StatementId").unwrap_or_else(|| Uuid::new_v4().to_string());
+                let action = str_field(body, "Action").unwrap_or_else(|| "lambda:InvokeFunction".to_string());
+                let principal = str_field(body, "Principal").unwrap_or_default();
+                let source_arn = str_field(body, "SourceArn");
+
+                let mut store = self.store.get_or_create(account_id, region);
+                if let Some(func) = store.functions.get_mut(&function_name) {
+                    // Remove existing statement with same Sid
+                    func.policy_statements.retain(|s| s.sid != sid);
+                    func.policy_statements.push(PolicyStatement {
+                        sid: sid.clone(),
+                        action: action.clone(),
+                        principal: principal.clone(),
+                        source_arn: source_arn.clone(),
+                    });
+                    let stmt_json = serde_json::to_string(&json!({
+                        "Sid": sid,
+                        "Effect": "Allow",
+                        "Principal": { "Service": principal },
+                        "Action": action,
+                        "Resource": format!("arn:aws:lambda:{region}:{account_id}:function:{function_name}"),
+                        "Condition": source_arn.as_ref().map(|a| json!({ "ArnLike": { "AWS:SourceArn": a } })),
+                    })).unwrap_or_default();
+                    Ok(json_ok(json!({ "Statement": stmt_json })))
+                } else {
+                    Ok(json_error("ResourceNotFoundException", "Function not found", 404))
+                }
+            }
+
+            "GetPolicy" => {
+                let function_name = function_name_from_path(path)
+                    .or_else(|| str_field(body, "FunctionName"))
+                    .ok_or_else(|| {
+                        DispatchError::NotImplemented("FunctionName required".to_string())
+                    })?;
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error("ResourceNotFoundException", "Function not found", 404));
+                };
+                let Some(func) = store.functions.get(&function_name) else {
+                    return Ok(json_error("ResourceNotFoundException", "Function not found", 404));
+                };
+                if func.policy_statements.is_empty() {
+                    return Ok(json_error("ResourceNotFoundException", "No policy found for function", 404));
+                }
+                let stmts: Vec<Value> = func.policy_statements.iter().map(|s| {
+                    json!({
+                        "Sid": s.sid,
+                        "Effect": "Allow",
+                        "Principal": { "Service": s.principal },
+                        "Action": s.action,
+                        "Resource": format!("arn:aws:lambda:{region}:{account_id}:function:{function_name}"),
+                        "Condition": s.source_arn.as_ref().map(|a| json!({ "ArnLike": { "AWS:SourceArn": a } })),
+                    })
+                }).collect();
+                let policy_doc = serde_json::to_string(&json!({
+                    "Version": "2012-10-17",
+                    "Id": "default",
+                    "Statement": stmts,
+                })).unwrap_or_default();
+                Ok(json_ok(json!({ "Policy": policy_doc, "RevisionId": Uuid::new_v4().to_string() })))
+            }
+
+            "RemovePermission" => {
+                let function_name = function_name_from_path(path)
+                    .or_else(|| str_field(body, "FunctionName"))
+                    .ok_or_else(|| {
+                        DispatchError::NotImplemented("FunctionName required".to_string())
+                    })?;
+                // StatementId is the last path segment: /policy/{StatementId}
+                let sid = path
+                    .trim_matches('/')
+                    .split('/')
+                    .next_back()
+                    .filter(|s| !s.is_empty() && *s != "policy")
+                    .map(String::from)
+                    .or_else(|| str_field(body, "StatementId"))
+                    .unwrap_or_default();
+
+                let mut store = self.store.get_or_create(account_id, region);
+                if let Some(func) = store.functions.get_mut(&function_name) {
+                    func.policy_statements.retain(|s| s.sid != sid);
+                }
+                Ok(DispatchResponse {
+                    status_code: 204,
+                    body: ResponseBody::Buffered(Bytes::new()),
+                    content_type: Cow::Borrowed("application/json"),
+                    headers: Vec::new(),
+                })
+            }
 
             // ----------------------------------------------------------------
             // Catch-all

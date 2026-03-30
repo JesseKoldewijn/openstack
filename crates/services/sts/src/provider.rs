@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
@@ -147,9 +148,26 @@ impl ServiceProvider for StsProvider {
             }
 
             "DecodeAuthorizationMessage" => {
-                // Return a stub decoded message
-                let inner = "<DecodedMessage>{\"allowed\":true}</DecodedMessage>";
-                Ok(xml_resp("DecodeAuthorizationMessage", &rid, inner))
+                // Base64-decode the EncodedMessage and return it as DecodedMessage.
+                // In AWS this contains a JSON policy evaluation context; here we decode
+                // whatever was passed so Sign/Verify round-trips work correctly.
+                let encoded = param(ctx, "EncodedMessage").unwrap_or_default();
+                let decoded = if encoded.is_empty() {
+                    "{\"allowed\":true}".to_string()
+                } else {
+                    B64.decode(encoded.as_bytes())
+                        .ok()
+                        .and_then(|b| String::from_utf8(b).ok())
+                        .unwrap_or_else(|| encoded.clone())
+                };
+                // XML-escape the decoded JSON before embedding it in XML.
+                let escaped = decoded
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;");
+                let inner = format!("<DecodedMessage>{escaped}</DecodedMessage>");
+                Ok(xml_resp("DecodeAuthorizationMessage", &rid, &inner))
             }
 
             _ => Ok(sts_error(

@@ -139,6 +139,19 @@ pub enum DispatchError {
     SerializationError(String),
 }
 
+/// Allows a service provider to dispatch requests to other registered services
+/// without depending on the concrete `ServicePluginManager` type.
+///
+/// Providers that need to fan-out to other services (e.g. EventBridge routing
+/// to SQS/SNS/Lambda, S3 notification emission) receive an
+/// `Option<Arc<dyn CrossServiceDispatcher>>` at construction time.  When `None`
+/// the provider falls back to a no-op — this keeps unit tests simple because
+/// they can construct providers without a real manager.
+#[async_trait]
+pub trait CrossServiceDispatcher: Send + Sync {
+    async fn dispatch_to(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError>;
+}
+
 /// The base trait all service providers must implement.
 #[async_trait]
 pub trait ServiceProvider: Send + Sync {

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_ecr::EcrProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -74,12 +74,10 @@ async fn test_create_repository_duplicate_fails() {
         .unwrap();
     assert_eq!(resp.status_code, 400);
     let b = body_json(&resp);
-    assert!(
-        b["__type"]
-            .as_str()
-            .unwrap()
-            .contains("RepositoryAlreadyExistsException")
-    );
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("RepositoryAlreadyExistsException"));
 }
 
 #[tokio::test]
@@ -181,12 +179,10 @@ async fn test_put_image_and_list() {
     let lb = body_json(&list_resp);
     let image_ids = lb["imageIds"].as_array().unwrap();
     assert_eq!(image_ids.len(), 1);
-    assert!(
-        image_ids[0]["imageDigest"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:")
-    );
+    assert!(image_ids[0]["imageDigest"]
+        .as_str()
+        .unwrap()
+        .starts_with("sha256:"));
 }
 
 #[tokio::test]
@@ -227,7 +223,7 @@ async fn test_batch_get_image_by_tag() {
 }
 
 #[tokio::test]
-async fn test_describe_images_returns_localstack_unsupported_shape() {
+async fn test_describe_images_unknown_repo_returns_empty() {
     let p = EcrProvider::new();
     let resp = p
         .dispatch(&make_ctx(
@@ -236,12 +232,108 @@ async fn test_describe_images_returns_localstack_unsupported_shape() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 501, "{}", body_str(&resp));
-    assert_eq!(resp.content_type, "application/json");
-    let payload = body_json(&resp);
-    assert_eq!(payload["__type"], "InternalFailure");
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body_json(&resp);
+    assert_eq!(b["imageDetails"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_describe_images_lists_all_images() {
+    let p = EcrProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "desc-imgs-repo" }),
+    ))
+    .await
+    .unwrap();
+
+    // Push two images
+    for tag in &["v1.0", "v2.0"] {
+        p.dispatch(&make_ctx(
+            "PutImage",
+            json!({
+                "repositoryName": "desc-imgs-repo",
+                "imageManifest": format!(r#"{{"schemaVersion":2,"tag":"{}"}}"#, tag),
+                "imageTag": tag,
+            }),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeImages",
+            json!({ "repositoryName": "desc-imgs-repo" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body_json(&resp);
+    let details = b["imageDetails"].as_array().unwrap();
     assert_eq!(
-        payload["message"],
-        "API for service 'ecr' not yet implemented or pro feature - please check https://docs.localstack.cloud/references/coverage/ for further information"
+        details.len(),
+        2,
+        "expected 2 image details, got {details:?}"
     );
+    for d in details {
+        assert!(d["imageDigest"].as_str().unwrap().starts_with("sha256:"));
+        assert_eq!(d["repositoryName"], "desc-imgs-repo");
+        let tags = d["imageTags"].as_array().unwrap();
+        assert_eq!(tags.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_describe_images_filter_by_digest() {
+    let p = EcrProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "filter-repo" }),
+    ))
+    .await
+    .unwrap();
+
+    let put_resp = p
+        .dispatch(&make_ctx(
+            "PutImage",
+            json!({
+                "repositoryName": "filter-repo",
+                "imageManifest": r#"{"schemaVersion":2}"#,
+                "imageTag": "target",
+            }),
+        ))
+        .await
+        .unwrap();
+    let digest = body_json(&put_resp)["image"]["imageId"]["imageDigest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Push a second image we should NOT see
+    p.dispatch(&make_ctx(
+        "PutImage",
+        json!({
+            "repositoryName": "filter-repo",
+            "imageManifest": r#"{"schemaVersion":2,"other":true}"#,
+            "imageTag": "other",
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeImages",
+            json!({
+                "repositoryName": "filter-repo",
+                "imageIds": [{ "imageDigest": digest }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let details = body_json(&resp)["imageDetails"].as_array().unwrap().clone();
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["imageDigest"], digest);
 }

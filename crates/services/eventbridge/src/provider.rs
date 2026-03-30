@@ -5,21 +5,31 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
+    CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
+    ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::store::{EventBridgeStore, EventBus, EventRule, RuleTarget};
 
 pub struct EventBridgeProvider {
     store: Arc<AccountRegionBundle<EventBridgeStore>>,
+    dispatcher: Option<Arc<dyn CrossServiceDispatcher>>,
 }
 
 impl EventBridgeProvider {
     pub fn new() -> Self {
         Self {
             store: Arc::new(AccountRegionBundle::new()),
+            dispatcher: None,
+        }
+    }
+
+    pub fn new_with_dispatcher(dispatcher: Arc<dyn CrossServiceDispatcher>) -> Self {
+        Self {
+            store: Arc::new(AccountRegionBundle::new()),
+            dispatcher: Some(dispatcher),
         }
     }
 }
@@ -81,6 +91,122 @@ fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
         .get(key)
         .and_then(|v| v.as_str())
         .map(String::from)
+}
+
+// ---------------------------------------------------------------------------
+// Event pattern matching
+// ---------------------------------------------------------------------------
+
+/// Returns true if the event matches the rule's event_pattern.
+///
+/// Pattern matching follows the EventBridge pattern specification:
+/// - Each field in the pattern must exist in the event
+/// - Arrays in pattern mean "any of these values" (OR)
+/// - Nested objects recurse
+fn event_matches_pattern(event: &Value, pattern: &Option<Value>) -> bool {
+    let Some(pat) = pattern else {
+        // No pattern = schedule rule, doesn't match PutEvents
+        return false;
+    };
+    matches_value(event, pat)
+}
+
+fn matches_value(event: &Value, pattern: &Value) -> bool {
+    match (event, pattern) {
+        (Value::Object(ev_map), Value::Object(pat_map)) => {
+            for (key, pat_val) in pat_map {
+                let ev_val = ev_map.get(key).unwrap_or(&Value::Null);
+                if !matches_value(ev_val, pat_val) {
+                    return false;
+                }
+            }
+            true
+        }
+        (ev_val, Value::Array(alternatives)) => {
+            // Pattern array = OR: event value must equal one of the alternatives
+            alternatives.iter().any(|alt| {
+                if let Value::Object(condition) = alt {
+                    // Condition like {"prefix": "foo"}
+                    if let Some(prefix) = condition.get("prefix").and_then(|v| v.as_str()) {
+                        return ev_val.as_str().is_some_and(|s| s.starts_with(prefix));
+                    }
+                    if let Some(exists) = condition.get("exists").and_then(|v| v.as_bool()) {
+                        return if exists {
+                            !matches!(ev_val, Value::Null)
+                        } else {
+                            matches!(ev_val, Value::Null)
+                        };
+                    }
+                }
+                ev_val == alt
+            })
+        }
+        _ => event == pattern,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Target dispatch helper
+// ---------------------------------------------------------------------------
+
+async fn dispatch_to_target(
+    dispatcher: &dyn CrossServiceDispatcher,
+    target_arn: &str,
+    account_id: &str,
+    region: &str,
+    input: Value,
+) {
+    use openstack_service_framework::traits::RequestContext;
+
+    // Determine service + operation from target ARN
+    // ARN format: arn:aws:<service>:<region>:<account>:<resource>
+    let parts: Vec<&str> = target_arn.split(':').collect();
+    if parts.len() < 6 {
+        return;
+    }
+    let service = parts[2]; // e.g. "sqs", "sns", "lambda"
+
+    let (svc, op, body) = match service {
+        "sqs" => {
+            // arn:aws:sqs:<region>:<account>:QueueName
+            let queue_name = parts.last().unwrap_or(&"");
+            let queue_url = format!("http://localhost:4566/{account_id}/{queue_name}");
+            (
+                "sqs",
+                "SendMessage",
+                serde_json::json!({
+                    "QueueUrl": queue_url,
+                    "MessageBody": serde_json::to_string(&input).unwrap_or_default(),
+                }),
+            )
+        }
+        "sns" => (
+            "sns",
+            "Publish",
+            serde_json::json!({
+                "TopicArn": target_arn,
+                "Message": serde_json::to_string(&input).unwrap_or_default(),
+            }),
+        ),
+        "lambda" => {
+            // arn:aws:lambda:<region>:<account>:function:<name>
+            let function_name = parts.last().unwrap_or(&"");
+            (
+                "lambda",
+                "Invoke",
+                serde_json::json!({
+                    "FunctionName": function_name,
+                    "Payload": serde_json::to_string(&input).unwrap_or_default(),
+                }),
+            )
+        }
+        _ => return,
+    };
+
+    let ctx = RequestContext::new(svc, op, region, account_id);
+    let mut ctx = ctx;
+    ctx.request_body = body;
+    let _ = dispatcher.dispatch_to(&ctx).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +497,113 @@ impl ServiceProvider for EventBridgeProvider {
             // ----------------------------------------------------------------
             // PutEvents
             // ----------------------------------------------------------------
-            "PutEvents" => Ok(disabled_service_error("events")),
+            "PutEvents" => {
+                let entries = match ctx.request_body.get("Entries").and_then(|v| v.as_array()) {
+                    Some(e) => e.clone(),
+                    None => return Ok(json_error("ValidationError", "Entries is required", 400)),
+                };
+
+                let mut failed_entry_count = 0u32;
+                let mut result_entries: Vec<Value> = Vec::new();
+
+                // Gather matching rules + targets up front so we can async-dispatch after
+                let mut dispatch_targets: Vec<(String, String, Value)> = Vec::new(); // (target_arn, input, event)
+
+                {
+                    let Some(store) = self.store.get(account_id, region) else {
+                        // No rules registered — accept but no routing
+                        for _ in &entries {
+                            result_entries
+                                .push(json!({ "EventId": uuid::Uuid::new_v4().to_string() }));
+                        }
+                        return Ok(json_ok(json!({
+                            "FailedEntryCount": 0,
+                            "Entries": result_entries,
+                        })));
+                    };
+
+                    for entry in &entries {
+                        let event_id = uuid::Uuid::new_v4().to_string();
+                        result_entries.push(json!({ "EventId": event_id }));
+
+                        // Determine which bus this event targets
+                        let bus_name = entry
+                            .get("EventBusName")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("default")
+                            .to_string();
+                        let source = entry.get("Source").and_then(|v| v.as_str()).unwrap_or("");
+                        let detail_type = entry
+                            .get("DetailType")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let detail = entry.get("Detail").cloned().unwrap_or(Value::Null);
+
+                        // Build the full CloudWatch event envelope
+                        let event_envelope = json!({
+                            "id": event_id,
+                            "version": "0",
+                            "account": account_id,
+                            "region": region,
+                            "source": source,
+                            "detail-type": detail_type,
+                            "detail": detail,
+                            "time": Utc::now().to_rfc3339(),
+                        });
+
+                        // Match against enabled rules on this bus
+                        for rule in store.rules.values() {
+                            if rule.state != "ENABLED" {
+                                continue;
+                            }
+                            if rule.event_bus_name != bus_name && rule.event_bus_name != "default" {
+                                continue;
+                            }
+                            if !event_matches_pattern(&event_envelope, &rule.event_pattern) {
+                                continue;
+                            }
+                            for target in rule.targets.values() {
+                                let input = if let Some(literal) = &target.input {
+                                    serde_json::from_str(literal).unwrap_or_else(|_| json!(literal))
+                                } else {
+                                    event_envelope.clone()
+                                };
+                                dispatch_targets.push((
+                                    target.arn.clone(),
+                                    target.id.clone(),
+                                    input,
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Dispatch to targets via cross-service dispatcher (fire-and-forget)
+                if let Some(dispatcher) = &self.dispatcher {
+                    for (target_arn, _target_id, input) in dispatch_targets {
+                        let dispatcher = Arc::clone(dispatcher);
+                        let target_arn = target_arn.clone();
+                        let account_id = account_id.to_string();
+                        let region = region.to_string();
+                        let input_clone = input.clone();
+                        tokio::spawn(async move {
+                            dispatch_to_target(
+                                &*dispatcher,
+                                &target_arn,
+                                &account_id,
+                                &region,
+                                input_clone,
+                            )
+                            .await;
+                        });
+                    }
+                }
+
+                Ok(json_ok(json!({
+                    "FailedEntryCount": failed_entry_count,
+                    "Entries": result_entries,
+                })))
+            }
 
             // ----------------------------------------------------------------
             // DescribeRule

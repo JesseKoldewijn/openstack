@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_eventbridge::EventBridgeProvider;
 use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -203,7 +203,7 @@ async fn test_remove_targets() {
 }
 
 #[tokio::test]
-async fn test_put_events_returns_service_disabled_error() {
+async fn test_put_events_succeeds() {
     let p = EventBridgeProvider::new();
     let resp = p
         .dispatch(&make_ctx(
@@ -220,14 +220,120 @@ async fn test_put_events_returns_service_disabled_error() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 501);
-    assert_eq!(resp.content_type, "application/json");
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
     let b = body(&resp);
-    assert_eq!(b["__type"], "InternalFailure");
-    assert_eq!(
-        b["message"],
-        "Service 'events' is not enabled. Please check your 'SERVICES' configuration variable."
-    );
+    assert_eq!(b["FailedEntryCount"], 0);
+    let entries = b["Entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0]["EventId"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_put_events_multiple_entries() {
+    let p = EventBridgeProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    { "Source": "src.a", "DetailType": "TypeA", "Detail": "{}" },
+                    { "Source": "src.b", "DetailType": "TypeB", "Detail": "{}" },
+                    { "Source": "src.c", "DetailType": "TypeC", "Detail": "{}" },
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert_eq!(b["FailedEntryCount"], 0);
+    assert_eq!(b["Entries"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn test_put_events_routes_to_matching_rule_targets() {
+    let p = EventBridgeProvider::new();
+
+    // Create a rule that matches events from "myapp.backend"
+    p.dispatch(&make_ctx(
+        "PutRule",
+        json!({
+            "Name": "backend-rule",
+            "EventPattern": r#"{"source":["myapp.backend"]}"#,
+            "State": "ENABLED",
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // Add an SQS target
+    p.dispatch(&make_ctx(
+        "PutTargets",
+        json!({
+            "Rule": "backend-rule",
+            "Targets": [
+                { "Id": "t1", "Arn": "arn:aws:sqs:us-east-1:000000000000:my-queue" }
+            ]
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // PutEvents with a matching source
+    let resp = p
+        .dispatch(&make_ctx(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    {
+                        "Source": "myapp.backend",
+                        "DetailType": "OrderPlaced",
+                        "Detail": r#"{"orderId":"42"}"#,
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    // Routing attempted — no failed entries (dispatch target may or may not exist)
+    assert_eq!(b["FailedEntryCount"], 0);
+}
+
+#[tokio::test]
+async fn test_put_events_non_matching_event_does_not_fail() {
+    let p = EventBridgeProvider::new();
+
+    p.dispatch(&make_ctx(
+        "PutRule",
+        json!({
+            "Name": "strict-rule",
+            "EventPattern": r#"{"source":["only.this.source"]}"#,
+            "State": "ENABLED",
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // Event from a different source — rule should not match, but PutEvents still succeeds
+    let resp = p
+        .dispatch(&make_ctx(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    {
+                        "Source": "other.source",
+                        "DetailType": "Irrelevant",
+                        "Detail": "{}",
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    assert_eq!(body(&resp)["FailedEntryCount"], 0);
 }
 
 #[tokio::test]
@@ -276,11 +382,9 @@ async fn test_delete_rule() {
         .await
         .unwrap();
     let b = body(&resp);
-    assert!(
-        !b["Rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["Name"] == "del-rule")
-    );
+    assert!(!b["Rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["Name"] == "del-rule"));
 }

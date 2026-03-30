@@ -5,7 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
+    CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
+    ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use tracing::{debug, warn};
@@ -14,12 +15,23 @@ use crate::store::{FilterPolicy, MessageAttribute, Protocol, SnsStore};
 
 pub struct SnsProvider {
     store: Arc<AccountRegionBundle<SnsStore>>,
+    /// Optional dispatcher for real SQS delivery.
+    dispatcher: Option<Arc<dyn CrossServiceDispatcher>>,
 }
 
 impl SnsProvider {
     pub fn new() -> Self {
         Self {
             store: Arc::new(AccountRegionBundle::new()),
+            dispatcher: None,
+        }
+    }
+
+    /// Construct with a cross-service dispatcher for real SQS delivery.
+    pub fn new_with_dispatcher(dispatcher: Arc<dyn CrossServiceDispatcher>) -> Self {
+        Self {
+            store: Arc::new(AccountRegionBundle::new()),
+            dispatcher: Some(dispatcher),
         }
     }
 }
@@ -89,6 +101,23 @@ fn escape_xml(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn url_encode_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0').to_ascii_uppercase());
+                out.push(char::from_digit((b & 0xf) as u32, 16).unwrap_or('0').to_ascii_uppercase());
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -469,7 +498,12 @@ fn handle_set_subscription_attributes(
     xml_no_result("SetSubscriptionAttributes", &new_request_id())
 }
 
-fn handle_publish(store: &mut SnsStore, params: &HashMap<String, String>) -> DispatchResponse {
+async fn handle_publish(
+    store: &mut SnsStore,
+    params: &HashMap<String, String>,
+    dispatcher: &Option<Arc<dyn CrossServiceDispatcher>>,
+    ctx: &RequestContext,
+) -> DispatchResponse {
     let topic_arn = match params.get("TopicArn") {
         Some(a) => a.clone(),
         None => return sns_error("InvalidParameter", "TopicArn is required", 400),
@@ -512,21 +546,38 @@ fn handle_publish(store: &mut SnsStore, params: &HashMap<String, String>) -> Dis
 
         match protocol_str.as_str() {
             "sqs" => {
-                // SQS delivery: format SNS notification envelope and deliver to SQS queue
-                // The endpoint is the SQS queue ARN. For in-process delivery we just log it.
-                // Real delivery would require access to the SQS store — cross-service
-                // delivery is done by the gateway layer. Here we just record it.
+                // SQS delivery: format SNS notification envelope and deliver to SQS queue.
+                // The endpoint is the SQS queue ARN.
                 let payload = if *raw_delivery {
                     message.clone()
                 } else {
                     format_sns_notification(&topic_arn, &message_id, &message, &subject)
                 };
-                debug!(
-                    protocol = "sqs",
-                    endpoint = %endpoint,
-                    payload_len = payload.len(),
-                    "SNS → SQS delivery (in-process)"
-                );
+
+                if let Some(disp) = dispatcher {
+                    // Extract queue name from ARN: arn:aws:sqs:region:account:queue-name
+                    let queue_name = endpoint.split(':').next_back().unwrap_or("unknown").to_string();
+                    let body = format!(
+                        "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2F{queue_name}&MessageBody={encoded}",
+                        encoded = url_encode_value(&payload)
+                    );
+                    let mut dispatch_ctx = RequestContext::new("sqs", "SendMessage", &ctx.region, &ctx.account_id);
+                    dispatch_ctx.method = "POST".to_string();
+                    dispatch_ctx.path = format!("/000000000000/{queue_name}");
+                    dispatch_ctx.raw_body = Some(Bytes::from(body.into_bytes()));
+                    if let Err(e) = disp.dispatch_to(&dispatch_ctx).await {
+                        warn!(err = %e, endpoint = %endpoint, "SNS → SQS dispatch failed");
+                    } else {
+                        debug!(protocol = "sqs", endpoint = %endpoint, "SNS → SQS delivered");
+                    }
+                } else {
+                    debug!(
+                        protocol = "sqs",
+                        endpoint = %endpoint,
+                        payload_len = payload.len(),
+                        "SNS → SQS delivery (no dispatcher)"
+                    );
+                }
             }
             "http" | "https" => {
                 // HTTP delivery: fire-and-forget POST in background
@@ -719,7 +770,7 @@ impl ServiceProvider for SnsProvider {
                     "SetSubscriptionAttributes" => {
                         handle_set_subscription_attributes(&mut store, &params)
                     }
-                    "Publish" => handle_publish(&mut store, &params),
+                    "Publish" => handle_publish(&mut store, &params, &self.dispatcher, ctx).await,
                     "PublishBatch" => handle_publish_batch(&mut store, &params),
                     _ => {
                         warn!(service = "sns", action = %other, "SNS action not implemented");

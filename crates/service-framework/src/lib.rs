@@ -14,5 +14,6 @@ pub use lifecycle::ServiceState;
 pub use manager::{ServiceManagerMetrics, ServicePluginManager};
 pub use spooled::{SpooledBody, SpooledBodyReader};
 pub use traits::{
-    BodyReader, DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
+    BodyReader, CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext,
+    ResponseBody, ServiceProvider,
 };

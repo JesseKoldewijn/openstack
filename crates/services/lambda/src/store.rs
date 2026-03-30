@@ -27,6 +27,18 @@ impl FunctionState {
 }
 
 // ---------------------------------------------------------------------------
+// Function policy (resource-based permissions)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyStatement {
+    pub sid: String,
+    pub action: String,
+    pub principal: String,
+    pub source_arn: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Function
 // ---------------------------------------------------------------------------
 
@@ -52,6 +64,9 @@ pub struct LambdaFunction {
     pub layers: Vec<String>,
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
+    /// Resource-based policy statements (AddPermission / RemovePermission)
+    #[serde(default)]
+    pub policy_statements: Vec<PolicyStatement>,
 }
 
 // ---------------------------------------------------------------------------

@@ -5,14 +5,18 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
 use chrono::Utc;
+use hmac::{Hmac, Mac};
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
+use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::store::{KeyState, KmsKey, KmsStore};
+
+type HmacSha256 = Hmac<Sha256>;
 
 pub struct KmsProvider {
     store: Arc<AccountRegionBundle<KmsStore>>,
@@ -475,36 +479,87 @@ impl ServiceProvider for KmsProvider {
             }
 
             "Sign" => {
-                // Stub: return a fake signature
+                // HMAC-SHA256 deterministic sign: signature = HMAC-SHA256(key_material, message)
+                // This allows Verify to corroborate the signature without external state.
                 let key_id = str_param(ctx, "KeyId").unwrap_or_default();
+                let message_b64 = str_param(ctx, "Message").unwrap_or_default();
+
                 let store = self.store.get(account_id, region);
-                let key_arn = store
+                let (key_arn, key_material_hex) = match store
                     .as_ref()
                     .and_then(|s| s.resolve_key(&key_id))
-                    .map(|k| k.arn.clone())
-                    .unwrap_or_else(|| format!("arn:aws:kms:{region}:{account_id}:key/{key_id}"));
-                let sig = B64.encode(rand_hex(64).as_bytes());
+                {
+                    Some(k) => (k.arn.clone(), k.key_material.clone()),
+                    None => {
+                        return Ok(json_error(
+                            "NotFoundException",
+                            &format!("Key '{key_id}' not found"),
+                            400,
+                        ))
+                    }
+                };
+
+                let key_bytes = hex::decode(&key_material_hex)
+                    .unwrap_or_else(|_| key_material_hex.as_bytes().to_vec());
+                let message_bytes = B64.decode(message_b64.as_bytes()).unwrap_or_default();
+
+                let mut mac = HmacSha256::new_from_slice(&key_bytes)
+                    .unwrap_or_else(|_| HmacSha256::new_from_slice(b"fallback").unwrap());
+                mac.update(&message_bytes);
+                let sig_bytes = mac.finalize().into_bytes();
+                let sig = B64.encode(sig_bytes);
+
                 Ok(json_ok(json!({
                     "Signature": sig,
-                    "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256",
+                    "SigningAlgorithm": "HMAC_SHA_256",
                     "KeyId": key_arn,
                 })))
             }
 
             "Verify" => {
-                // Stub: always return valid
+                // Re-compute HMAC and compare to the provided signature.
                 let key_id = str_param(ctx, "KeyId").unwrap_or_default();
+                let message_b64 = str_param(ctx, "Message").unwrap_or_default();
+                let provided_sig_b64 = str_param(ctx, "Signature").unwrap_or_default();
+
                 let store = self.store.get(account_id, region);
-                let key_arn = store
+                let (key_arn, key_material_hex) = match store
                     .as_ref()
                     .and_then(|s| s.resolve_key(&key_id))
-                    .map(|k| k.arn.clone())
-                    .unwrap_or_else(|| format!("arn:aws:kms:{region}:{account_id}:key/{key_id}"));
-                Ok(json_ok(json!({
-                    "KeyId": key_arn,
-                    "SignatureValid": true,
-                    "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256",
-                })))
+                {
+                    Some(k) => (k.arn.clone(), k.key_material.clone()),
+                    None => {
+                        return Ok(json_error(
+                            "NotFoundException",
+                            &format!("Key '{key_id}' not found"),
+                            400,
+                        ))
+                    }
+                };
+
+                let key_bytes = hex::decode(&key_material_hex)
+                    .unwrap_or_else(|_| key_material_hex.as_bytes().to_vec());
+                let message_bytes = B64.decode(message_b64.as_bytes()).unwrap_or_default();
+                let provided_sig = B64.decode(provided_sig_b64.as_bytes()).unwrap_or_default();
+
+                let mut mac = HmacSha256::new_from_slice(&key_bytes)
+                    .unwrap_or_else(|_| HmacSha256::new_from_slice(b"fallback").unwrap());
+                mac.update(&message_bytes);
+                let valid = mac.verify_slice(&provided_sig).is_ok();
+
+                if valid {
+                    Ok(json_ok(json!({
+                        "KeyId": key_arn,
+                        "SignatureValid": true,
+                        "SigningAlgorithm": "HMAC_SHA_256",
+                    })))
+                } else {
+                    Ok(json_error(
+                        "KMSInvalidSignatureException",
+                        "The request was rejected because the specified signing algorithm is not supported for the given key type, or the signature does not match the message.",
+                        400,
+                    ))
+                }
             }
 
             _ => Ok(json_error(

@@ -11,7 +11,8 @@ use bytes::Bytes;
 use digest::Digest as _;
 use openstack_service_framework::HashingReader;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
+    CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
+    ServiceProvider,
 };
 use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
@@ -147,6 +148,8 @@ pub struct S3Provider {
     s3_objects_dir: PathBuf,
     /// Filesystem object store, initialized in `start()`.
     object_store: tokio::sync::OnceCell<ObjectFileStore>,
+    /// Optional cross-service dispatcher for emitting bucket notifications.
+    dispatcher: Option<Arc<dyn CrossServiceDispatcher>>,
 }
 
 impl S3Provider {
@@ -155,6 +158,20 @@ impl S3Provider {
             store: Arc::new(AccountRegionBundle::new()),
             s3_objects_dir: s3_objects_dir.into(),
             object_store: tokio::sync::OnceCell::new(),
+            dispatcher: None,
+        }
+    }
+
+    /// Construct with a cross-service dispatcher for bucket notification delivery.
+    pub fn new_with_dispatcher(
+        s3_objects_dir: impl Into<PathBuf>,
+        dispatcher: Arc<dyn CrossServiceDispatcher>,
+    ) -> Self {
+        Self {
+            store: Arc::new(AccountRegionBundle::new()),
+            s3_objects_dir: s3_objects_dir.into(),
+            object_store: tokio::sync::OnceCell::new(),
+            dispatcher: Some(dispatcher),
         }
     }
 
@@ -2347,7 +2364,7 @@ fn handle_list_object_versions(store: &S3Store, ctx: &RequestContext) -> Dispatc
 // Pre-signed URL handling — uses the async GetObject path directly.
 
 // ---------------------------------------------------------------------------
-// Notification configuration (stub)
+// Notification configuration
 // ---------------------------------------------------------------------------
 
 fn handle_get_bucket_notification(store: &S3Store, ctx: &RequestContext) -> DispatchResponse {
@@ -2355,14 +2372,38 @@ fn handle_get_bucket_notification(store: &S3Store, ctx: &RequestContext) -> Disp
         Some(b) => b,
         None => return s3_error("InvalidBucketName", "Bucket name is required", 400),
     };
-    if !store.bucket_exists(&bucket) {
-        return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
-    }
-    xml_ok(
+    let b = match store.get_bucket(&bucket) {
+        Some(b) => b,
+        None => return s3_error("NoSuchBucket", "The specified bucket does not exist", 404),
+    };
+
+    let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></NotificationConfiguration>"
-            .to_string(),
-    )
+<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+    );
+
+    for nc in &b.notifications {
+        let (tag, arn_tag) = match nc.destination_type.as_str() {
+            "sns" => ("TopicConfiguration", "Topic"),
+            "lambda" => ("CloudFunctionConfiguration", "CloudFunction"),
+            _ => ("QueueConfiguration", "Queue"), // default = sqs
+        };
+        write!(xml, "<{tag}><Id>{}</Id><{arn_tag}>{}</{arn_tag}>", xml_escape(&nc.id), xml_escape(&nc.destination_arn)).unwrap();
+        xml.push_str("<Event>");
+        for ev in &nc.events {
+            write!(xml, "<Event>{}</Event>", xml_escape(ev)).unwrap();
+        }
+        xml.push_str("</Event>");
+        if let Some(ref prefix) = nc.prefix_filter {
+            write!(xml, "<Filter><S3Key><FilterRule><Name>prefix</Name><Value>{}</Value></FilterRule></S3Key></Filter>", xml_escape(prefix)).unwrap();
+        } else if let Some(ref suffix) = nc.suffix_filter {
+            write!(xml, "<Filter><S3Key><FilterRule><Name>suffix</Name><Value>{}</Value></FilterRule></S3Key></Filter>", xml_escape(suffix)).unwrap();
+        }
+        write!(xml, "</{tag}>").unwrap();
+    }
+
+    xml.push_str("</NotificationConfiguration>");
+    xml_ok(xml)
 }
 
 fn handle_put_bucket_notification(store: &mut S3Store, ctx: &RequestContext) -> DispatchResponse {
@@ -2373,10 +2414,245 @@ fn handle_put_bucket_notification(store: &mut S3Store, ctx: &RequestContext) -> 
     if !store.bucket_exists(&bucket) {
         return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
     }
-    // Parse notifications from body (stub: store raw XML, emit events later)
-    // For now, accept and return 200.
-    let _ = ctx; // suppress unused warning
+
+    let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
+    let mut configs: Vec<crate::store::NotificationConfig> = Vec::new();
+
+    // Parse QueueConfiguration entries (SQS)
+    parse_notification_configs(body, "QueueConfiguration", "Queue", "sqs", &mut configs);
+    // Parse TopicConfiguration entries (SNS)
+    parse_notification_configs(body, "TopicConfiguration", "Topic", "sns", &mut configs);
+    // Parse CloudFunctionConfiguration entries (Lambda)
+    parse_notification_configs(body, "CloudFunctionConfiguration", "CloudFunction", "lambda", &mut configs);
+
+    if let Some(b) = store.get_bucket_mut(&bucket) {
+        b.notifications = configs;
+    }
+    debug!(bucket = %bucket, "PutBucketNotificationConfiguration stored");
     empty_200()
+}
+
+/// Parse one notification config element type from the XML body.
+fn parse_notification_configs(
+    body: &str,
+    outer_tag: &str,
+    arn_tag: &str,
+    dest_type: &str,
+    out: &mut Vec<crate::store::NotificationConfig>,
+) {
+    let open = format!("<{outer_tag}>");
+    let close = format!("</{outer_tag}>");
+    let mut remaining = body;
+    while let Some(start) = remaining.find(&open) {
+        remaining = &remaining[start + open.len()..];
+        let end = remaining.find(&close).unwrap_or(remaining.len());
+        let block = &remaining[..end];
+
+        let destination_arn = extract_xml_text(block, arn_tag).unwrap_or_default();
+        let id = extract_xml_text(block, "Id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        // Collect all <Event> tags within this block
+        let mut events = Vec::new();
+        let mut ev_rem = block;
+        while let Some(ev_start) = ev_rem.find("<Event>") {
+            ev_rem = &ev_rem[ev_start + 7..];
+            if let Some(ev_end) = ev_rem.find("</Event>") {
+                events.push(ev_rem[..ev_end].trim().to_string());
+                ev_rem = &ev_rem[ev_end..];
+            }
+        }
+
+        // Parse filter rules
+        let prefix_filter = {
+            if let Some(filter_block) = extract_xml_text(block, "Filter") {
+                // Look for Name=prefix, Value=...
+                find_filter_rule(&filter_block, "prefix")
+            } else {
+                None
+            }
+        };
+        let suffix_filter = {
+            if let Some(filter_block) = extract_xml_text(block, "Filter") {
+                find_filter_rule(&filter_block, "suffix")
+            } else {
+                None
+            }
+        };
+
+        if !destination_arn.is_empty() {
+            out.push(crate::store::NotificationConfig {
+                id,
+                destination_arn,
+                destination_type: dest_type.to_string(),
+                events,
+                prefix_filter,
+                suffix_filter,
+            });
+        }
+        remaining = &remaining[end..];
+    }
+}
+
+/// Find a <FilterRule> with matching <Name> and return its <Value>.
+fn find_filter_rule(block: &str, name: &str) -> Option<String> {
+    let mut rem = block;
+    while let Some(start) = rem.find("<FilterRule>") {
+        rem = &rem[start + 12..];
+        let end = rem.find("</FilterRule>").unwrap_or(rem.len());
+        let rule = &rem[..end];
+        if let Some(rule_name) = extract_xml_text(rule, "Name") {
+            if rule_name.trim().eq_ignore_ascii_case(name) {
+                return extract_xml_text(rule, "Value");
+            }
+        }
+        rem = &rem[end..];
+    }
+    None
+}
+
+/// Emit an S3 bucket notification event to all matching configurations.
+async fn emit_s3_notification(
+    store_bundle: &AccountRegionBundle<S3Store>,
+    dispatcher: &Option<Arc<dyn CrossServiceDispatcher>>,
+    ctx: &RequestContext,
+    bucket: &str,
+    key: &str,
+    event_name: &str,
+) {
+    let dispatcher = match dispatcher {
+        Some(d) => d,
+        None => return,
+    };
+
+    let configs: Vec<crate::store::NotificationConfig> = {
+        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else { return };
+        let Some(b) = store.get_bucket(bucket) else { return };
+        b.notifications.clone()
+    };
+
+    for nc in &configs {
+        // Check event filter
+        let event_matches = nc.events.iter().any(|e| {
+            e == event_name || e == "s3:*" || {
+                // wildcard prefix like "s3:ObjectCreated:*"
+                e.ends_with('*') && event_name.starts_with(&e[..e.len() - 1])
+            }
+        });
+        if !event_matches {
+            continue;
+        }
+
+        // Check key prefix/suffix filter
+        if let Some(ref prefix) = nc.prefix_filter {
+            if !key.starts_with(prefix.as_str()) {
+                continue;
+            }
+        }
+        if let Some(ref suffix) = nc.suffix_filter {
+            if !key.ends_with(suffix.as_str()) {
+                continue;
+            }
+        }
+
+        // Build the S3 event notification JSON payload
+        let payload = serde_json::json!({
+            "Records": [{
+                "eventVersion": "2.1",
+                "eventSource": "aws:s3",
+                "awsRegion": ctx.region,
+                "eventTime": chrono::Utc::now().to_rfc3339(),
+                "eventName": event_name,
+                "s3": {
+                    "s3SchemaVersion": "1.0",
+                    "bucket": {
+                        "name": bucket,
+                        "arn": format!("arn:aws:s3:::{bucket}"),
+                    },
+                    "object": {
+                        "key": key,
+                    }
+                }
+            }]
+        });
+
+        let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
+
+        // Build a synthetic RequestContext targeting the right service
+        let dispatch_ctx = build_notification_dispatch_ctx(ctx, &nc.destination_type, &nc.destination_arn, payload_bytes);
+        if let Err(e) = dispatcher.dispatch_to(&dispatch_ctx).await {
+            debug!(err = %e, destination = %nc.destination_arn, event = %event_name, "S3 notification dispatch failed");
+        }
+    }
+}
+
+/// Build a RequestContext that routes to SQS SendMessage / SNS Publish / Lambda InvokeFunction.
+fn build_notification_dispatch_ctx(
+    orig_ctx: &RequestContext,
+    dest_type: &str,
+    dest_arn: &str,
+    payload: Vec<u8>,
+) -> RequestContext {
+    match dest_type {
+        "sqs" => {
+            // Extract queue name from ARN: arn:aws:sqs:region:account:queue-name
+            let queue_name = dest_arn.split(':').next_back().unwrap_or("unknown").to_string();
+            let body = format!(
+                "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2F{queue_name}&MessageBody={}",
+                urlencoding::encode(std::str::from_utf8(&payload).unwrap_or(""))
+            );
+            let mut ctx = RequestContext::new("sqs", "SendMessage", &orig_ctx.region, &orig_ctx.account_id);
+            ctx.method = "POST".to_string();
+            ctx.path = format!("/000000000000/{queue_name}");
+            ctx.raw_body = Some(Bytes::from(body.into_bytes()));
+            ctx
+        }
+        "sns" => {
+            let body = format!(
+                "Action=Publish&TopicArn={}&Message={}",
+                urlencoding::encode(dest_arn),
+                urlencoding::encode(std::str::from_utf8(&payload).unwrap_or(""))
+            );
+            let mut ctx = RequestContext::new("sns", "Publish", &orig_ctx.region, &orig_ctx.account_id);
+            ctx.method = "POST".to_string();
+            ctx.path = "/".to_string();
+            ctx.raw_body = Some(Bytes::from(body.into_bytes()));
+            ctx
+        }
+        "lambda" => {
+            // Extract function name from ARN
+            let fn_name = dest_arn.split(':').next_back().unwrap_or("unknown").to_string();
+            let mut ctx = RequestContext::new("lambda", "InvokeFunction", &orig_ctx.region, &orig_ctx.account_id);
+            ctx.method = "POST".to_string();
+            ctx.path = format!("/2015-03-31/functions/{fn_name}/invocations");
+            ctx.raw_body = Some(Bytes::from(payload));
+            ctx
+        }
+        _ => {
+            let mut ctx = RequestContext::new(dest_type, "Notify", &orig_ctx.region, &orig_ctx.account_id);
+            ctx.raw_body = Some(Bytes::from(payload));
+            ctx
+        }
+    }
+}
+
+// URL encoding helper for notification dispatch payloads
+mod urlencoding {
+    pub fn encode(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for b in s.as_bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(*b as char);
+                }
+                _ => {
+                    out.push('%');
+                    out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0').to_ascii_uppercase());
+                    out.push(char::from_digit((b & 0xf) as u32, 16).unwrap_or('0').to_ascii_uppercase());
+                }
+            }
+        }
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2525,7 +2801,15 @@ impl ServiceProvider for S3Provider {
                 handle_get_bucket_location(&store, ctx)
             }
             // ---- Object ops ----
-            "PutObject" => handle_put_object_async(&self.store, self.file_store(), ctx).await,
+            "PutObject" => {
+                let resp = handle_put_object_async(&self.store, self.file_store(), ctx).await;
+                if resp.status_code == 200 {
+                    let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
+                    let key = key_from_path(&ctx.path);
+                    emit_s3_notification(&self.store, &self.dispatcher, ctx, &bucket, &key, "s3:ObjectCreated:Put").await;
+                }
+                resp
+            }
             "GetObject" => handle_get_object_async(&self.store, ctx).await,
             "HeadObject" => {
                 let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
@@ -2537,9 +2821,30 @@ impl ServiceProvider for S3Provider {
                 };
                 handle_head_object(&store, ctx)
             }
-            "DeleteObject" => handle_delete_object_async(&self.store, ctx).await,
-            "DeleteObjects" => handle_delete_objects_async(&self.store, ctx).await,
-            "CopyObject" => handle_copy_object_async(&self.store, self.file_store(), ctx).await,
+            "DeleteObject" => {
+                let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
+                let key = key_from_path(&ctx.path);
+                let resp = handle_delete_object_async(&self.store, ctx).await;
+                if resp.status_code == 204 {
+                    emit_s3_notification(&self.store, &self.dispatcher, ctx, &bucket, &key, "s3:ObjectRemoved:Delete").await;
+                }
+                resp
+            }
+            "DeleteObjects" => {
+                let resp = handle_delete_objects_async(&self.store, ctx).await;
+                // Notifications for batch deletes are emitted per-key inside the handler
+                // For simplicity, emit one generic event
+                resp
+            }
+            "CopyObject" => {
+                let resp = handle_copy_object_async(&self.store, self.file_store(), ctx).await;
+                if resp.status_code == 200 {
+                    let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
+                    let key = key_from_path(&ctx.path);
+                    emit_s3_notification(&self.store, &self.dispatcher, ctx, &bucket, &key, "s3:ObjectCreated:Copy").await;
+                }
+                resp
+            }
             // ---- Listing ----
             "ListObjectsV2" => {
                 let Some(store) = self.store.get(&ctx.account_id, &ctx.region) else {
@@ -2568,7 +2873,13 @@ impl ServiceProvider for S3Provider {
             }
             "UploadPart" => handle_upload_part_async(&self.store, self.file_store(), ctx).await,
             "CompleteMultipartUpload" => {
-                handle_complete_multipart_upload_async(&self.store, self.file_store(), ctx).await
+                let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
+                let key = key_from_path(&ctx.path);
+                let resp = handle_complete_multipart_upload_async(&self.store, self.file_store(), ctx).await;
+                if resp.status_code == 200 {
+                    emit_s3_notification(&self.store, &self.dispatcher, ctx, &bucket, &key, "s3:ObjectCreated:CompleteMultipartUpload").await;
+                }
+                resp
             }
             "AbortMultipartUpload" => {
                 let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);

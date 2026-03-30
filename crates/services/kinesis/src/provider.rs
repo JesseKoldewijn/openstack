@@ -2,14 +2,14 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::store::{KinesisStore, ShardIteratorState, ShardIteratorType};
 
@@ -791,16 +791,89 @@ impl ServiceProvider for KinesisProvider {
             // Tagging
             // ---------------------------------------------------------------
             "AddTagsToStream" => {
-                // No-op — we don't store tags on streams in this impl
+                let stream_name = match str_param(ctx, "StreamName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidArgumentException",
+                            "StreamName is required",
+                            400,
+                        ))
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                let stream = match store.streams.get_mut(stream_name) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Stream {stream_name} not found"),
+                            400,
+                        ))
+                    }
+                };
+                if let Some(tags_obj) = ctx.request_body.get("Tags").and_then(|v| v.as_object()) {
+                    for (k, v) in tags_obj {
+                        if let Some(val) = v.as_str() {
+                            stream.tags.insert(k.clone(), val.to_string());
+                        }
+                    }
+                }
                 Ok(json_ok(json!({})))
             }
 
-            "ListTagsForStream" => Ok(json_ok(json!({
-                "Tags": [],
-                "HasMoreTags": false,
-            }))),
+            "ListTagsForStream" => {
+                let stream_name = match str_param(ctx, "StreamName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidArgumentException",
+                            "StreamName is required",
+                            400,
+                        ))
+                    }
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Tags": [], "HasMoreTags": false })));
+                };
+                let tags: Vec<Value> = store
+                    .streams
+                    .get(stream_name)
+                    .map(|s| {
+                        s.tags
+                            .iter()
+                            .map(|(k, v)| json!({ "Key": k, "Value": v }))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(json_ok(json!({ "Tags": tags, "HasMoreTags": false })))
+            }
 
-            "RemoveTagsFromStream" => Ok(json_ok(json!({}))),
+            "RemoveTagsFromStream" => {
+                let stream_name = match str_param(ctx, "StreamName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidArgumentException",
+                            "StreamName is required",
+                            400,
+                        ))
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                if let Some(stream) = store.streams.get_mut(stream_name) {
+                    if let Some(keys_arr) =
+                        ctx.request_body.get("TagKeys").and_then(|v| v.as_array())
+                    {
+                        for k in keys_arr {
+                            if let Some(key) = k.as_str() {
+                                stream.tags.remove(key);
+                            }
+                        }
+                    }
+                }
+                Ok(json_ok(json!({})))
+            }
 
             // ---------------------------------------------------------------
             // Fallback

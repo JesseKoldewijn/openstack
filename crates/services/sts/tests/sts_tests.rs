@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 use openstack_sts::StsProvider;
 
@@ -94,4 +95,68 @@ async fn test_unknown_operation() {
     let p = StsProvider::new();
     let resp = p.dispatch(&make_ctx("ListInstances", &[])).await.unwrap();
     assert_eq!(resp.status_code, 501);
+}
+
+// ---------------------------------------------------------------------------
+// DecodeAuthorizationMessage
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_decode_authorization_message_round_trip() {
+    let p = StsProvider::new();
+    let original = r#"{"allowed":false,"reason":"access denied"}"#;
+    let encoded = B64.encode(original.as_bytes());
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DecodeAuthorizationMessage",
+            &[("EncodedMessage", encoded.as_str())],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let xml = body_str(&resp);
+    assert!(
+        xml.contains("DecodeAuthorizationMessageResponse"),
+        "expected XML wrapper, got: {xml}"
+    );
+    // The decoded message must appear in the response (XML-escaped quotes are OK).
+    assert!(
+        xml.contains("access denied"),
+        "decoded content missing: {xml}"
+    );
+}
+
+#[tokio::test]
+async fn test_decode_authorization_message_empty_returns_default() {
+    let p = StsProvider::new();
+    // Passing an empty EncodedMessage — must succeed with a placeholder.
+    let resp = p
+        .dispatch(&make_ctx("DecodeAuthorizationMessage", &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let xml = body_str(&resp);
+    assert!(
+        xml.contains("DecodedMessage"),
+        "response must contain DecodedMessage element: {xml}"
+    );
+}
+
+#[tokio::test]
+async fn test_decode_authorization_message_non_base64_passthrough() {
+    let p = StsProvider::new();
+    // If the input is not valid base64, the implementation should not panic
+    // and should return 200 (falling back to the raw string).
+    let resp = p
+        .dispatch(&make_ctx(
+            "DecodeAuthorizationMessage",
+            &[("EncodedMessage", "this-is-not-base64!!!!")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code, 200,
+        "expected non-crash on invalid base64"
+    );
 }
