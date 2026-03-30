@@ -396,6 +396,7 @@ async fn test_sign_verify_deterministic() {
             ))
             .await
             .unwrap();
+        assert_eq!(r.status_code, 200, "Sign failed: {}", body_str(&r));
         body(&r)["Signature"].as_str().unwrap().to_string()
     };
     let sig2 = {
@@ -411,6 +412,7 @@ async fn test_sign_verify_deterministic() {
             ))
             .await
             .unwrap();
+        assert_eq!(r.status_code, 200, "Sign failed: {}", body_str(&r));
         body(&r)["Signature"].as_str().unwrap().to_string()
     };
     assert_eq!(sig1, sig2, "HMAC-based Sign must be deterministic");

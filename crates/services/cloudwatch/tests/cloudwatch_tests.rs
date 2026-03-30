@@ -706,5 +706,8 @@ async fn test_get_metric_data_expression_sum_aggregates_metric_results() {
     assert!(!vals.is_empty(), "expression SUM should produce a value");
     let sum: f64 = vals[0].as_f64().unwrap();
     // m1 = 5+15 = 20, expression sums over m1 → 20
-    assert!(sum > 0.0, "SUM expression value should be > 0, got {sum}");
+    assert!(
+        (sum - 20.0).abs() < 0.001,
+        "SUM expression value should be 20.0, got {sum}"
+    );
 }

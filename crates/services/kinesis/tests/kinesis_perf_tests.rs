@@ -163,3 +163,66 @@ async fn perf_list_streams_many() {
         elapsed.as_millis()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Perf 4 — RemoveTags round-trip: add 50 tags then remove them all in <500 ms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_remove_tags_round_trip() {
+    let p = KinesisProvider::new();
+    create_stream(&p, "perf-rm-tag-stream").await;
+
+    // Add 50 tags first
+    let tags: serde_json::Map<String, Value> = (0..50)
+        .map(|i| {
+            (
+                format!("rm-key-{i:02}"),
+                Value::String(format!("val-{i:02}")),
+            )
+        })
+        .collect();
+    let add_resp = p
+        .dispatch(&make_ctx(
+            "AddTagsToStream",
+            json!({ "StreamName": "perf-rm-tag-stream", "Tags": tags }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(add_resp.status_code, 200);
+
+    let tag_keys: Vec<String> = (0..50).map(|i| format!("rm-key-{i:02}")).collect();
+
+    let start = Instant::now();
+    let rm_resp = p
+        .dispatch(&make_ctx(
+            "RemoveTagsFromStream",
+            json!({ "StreamName": "perf-rm-tag-stream", "TagKeys": tag_keys }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rm_resp.status_code, 200);
+
+    let list_resp = p
+        .dispatch(&make_ctx(
+            "ListTagsForStream",
+            json!({ "StreamName": "perf-rm-tag-stream" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status_code, 200);
+    let elapsed = start.elapsed();
+
+    let body: Value = serde_json::from_slice(list_resp.body.as_bytes()).unwrap();
+    let remaining = body["Tags"].as_array().unwrap().len();
+    assert_eq!(
+        remaining, 0,
+        "all tags should have been removed, got {remaining}"
+    );
+
+    assert!(
+        elapsed.as_millis() < 500,
+        "RemoveTags+ListTags round-trip took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}

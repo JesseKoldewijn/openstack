@@ -814,6 +814,13 @@ impl ServiceProvider for KinesisProvider {
                 };
                 if let Some(tags_obj) = ctx.request_body.get("Tags").and_then(|v| v.as_object()) {
                     for (k, v) in tags_obj {
+                        if stream.tags.len() >= 50 && !stream.tags.contains_key(k) {
+                            return Ok(json_error(
+                                "InvalidArgumentException",
+                                "Cannot have more than 50 tags for a stream",
+                                400,
+                            ));
+                        }
                         if let Some(val) = v.as_str() {
                             stream.tags.insert(k.clone(), val.to_string());
                         }
@@ -834,18 +841,27 @@ impl ServiceProvider for KinesisProvider {
                     }
                 };
                 let Some(store) = self.store.get(account_id, region) else {
-                    return Ok(json_ok(json!({ "Tags": [], "HasMoreTags": false })));
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
                 };
-                let tags: Vec<Value> = store
-                    .streams
-                    .get(stream_name)
-                    .map(|s| {
-                        s.tags
-                            .iter()
-                            .map(|(k, v)| json!({ "Key": k, "Value": v }))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let stream = match store.streams.get(stream_name) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Stream {stream_name} not found"),
+                            400,
+                        ));
+                    }
+                };
+                let tags: Vec<Value> = stream
+                    .tags
+                    .iter()
+                    .map(|(k, v)| json!({ "Key": k, "Value": v }))
+                    .collect();
                 Ok(json_ok(json!({ "Tags": tags, "HasMoreTags": false })))
             }
 
@@ -861,10 +877,17 @@ impl ServiceProvider for KinesisProvider {
                     }
                 };
                 let mut store = self.store.get_or_create(account_id, region);
-                if let Some(stream) = store.streams.get_mut(stream_name)
-                    && let Some(keys_arr) =
-                        ctx.request_body.get("TagKeys").and_then(|v| v.as_array())
-                {
+                let stream = match store.streams.get_mut(stream_name) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Stream {stream_name} not found"),
+                            400,
+                        ));
+                    }
+                };
+                if let Some(keys_arr) = ctx.request_body.get("TagKeys").and_then(|v| v.as_array()) {
                     for k in keys_arr {
                         if let Some(key) = k.as_str() {
                             stream.tags.remove(key);

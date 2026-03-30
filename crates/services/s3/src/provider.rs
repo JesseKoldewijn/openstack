@@ -2395,15 +2395,28 @@ fn handle_get_bucket_notification(store: &S3Store, ctx: &RequestContext) -> Disp
             xml_escape(&nc.destination_arn)
         )
         .unwrap();
-        xml.push_str("<Event>");
         for ev in &nc.events {
             write!(xml, "<Event>{}</Event>", xml_escape(ev)).unwrap();
         }
-        xml.push_str("</Event>");
-        if let Some(ref prefix) = nc.prefix_filter {
-            write!(xml, "<Filter><S3Key><FilterRule><Name>prefix</Name><Value>{}</Value></FilterRule></S3Key></Filter>", xml_escape(prefix)).unwrap();
-        } else if let Some(ref suffix) = nc.suffix_filter {
-            write!(xml, "<Filter><S3Key><FilterRule><Name>suffix</Name><Value>{}</Value></FilterRule></S3Key></Filter>", xml_escape(suffix)).unwrap();
+        if nc.prefix_filter.is_some() || nc.suffix_filter.is_some() {
+            xml.push_str("<Filter><S3Key>");
+            if let Some(ref prefix) = nc.prefix_filter {
+                write!(
+                    xml,
+                    "<FilterRule><Name>prefix</Name><Value>{}</Value></FilterRule>",
+                    xml_escape(prefix)
+                )
+                .unwrap();
+            }
+            if let Some(ref suffix) = nc.suffix_filter {
+                write!(
+                    xml,
+                    "<FilterRule><Name>suffix</Name><Value>{}</Value></FilterRule>",
+                    xml_escape(suffix)
+                )
+                .unwrap();
+            }
+            xml.push_str("</S3Key></Filter>");
         }
         write!(xml, "</{tag}>").unwrap();
     }
@@ -2627,12 +2640,12 @@ fn build_notification_dispatch_ctx_owned(
                 .unwrap_or("unknown")
                 .to_string();
             let body = format!(
-                "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2F{queue_name}&MessageBody={}",
+                "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F{account_id}%2F{queue_name}&MessageBody={}",
                 urlencoding::encode(std::str::from_utf8(&payload).unwrap_or(""))
             );
             let mut ctx = RequestContext::new("sqs", "SendMessage", region, account_id);
             ctx.method = "POST".to_string();
-            ctx.path = format!("/000000000000/{queue_name}");
+            ctx.path = format!("/{account_id}/{queue_name}");
             ctx.raw_body = Some(Bytes::from(body.into_bytes()));
             ctx
         }
@@ -2655,7 +2668,8 @@ fn build_notification_dispatch_ctx_owned(
                 .next_back()
                 .unwrap_or("unknown")
                 .to_string();
-            let mut ctx = RequestContext::new("lambda", "InvokeFunction", region, account_id);
+            // Lambda dispatch uses "Invoke" (not "InvokeFunction") to match LambdaProvider routing
+            let mut ctx = RequestContext::new("lambda", "Invoke", region, account_id);
             ctx.method = "POST".to_string();
             ctx.path = format!("/2015-03-31/functions/{fn_name}/invocations");
             ctx.raw_body = Some(Bytes::from(payload));

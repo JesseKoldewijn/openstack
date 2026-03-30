@@ -531,3 +531,45 @@ async fn test_describe_stream_summary() {
     );
     assert_eq!(b["StreamDescriptionSummary"]["OpenShardCount"], 2);
 }
+
+#[tokio::test]
+async fn test_list_tags_stream_not_found() {
+    let p = KinesisProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListTagsForStream",
+            json!({ "StreamName": "nonexistent-stream" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing stream, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn test_remove_tags_stream_not_found() {
+    let p = KinesisProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "RemoveTagsFromStream",
+            json!({ "StreamName": "nonexistent-stream", "TagKeys": ["k1"] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing stream, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
+}

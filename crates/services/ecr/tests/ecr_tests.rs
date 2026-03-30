@@ -341,3 +341,20 @@ async fn test_describe_images_filter_by_digest() {
     assert_eq!(details.len(), 1);
     assert_eq!(details[0]["imageDigest"], digest);
 }
+
+#[tokio::test]
+async fn test_describe_images_missing_repository_name_fails() {
+    let p = EcrProvider::new();
+    // DescribeImages without repositoryName must be rejected with a 400.
+    let resp = p
+        .dispatch(&make_ctx("DescribeImages", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing repositoryName, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+}

@@ -390,3 +390,17 @@ async fn test_delete_rule() {
             .any(|r| r["Name"] == "del-rule")
     );
 }
+
+#[tokio::test]
+async fn test_put_events_missing_entries_fails() {
+    let p = EventBridgeProvider::new();
+    // PutEvents without Entries must be rejected with 400.
+    let resp = p.dispatch(&make_ctx("PutEvents", json!({}))).await.unwrap();
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing Entries, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+}

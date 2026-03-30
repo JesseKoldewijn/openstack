@@ -10,6 +10,7 @@ use openstack_service_framework::traits::{
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
+use tracing::warn;
 
 use crate::store::{EventBridgeStore, EventBus, EventRule, RuleTarget};
 
@@ -128,6 +129,35 @@ fn matches_value(event: &Value, pattern: &Value) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Simple URL encoding for form-encoded dispatch bodies
+// ---------------------------------------------------------------------------
+
+fn simple_url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(
+                    char::from_digit((b >> 4) as u32, 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit((b & 0xf) as u32, 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Target dispatch helper
 // ---------------------------------------------------------------------------
 
@@ -138,57 +168,63 @@ async fn dispatch_to_target(
     region: &str,
     input: Value,
 ) {
-    use openstack_service_framework::traits::RequestContext;
-
-    // Determine service + operation from target ARN
     // ARN format: arn:aws:<service>:<region>:<account>:<resource>
     let parts: Vec<&str> = target_arn.split(':').collect();
     if parts.len() < 6 {
+        warn!(target_arn = %target_arn, "EventBridge: target ARN has fewer than 6 segments, skipping dispatch");
         return;
     }
     let service = parts[2]; // e.g. "sqs", "sns", "lambda"
 
-    let (svc, op, body) = match service {
+    let ctx = match service {
         "sqs" => {
             // arn:aws:sqs:<region>:<account>:QueueName
             let queue_name = parts.last().unwrap_or(&"");
-            let queue_url = format!("http://localhost:4566/{account_id}/{queue_name}");
-            (
-                "sqs",
-                "SendMessage",
-                serde_json::json!({
-                    "QueueUrl": queue_url,
-                    "MessageBody": serde_json::to_string(&input).unwrap_or_default(),
-                }),
-            )
+            let message_body = serde_json::to_string(&input).unwrap_or_default();
+            // SQS provider reads from raw_body (form-encoded)
+            let body = format!(
+                "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F{account_id}%2F{queue_name}&MessageBody={}",
+                simple_url_encode(&message_body),
+            );
+            let mut ctx = RequestContext::new("sqs", "SendMessage", region, account_id);
+            ctx.method = "POST".to_string();
+            ctx.path = format!("/{account_id}/{queue_name}");
+            ctx.raw_body = Some(Bytes::from(body.into_bytes()));
+            ctx
         }
-        "sns" => (
-            "sns",
-            "Publish",
-            serde_json::json!({
-                "TopicArn": target_arn,
-                "Message": serde_json::to_string(&input).unwrap_or_default(),
-            }),
-        ),
+        "sns" => {
+            // SNS provider reads from raw_body (form-encoded), not request_body JSON.
+            let message = serde_json::to_string(&input).unwrap_or_default();
+            let body = format!(
+                "Action=Publish&TopicArn={}&Message={}",
+                simple_url_encode(target_arn),
+                simple_url_encode(&message),
+            );
+            let mut ctx = RequestContext::new("sns", "Publish", region, account_id);
+            ctx.method = "POST".to_string();
+            ctx.path = "/".to_string();
+            ctx.raw_body = Some(Bytes::from(body.into_bytes()));
+            ctx
+        }
         "lambda" => {
             // arn:aws:lambda:<region>:<account>:function:<name>
             let function_name = parts.last().unwrap_or(&"");
-            (
-                "lambda",
-                "Invoke",
-                serde_json::json!({
-                    "FunctionName": function_name,
-                    "Payload": serde_json::to_string(&input).unwrap_or_default(),
-                }),
-            )
+            let payload = serde_json::to_string(&input).unwrap_or_default();
+            let mut ctx = RequestContext::new("lambda", "Invoke", region, account_id);
+            ctx.method = "POST".to_string();
+            ctx.path = format!("/2015-03-31/functions/{function_name}/invocations");
+            ctx.raw_body = Some(Bytes::from(payload.into_bytes()));
+            ctx
         }
-        _ => return,
+        _ => {
+            warn!(service = %service, target_arn = %target_arn, "EventBridge: unsupported target service");
+            return;
+        }
     };
 
-    let ctx = RequestContext::new(svc, op, region, account_id);
-    let mut ctx = ctx;
-    ctx.request_body = body;
-    let _ = dispatcher.dispatch_to(&ctx).await;
+    if let Err(e) = dispatcher.dispatch_to(&ctx).await {
+        warn!(err = %e, target_arn = %target_arn, "EventBridge: target dispatch failed");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,11 +521,10 @@ impl ServiceProvider for EventBridgeProvider {
                     None => return Ok(json_error("ValidationError", "Entries is required", 400)),
                 };
 
-                let failed_entry_count = 0u32;
                 let mut result_entries: Vec<Value> = Vec::new();
 
                 // Gather matching rules + targets up front so we can async-dispatch after
-                let mut dispatch_targets: Vec<(String, String, Value)> = Vec::new(); // (target_arn, input, event)
+                let mut dispatch_targets: Vec<(String, String, Value)> = Vec::new(); // (target_arn, target_id, input)
 
                 {
                     let Some(store) = self.store.get(account_id, region) else {
@@ -519,7 +554,14 @@ impl ServiceProvider for EventBridgeProvider {
                             .get("DetailType")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let detail = entry.get("Detail").cloned().unwrap_or(Value::Null);
+
+                        // Detail arrives as a JSON string in PutEvents; parse it so
+                        // rules matching detail.* fields can fire correctly.
+                        let detail = entry
+                            .get("Detail")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or(Value::Object(Default::default()));
 
                         // Build the full CloudWatch event envelope
                         let event_envelope = json!({
@@ -533,12 +575,12 @@ impl ServiceProvider for EventBridgeProvider {
                             "time": Utc::now().to_rfc3339(),
                         });
 
-                        // Match against enabled rules on this bus
+                        // Match against enabled rules on this bus (exact bus match only)
                         for rule in store.rules.values() {
                             if rule.state != "ENABLED" {
                                 continue;
                             }
-                            if rule.event_bus_name != bus_name && rule.event_bus_name != "default" {
+                            if rule.event_bus_name != bus_name {
                                 continue;
                             }
                             if !event_matches_pattern(&event_envelope, &rule.event_pattern) {
@@ -564,17 +606,15 @@ impl ServiceProvider for EventBridgeProvider {
                 if let Some(dispatcher) = &self.dispatcher {
                     for (target_arn, _target_id, input) in dispatch_targets {
                         let dispatcher = Arc::clone(dispatcher);
-                        let target_arn = target_arn.clone();
                         let account_id = account_id.to_string();
                         let region = region.to_string();
-                        let input_clone = input.clone();
                         tokio::spawn(async move {
                             dispatch_to_target(
                                 &*dispatcher,
                                 &target_arn,
                                 &account_id,
                                 &region,
-                                input_clone,
+                                input,
                             )
                             .await;
                         });
@@ -582,7 +622,7 @@ impl ServiceProvider for EventBridgeProvider {
                 }
 
                 Ok(json_ok(json!({
-                    "FailedEntryCount": failed_entry_count,
+                    "FailedEntryCount": 0u32,
                     "Entries": result_entries,
                 })))
             }

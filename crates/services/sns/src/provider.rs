@@ -569,14 +569,15 @@ async fn handle_publish(
                         .next_back()
                         .unwrap_or("unknown")
                         .to_string();
+                    let account_id = &ctx.account_id;
                     let body = format!(
-                        "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2F{queue_name}&MessageBody={encoded}",
+                        "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F{account_id}%2F{queue_name}&MessageBody={encoded}",
                         encoded = url_encode_value(&payload)
                     );
                     let mut dispatch_ctx =
                         RequestContext::new("sqs", "SendMessage", &ctx.region, &ctx.account_id);
                     dispatch_ctx.method = "POST".to_string();
-                    dispatch_ctx.path = format!("/000000000000/{queue_name}");
+                    dispatch_ctx.path = format!("/{account_id}/{queue_name}");
                     dispatch_ctx.raw_body = Some(Bytes::from(body.into_bytes()));
                     if let Err(e) = disp.dispatch_to(&dispatch_ctx).await {
                         warn!(err = %e, endpoint = %endpoint, "SNS → SQS dispatch failed");

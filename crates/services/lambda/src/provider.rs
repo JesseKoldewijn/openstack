@@ -1306,9 +1306,26 @@ impl ServiceProvider for LambdaProvider {
                     .or_else(|| str_field(body, "StatementId"))
                     .unwrap_or_default();
 
+                let function_arn = make_arn(region, account_id, &function_name);
                 let mut store = self.store.get_or_create(account_id, region);
-                if let Some(func) = store.functions.get_mut(&function_name) {
-                    func.policy_statements.retain(|s| s.sid != sid);
+                let func = match store.functions.get_mut(&function_name) {
+                    Some(f) => f,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Function not found: {function_arn}"),
+                            404,
+                        ));
+                    }
+                };
+                let before = func.policy_statements.len();
+                func.policy_statements.retain(|s| s.sid != sid);
+                if func.policy_statements.len() == before {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Statement {sid} not found in function {function_arn}"),
+                        404,
+                    ));
                 }
                 Ok(DispatchResponse {
                     status_code: 204,

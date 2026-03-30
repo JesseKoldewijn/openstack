@@ -87,3 +87,87 @@ async fn perf_decode_authorization_message_large_payload() {
         elapsed.as_millis()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Perf 3 — AssumeRole throughput (30 calls in under 500 ms)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_assume_role() {
+    let p = StsProvider::new();
+    let n = 30usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let resp = p
+            .dispatch(&make_ctx(
+                "AssumeRole",
+                &[
+                    ("RoleArn", "arn:aws:iam::000000000000:role/perf-role"),
+                    ("RoleSessionName", &format!("perf-session-{i}")),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200, "AssumeRole call {i} failed");
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 500,
+        "{n} AssumeRole calls took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Perf 4 — GetSessionToken throughput (50 calls in under 500 ms)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_get_session_token() {
+    let p = StsProvider::new();
+    let n = 50usize;
+
+    let start = Instant::now();
+    for _ in 0..n {
+        let resp = p.dispatch(&make_ctx("GetSessionToken", &[])).await.unwrap();
+        assert_eq!(resp.status_code, 200, "GetSessionToken failed");
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 500,
+        "{n} GetSessionToken calls took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Perf 5 — GetAccessKeyInfo throughput (50 calls in under 500 ms)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_get_access_key_info() {
+    let p = StsProvider::new();
+    let n = 50usize;
+
+    let start = Instant::now();
+    for _ in 0..n {
+        let resp = p
+            .dispatch(&make_ctx(
+                "GetAccessKeyInfo",
+                &[("AccessKeyId", "AKIAIOSFODNN7EXAMPLE")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200, "GetAccessKeyInfo failed");
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 500,
+        "{n} GetAccessKeyInfo calls took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}

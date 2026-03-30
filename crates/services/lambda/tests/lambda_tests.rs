@@ -654,6 +654,12 @@ async fn test_get_policy_no_policy_returns_404() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 404);
+    let b = body(&resp);
+    assert_eq!(
+        b["__type"], "ResourceNotFoundException",
+        "expected ResourceNotFoundException error type, got: {}",
+        b["__type"]
+    );
 }
 
 #[tokio::test]
@@ -735,6 +741,11 @@ async fn test_add_permission_overwrites_same_sid() {
     let stmts = policy["Statement"].as_array().unwrap();
     // Sid must be deduplicated — only the latest should remain
     assert_eq!(stmts.len(), 1, "duplicate Sid must be overwritten");
+    // The surviving statement must have the second principal
+    assert_eq!(
+        stmts[0]["Principal"]["Service"], "sqs.amazonaws.com",
+        "surviving statement should have the second (overwriting) principal"
+    );
 }
 
 /// Create a minimal Python Lambda zip with a simple handler.
@@ -910,4 +921,65 @@ def handler(event, context):
         resp.status_code,
         body_str(&resp)
     );
+}
+
+#[tokio::test]
+async fn test_remove_permission_function_not_found() {
+    let p = LambdaProvider::new();
+    // RemovePermission on a function that does not exist must return 404.
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "RemovePermission",
+            json!({}),
+            "/2015-03-31/functions/ghost-func/policy/some-sid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        404,
+        "expected 404 for missing function, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn test_remove_permission_statement_not_found() {
+    let p = LambdaProvider::new();
+    create_function(&p, "rm-missing-sid-func").await;
+
+    // Add a single permission first
+    p.dispatch(&make_ctx_with_path(
+        "AddPermission",
+        json!({
+            "StatementId": "real-sid",
+            "Action": "lambda:InvokeFunction",
+            "Principal": "s3.amazonaws.com",
+        }),
+        "/2015-03-31/functions/rm-missing-sid-func/policy",
+    ))
+    .await
+    .unwrap();
+
+    // RemovePermission with a non-existent StatementId must return 404.
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "RemovePermission",
+            json!({}),
+            "/2015-03-31/functions/rm-missing-sid-func/policy/ghost-sid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        404,
+        "expected 404 for missing statement, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
 }

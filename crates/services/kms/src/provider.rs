@@ -485,9 +485,9 @@ impl ServiceProvider for KmsProvider {
                 let message_b64 = str_param(ctx, "Message").unwrap_or_default();
 
                 let store = self.store.get(account_id, region);
-                let (key_arn, key_material_hex) =
+                let (key_arn, key_material_hex, key_state) =
                     match store.as_ref().and_then(|s| s.resolve_key(&key_id)) {
-                        Some(k) => (k.arn.clone(), k.key_material.clone()),
+                        Some(k) => (k.arn.clone(), k.key_material.clone(), k.key_state.clone()),
                         None => {
                             return Ok(json_error(
                                 "NotFoundException",
@@ -497,12 +497,45 @@ impl ServiceProvider for KmsProvider {
                         }
                     };
 
-                let key_bytes = hex::decode(&key_material_hex)
-                    .unwrap_or_else(|_| key_material_hex.as_bytes().to_vec());
-                let message_bytes = B64.decode(message_b64.as_bytes()).unwrap_or_default();
+                if key_state != KeyState::Enabled {
+                    return Ok(json_error(
+                        "DisabledException",
+                        "Key is disabled or pending deletion",
+                        400,
+                    ));
+                }
 
-                let mut mac = HmacSha256::new_from_slice(&key_bytes)
-                    .unwrap_or_else(|_| HmacSha256::new_from_slice(b"fallback").unwrap());
+                let key_bytes = match hex::decode(&key_material_hex) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "KMSInvalidStateException",
+                            "Key material is corrupt",
+                            400,
+                        ));
+                    }
+                };
+                let message_bytes = match B64.decode(message_b64.as_bytes()) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Message is not valid base64",
+                            400,
+                        ));
+                    }
+                };
+
+                let mut mac = match HmacSha256::new_from_slice(&key_bytes) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "KMSInvalidStateException",
+                            "Key material has invalid length for HMAC",
+                            400,
+                        ));
+                    }
+                };
                 mac.update(&message_bytes);
                 let sig_bytes = mac.finalize().into_bytes();
                 let sig = B64.encode(sig_bytes);
@@ -521,9 +554,9 @@ impl ServiceProvider for KmsProvider {
                 let provided_sig_b64 = str_param(ctx, "Signature").unwrap_or_default();
 
                 let store = self.store.get(account_id, region);
-                let (key_arn, key_material_hex) =
+                let (key_arn, key_material_hex, key_state) =
                     match store.as_ref().and_then(|s| s.resolve_key(&key_id)) {
-                        Some(k) => (k.arn.clone(), k.key_material.clone()),
+                        Some(k) => (k.arn.clone(), k.key_material.clone(), k.key_state.clone()),
                         None => {
                             return Ok(json_error(
                                 "NotFoundException",
@@ -533,13 +566,55 @@ impl ServiceProvider for KmsProvider {
                         }
                     };
 
-                let key_bytes = hex::decode(&key_material_hex)
-                    .unwrap_or_else(|_| key_material_hex.as_bytes().to_vec());
-                let message_bytes = B64.decode(message_b64.as_bytes()).unwrap_or_default();
-                let provided_sig = B64.decode(provided_sig_b64.as_bytes()).unwrap_or_default();
+                if key_state != KeyState::Enabled {
+                    return Ok(json_error(
+                        "DisabledException",
+                        "Key is disabled or pending deletion",
+                        400,
+                    ));
+                }
 
-                let mut mac = HmacSha256::new_from_slice(&key_bytes)
-                    .unwrap_or_else(|_| HmacSha256::new_from_slice(b"fallback").unwrap());
+                let key_bytes = match hex::decode(&key_material_hex) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "KMSInvalidStateException",
+                            "Key material is corrupt",
+                            400,
+                        ));
+                    }
+                };
+                let message_bytes = match B64.decode(message_b64.as_bytes()) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Message is not valid base64",
+                            400,
+                        ));
+                    }
+                };
+                let provided_sig = match B64.decode(provided_sig_b64.as_bytes()) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Signature is not valid base64",
+                            400,
+                        ));
+                    }
+                };
+
+                let mut mac = match HmacSha256::new_from_slice(&key_bytes) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "KMSInvalidStateException",
+                            "Key material has invalid length for HMAC",
+                            400,
+                        ));
+                    }
+                };
                 mac.update(&message_bytes);
                 let valid = mac.verify_slice(&provided_sig).is_ok();
 

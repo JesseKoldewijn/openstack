@@ -148,3 +148,70 @@ async fn perf_create_and_list_functions() {
         elapsed.as_millis()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Perf 3 — RemovePermission round-trip: add 10 permissions then remove them
+//           all in under 500 ms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_remove_permission() {
+    let p = LambdaProvider::new();
+    create_function(&p, "perf-rm-perm-func").await;
+
+    let n = 10usize;
+    // Add n permissions
+    for i in 0..n {
+        let resp = p
+            .dispatch(&make_ctx_with_path(
+                "AddPermission",
+                json!({
+                    "StatementId": format!("perf-sid-{i}"),
+                    "Action": "lambda:InvokeFunction",
+                    "Principal": "s3.amazonaws.com",
+                }),
+                "/2015-03-31/functions/perf-rm-perm-func/policy",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200, "AddPermission perf-sid-{i} failed");
+    }
+
+    let start = Instant::now();
+    for i in 0..n {
+        let resp = p
+            .dispatch(&make_ctx_with_path(
+                "RemovePermission",
+                json!({}),
+                &format!("/2015-03-31/functions/perf-rm-perm-func/policy/perf-sid-{i}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status_code, 204,
+            "RemovePermission perf-sid-{i} failed"
+        );
+    }
+    let elapsed = start.elapsed();
+
+    // Verify policy is now empty
+    let get_resp = p
+        .dispatch(&make_ctx_with_path(
+            "GetPolicy",
+            json!({}),
+            "/2015-03-31/functions/perf-rm-perm-func/policy",
+        ))
+        .await
+        .unwrap();
+    // No statements → 404 (no policy)
+    assert_eq!(
+        get_resp.status_code, 404,
+        "expected empty policy (404) after removing all statements"
+    );
+
+    assert!(
+        elapsed.as_millis() < 500,
+        "RemovePermission×{n} took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}
