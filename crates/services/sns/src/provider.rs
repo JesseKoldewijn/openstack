@@ -112,8 +112,16 @@ fn url_encode_value(s: &str) -> String {
             }
             _ => {
                 out.push('%');
-                out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0').to_ascii_uppercase());
-                out.push(char::from_digit((b & 0xf) as u32, 16).unwrap_or('0').to_ascii_uppercase());
+                out.push(
+                    char::from_digit((b >> 4) as u32, 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit((b & 0xf) as u32, 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
             }
         }
     }
@@ -556,12 +564,17 @@ async fn handle_publish(
 
                 if let Some(disp) = dispatcher {
                     // Extract queue name from ARN: arn:aws:sqs:region:account:queue-name
-                    let queue_name = endpoint.split(':').next_back().unwrap_or("unknown").to_string();
+                    let queue_name = endpoint
+                        .split(':')
+                        .next_back()
+                        .unwrap_or("unknown")
+                        .to_string();
                     let body = format!(
                         "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2F{queue_name}&MessageBody={encoded}",
                         encoded = url_encode_value(&payload)
                     );
-                    let mut dispatch_ctx = RequestContext::new("sqs", "SendMessage", &ctx.region, &ctx.account_id);
+                    let mut dispatch_ctx =
+                        RequestContext::new("sqs", "SendMessage", &ctx.region, &ctx.account_id);
                     dispatch_ctx.method = "POST".to_string();
                     dispatch_ctx.path = format!("/000000000000/{queue_name}");
                     dispatch_ctx.raw_body = Some(Bytes::from(body.into_bytes()));

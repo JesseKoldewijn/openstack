@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 use openstack_sts::StsProvider;
 

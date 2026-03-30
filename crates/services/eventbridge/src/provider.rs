@@ -9,7 +9,7 @@ use openstack_service_framework::traits::{
     ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::store::{EventBridgeStore, EventBus, EventRule, RuleTarget};
 
@@ -64,24 +64,6 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             .unwrap(),
         )),
         content_type: Cow::Borrowed("application/x-amz-json-1.1"),
-        headers: Vec::new(),
-    }
-}
-
-fn disabled_service_error(service: &str) -> DispatchResponse {
-    DispatchResponse {
-        status_code: 501,
-        body: ResponseBody::Buffered(Bytes::from(
-            serde_json::to_vec(&json!({
-                // Keep InternalFailure for LocalStack parity on disabled EventBridge PutEvents.
-                "__type": "InternalFailure",
-                "message": format!(
-                    "Service '{service}' is not enabled. Please check your 'SERVICES' configuration variable."
-                ),
-            }))
-            .unwrap(),
-        )),
-        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
@@ -503,7 +485,7 @@ impl ServiceProvider for EventBridgeProvider {
                     None => return Ok(json_error("ValidationError", "Entries is required", 400)),
                 };
 
-                let mut failed_entry_count = 0u32;
+                let failed_entry_count = 0u32;
                 let mut result_entries: Vec<Value> = Vec::new();
 
                 // Gather matching rules + targets up front so we can async-dispatch after

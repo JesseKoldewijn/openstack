@@ -485,19 +485,17 @@ impl ServiceProvider for KmsProvider {
                 let message_b64 = str_param(ctx, "Message").unwrap_or_default();
 
                 let store = self.store.get(account_id, region);
-                let (key_arn, key_material_hex) = match store
-                    .as_ref()
-                    .and_then(|s| s.resolve_key(&key_id))
-                {
-                    Some(k) => (k.arn.clone(), k.key_material.clone()),
-                    None => {
-                        return Ok(json_error(
-                            "NotFoundException",
-                            &format!("Key '{key_id}' not found"),
-                            400,
-                        ))
-                    }
-                };
+                let (key_arn, key_material_hex) =
+                    match store.as_ref().and_then(|s| s.resolve_key(&key_id)) {
+                        Some(k) => (k.arn.clone(), k.key_material.clone()),
+                        None => {
+                            return Ok(json_error(
+                                "NotFoundException",
+                                &format!("Key '{key_id}' not found"),
+                                400,
+                            ));
+                        }
+                    };
 
                 let key_bytes = hex::decode(&key_material_hex)
                     .unwrap_or_else(|_| key_material_hex.as_bytes().to_vec());
@@ -523,19 +521,17 @@ impl ServiceProvider for KmsProvider {
                 let provided_sig_b64 = str_param(ctx, "Signature").unwrap_or_default();
 
                 let store = self.store.get(account_id, region);
-                let (key_arn, key_material_hex) = match store
-                    .as_ref()
-                    .and_then(|s| s.resolve_key(&key_id))
-                {
-                    Some(k) => (k.arn.clone(), k.key_material.clone()),
-                    None => {
-                        return Ok(json_error(
-                            "NotFoundException",
-                            &format!("Key '{key_id}' not found"),
-                            400,
-                        ))
-                    }
-                };
+                let (key_arn, key_material_hex) =
+                    match store.as_ref().and_then(|s| s.resolve_key(&key_id)) {
+                        Some(k) => (k.arn.clone(), k.key_material.clone()),
+                        None => {
+                            return Ok(json_error(
+                                "NotFoundException",
+                                &format!("Key '{key_id}' not found"),
+                                400,
+                            ));
+                        }
+                    };
 
                 let key_bytes = hex::decode(&key_material_hex)
                     .unwrap_or_else(|_| key_material_hex.as_bytes().to_vec());

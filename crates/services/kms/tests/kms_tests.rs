@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use openstack_kms::KmsProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -115,7 +115,7 @@ async fn test_encrypt_decrypt() {
     let p = KmsProvider::new();
     let key_id = create_key(&p).await;
 
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     let plaintext = B64.encode("hello world");
 
     let resp = p
@@ -250,7 +250,7 @@ async fn test_describe_key_with_full_arn_not_found_message_not_double_wrapped() 
 
 #[tokio::test]
 async fn test_sign_returns_signature() {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     let p = KmsProvider::new();
     let key_id = create_key(&p).await;
 
@@ -281,7 +281,7 @@ async fn test_sign_returns_signature() {
 
 #[tokio::test]
 async fn test_verify_valid_signature() {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     let p = KmsProvider::new();
     let key_id = create_key(&p).await;
 
@@ -330,7 +330,7 @@ async fn test_verify_valid_signature() {
 
 #[tokio::test]
 async fn test_verify_invalid_signature() {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     let p = KmsProvider::new();
     let key_id = create_key(&p).await;
 
@@ -357,7 +357,7 @@ async fn test_verify_invalid_signature() {
 
 #[tokio::test]
 async fn test_sign_key_not_found() {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     let p = KmsProvider::new();
     let resp = p
         .dispatch(&make_ctx(
@@ -378,7 +378,7 @@ async fn test_sign_key_not_found() {
 #[tokio::test]
 async fn test_sign_verify_deterministic() {
     // Signing the same message with the same key must produce the same signature.
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     let p = KmsProvider::new();
     let key_id = create_key(&p).await;
     let message = B64.encode(b"deterministic");

@@ -483,7 +483,11 @@ impl ServiceProvider for CloudWatchProvider {
 
                 let mut results: Vec<Value> = Vec::new();
                 for query in &queries {
-                    let id = query.get("Id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = query
+                        .get("Id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let label = query
                         .get("Label")
                         .and_then(|v| v.as_str())
@@ -531,14 +535,15 @@ impl ServiceProvider for CloudWatchProvider {
                             let v = match stat.as_str() {
                                 "Sum" | "SampleCount" => matching.iter().sum::<f64>(),
                                 "Minimum" => matching.iter().cloned().fold(f64::INFINITY, f64::min),
-                                "Maximum" => matching.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                                "Maximum" => {
+                                    matching.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                                }
                                 _ => {
                                     // Average / p* default
                                     matching.iter().sum::<f64>() / matching.len() as f64
                                 }
                             };
-                            let ts = start_time
-                                + chrono::Duration::seconds(period_secs);
+                            let ts = start_time + chrono::Duration::seconds(period_secs);
                             (
                                 vec![ts.to_rfc3339()],
                                 vec![if v.is_finite() { v } else { 0.0 }],
@@ -552,36 +557,60 @@ impl ServiceProvider for CloudWatchProvider {
                             "Values": values,
                             "StatusCode": "Complete",
                         }));
-                    } else if let Some(expr_str) = query.get("Expression").and_then(|v| v.as_str()) {
+                    } else if let Some(expr_str) = query.get("Expression").and_then(|v| v.as_str())
+                    {
                         // Math expression: simple SUM/AVG/MIN/MAX over other query IDs
                         // e.g. "SUM(METRICS())" or "m1+m2"
                         // We implement a best-effort evaluation: SUM of all previously computed results
                         let val: f64 = if expr_str.to_ascii_uppercase().starts_with("SUM") {
-                            results.iter().flat_map(|r| {
-                                r.get("Values").and_then(|v| v.as_array()).map(|a| {
-                                    a.iter().filter_map(|v| v.as_f64()).sum::<f64>()
-                                }).into_iter()
-                            }).sum()
+                            results
+                                .iter()
+                                .flat_map(|r| {
+                                    r.get("Values")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| a.iter().filter_map(|v| v.as_f64()).sum::<f64>())
+                                        .into_iter()
+                                })
+                                .sum()
                         } else if expr_str.to_ascii_uppercase().starts_with("AVG") {
-                            let (sum, count) = results.iter().fold((0.0f64, 0usize), |(s, c), r| {
-                                let vals: Vec<f64> = r.get("Values").and_then(|v| v.as_array())
-                                    .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
-                                    .unwrap_or_default();
-                                (s + vals.iter().sum::<f64>(), c + vals.len())
-                            });
+                            let (sum, count) =
+                                results.iter().fold((0.0f64, 0usize), |(s, c), r| {
+                                    let vals: Vec<f64> = r
+                                        .get("Values")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+                                        .unwrap_or_default();
+                                    (s + vals.iter().sum::<f64>(), c + vals.len())
+                                });
                             if count > 0 { sum / count as f64 } else { 0.0 }
                         } else if expr_str.to_ascii_uppercase().starts_with("MIN") {
-                            results.iter().flat_map(|r| {
-                                r.get("Values").and_then(|v| v.as_array()).map(|a| {
-                                    a.iter().filter_map(|v| v.as_f64()).fold(f64::INFINITY, f64::min)
-                                }).into_iter()
-                            }).fold(f64::INFINITY, f64::min)
+                            results
+                                .iter()
+                                .flat_map(|r| {
+                                    r.get("Values")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| {
+                                            a.iter()
+                                                .filter_map(|v| v.as_f64())
+                                                .fold(f64::INFINITY, f64::min)
+                                        })
+                                        .into_iter()
+                                })
+                                .fold(f64::INFINITY, f64::min)
                         } else if expr_str.to_ascii_uppercase().starts_with("MAX") {
-                            results.iter().flat_map(|r| {
-                                r.get("Values").and_then(|v| v.as_array()).map(|a| {
-                                    a.iter().filter_map(|v| v.as_f64()).fold(f64::NEG_INFINITY, f64::max)
-                                }).into_iter()
-                            }).fold(f64::NEG_INFINITY, f64::max)
+                            results
+                                .iter()
+                                .flat_map(|r| {
+                                    r.get("Values")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| {
+                                            a.iter()
+                                                .filter_map(|v| v.as_f64())
+                                                .fold(f64::NEG_INFINITY, f64::max)
+                                        })
+                                        .into_iter()
+                                })
+                                .fold(f64::NEG_INFINITY, f64::max)
                         } else {
                             0.0
                         };
@@ -596,7 +625,9 @@ impl ServiceProvider for CloudWatchProvider {
                     }
                 }
 
-                Ok(json_ok(json!({ "MetricDataResults": results, "Messages": [] })))
+                Ok(json_ok(
+                    json!({ "MetricDataResults": results, "Messages": [] }),
+                ))
             }
 
             // ----------------------------------------------------------------

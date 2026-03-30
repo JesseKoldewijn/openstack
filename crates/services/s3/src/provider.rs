@@ -2388,7 +2388,13 @@ fn handle_get_bucket_notification(store: &S3Store, ctx: &RequestContext) -> Disp
             "lambda" => ("CloudFunctionConfiguration", "CloudFunction"),
             _ => ("QueueConfiguration", "Queue"), // default = sqs
         };
-        write!(xml, "<{tag}><Id>{}</Id><{arn_tag}>{}</{arn_tag}>", xml_escape(&nc.id), xml_escape(&nc.destination_arn)).unwrap();
+        write!(
+            xml,
+            "<{tag}><Id>{}</Id><{arn_tag}>{}</{arn_tag}>",
+            xml_escape(&nc.id),
+            xml_escape(&nc.destination_arn)
+        )
+        .unwrap();
         xml.push_str("<Event>");
         for ev in &nc.events {
             write!(xml, "<Event>{}</Event>", xml_escape(ev)).unwrap();
@@ -2423,7 +2429,13 @@ fn handle_put_bucket_notification(store: &mut S3Store, ctx: &RequestContext) -> 
     // Parse TopicConfiguration entries (SNS)
     parse_notification_configs(body, "TopicConfiguration", "Topic", "sns", &mut configs);
     // Parse CloudFunctionConfiguration entries (Lambda)
-    parse_notification_configs(body, "CloudFunctionConfiguration", "CloudFunction", "lambda", &mut configs);
+    parse_notification_configs(
+        body,
+        "CloudFunctionConfiguration",
+        "CloudFunction",
+        "lambda",
+        &mut configs,
+    );
 
     if let Some(b) = store.get_bucket_mut(&bucket) {
         b.notifications = configs;
@@ -2500,10 +2512,10 @@ fn find_filter_rule(block: &str, name: &str) -> Option<String> {
         rem = &rem[start + 12..];
         let end = rem.find("</FilterRule>").unwrap_or(rem.len());
         let rule = &rem[..end];
-        if let Some(rule_name) = extract_xml_text(rule, "Name") {
-            if rule_name.trim().eq_ignore_ascii_case(name) {
-                return extract_xml_text(rule, "Value");
-            }
+        if let Some(rule_name) = extract_xml_text(rule, "Name")
+            && rule_name.trim().eq_ignore_ascii_case(name)
+        {
+            return extract_xml_text(rule, "Value");
         }
         rem = &rem[end..];
     }
@@ -2511,13 +2523,15 @@ fn find_filter_rule(block: &str, name: &str) -> Option<String> {
 }
 
 /// Emit an S3 bucket notification event to all matching configurations.
+/// This function accepts owned values so it can be spawned as a background task.
 async fn emit_s3_notification(
-    store_bundle: &AccountRegionBundle<S3Store>,
-    dispatcher: &Option<Arc<dyn CrossServiceDispatcher>>,
-    ctx: &RequestContext,
-    bucket: &str,
-    key: &str,
-    event_name: &str,
+    store_bundle: Arc<AccountRegionBundle<S3Store>>,
+    dispatcher: Option<Arc<dyn CrossServiceDispatcher>>,
+    account_id: String,
+    region: String,
+    bucket: String,
+    key: String,
+    event_name: &'static str,
 ) {
     let dispatcher = match dispatcher {
         Some(d) => d,
@@ -2525,8 +2539,12 @@ async fn emit_s3_notification(
     };
 
     let configs: Vec<crate::store::NotificationConfig> = {
-        let Some(store) = store_bundle.get(&ctx.account_id, &ctx.region) else { return };
-        let Some(b) = store.get_bucket(bucket) else { return };
+        let Some(store) = store_bundle.get(&account_id, &region) else {
+            return;
+        };
+        let Some(b) = store.get_bucket(&bucket) else {
+            return;
+        };
         b.notifications.clone()
     };
 
@@ -2543,15 +2561,15 @@ async fn emit_s3_notification(
         }
 
         // Check key prefix/suffix filter
-        if let Some(ref prefix) = nc.prefix_filter {
-            if !key.starts_with(prefix.as_str()) {
-                continue;
-            }
+        if let Some(ref prefix) = nc.prefix_filter
+            && !key.starts_with(prefix.as_str())
+        {
+            continue;
         }
-        if let Some(ref suffix) = nc.suffix_filter {
-            if !key.ends_with(suffix.as_str()) {
-                continue;
-            }
+        if let Some(ref suffix) = nc.suffix_filter
+            && !key.ends_with(suffix.as_str())
+        {
+            continue;
         }
 
         // Build the S3 event notification JSON payload
@@ -2559,7 +2577,7 @@ async fn emit_s3_notification(
             "Records": [{
                 "eventVersion": "2.1",
                 "eventSource": "aws:s3",
-                "awsRegion": ctx.region,
+                "awsRegion": region,
                 "eventTime": chrono::Utc::now().to_rfc3339(),
                 "eventName": event_name,
                 "s3": {
@@ -2578,7 +2596,13 @@ async fn emit_s3_notification(
         let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
 
         // Build a synthetic RequestContext targeting the right service
-        let dispatch_ctx = build_notification_dispatch_ctx(ctx, &nc.destination_type, &nc.destination_arn, payload_bytes);
+        let dispatch_ctx = build_notification_dispatch_ctx_owned(
+            &account_id,
+            &region,
+            &nc.destination_type,
+            &nc.destination_arn,
+            payload_bytes,
+        );
         if let Err(e) = dispatcher.dispatch_to(&dispatch_ctx).await {
             debug!(err = %e, destination = %nc.destination_arn, event = %event_name, "S3 notification dispatch failed");
         }
@@ -2586,8 +2610,10 @@ async fn emit_s3_notification(
 }
 
 /// Build a RequestContext that routes to SQS SendMessage / SNS Publish / Lambda InvokeFunction.
-fn build_notification_dispatch_ctx(
-    orig_ctx: &RequestContext,
+/// Takes owned account_id and region strings so it can be used from spawned tasks.
+fn build_notification_dispatch_ctx_owned(
+    account_id: &str,
+    region: &str,
     dest_type: &str,
     dest_arn: &str,
     payload: Vec<u8>,
@@ -2595,12 +2621,16 @@ fn build_notification_dispatch_ctx(
     match dest_type {
         "sqs" => {
             // Extract queue name from ARN: arn:aws:sqs:region:account:queue-name
-            let queue_name = dest_arn.split(':').next_back().unwrap_or("unknown").to_string();
+            let queue_name = dest_arn
+                .split(':')
+                .next_back()
+                .unwrap_or("unknown")
+                .to_string();
             let body = format!(
                 "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2F{queue_name}&MessageBody={}",
                 urlencoding::encode(std::str::from_utf8(&payload).unwrap_or(""))
             );
-            let mut ctx = RequestContext::new("sqs", "SendMessage", &orig_ctx.region, &orig_ctx.account_id);
+            let mut ctx = RequestContext::new("sqs", "SendMessage", region, account_id);
             ctx.method = "POST".to_string();
             ctx.path = format!("/000000000000/{queue_name}");
             ctx.raw_body = Some(Bytes::from(body.into_bytes()));
@@ -2612,7 +2642,7 @@ fn build_notification_dispatch_ctx(
                 urlencoding::encode(dest_arn),
                 urlencoding::encode(std::str::from_utf8(&payload).unwrap_or(""))
             );
-            let mut ctx = RequestContext::new("sns", "Publish", &orig_ctx.region, &orig_ctx.account_id);
+            let mut ctx = RequestContext::new("sns", "Publish", region, account_id);
             ctx.method = "POST".to_string();
             ctx.path = "/".to_string();
             ctx.raw_body = Some(Bytes::from(body.into_bytes()));
@@ -2620,15 +2650,19 @@ fn build_notification_dispatch_ctx(
         }
         "lambda" => {
             // Extract function name from ARN
-            let fn_name = dest_arn.split(':').next_back().unwrap_or("unknown").to_string();
-            let mut ctx = RequestContext::new("lambda", "InvokeFunction", &orig_ctx.region, &orig_ctx.account_id);
+            let fn_name = dest_arn
+                .split(':')
+                .next_back()
+                .unwrap_or("unknown")
+                .to_string();
+            let mut ctx = RequestContext::new("lambda", "InvokeFunction", region, account_id);
             ctx.method = "POST".to_string();
             ctx.path = format!("/2015-03-31/functions/{fn_name}/invocations");
             ctx.raw_body = Some(Bytes::from(payload));
             ctx
         }
         _ => {
-            let mut ctx = RequestContext::new(dest_type, "Notify", &orig_ctx.region, &orig_ctx.account_id);
+            let mut ctx = RequestContext::new(dest_type, "Notify", region, account_id);
             ctx.raw_body = Some(Bytes::from(payload));
             ctx
         }
@@ -2646,8 +2680,16 @@ mod urlencoding {
                 }
                 _ => {
                     out.push('%');
-                    out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0').to_ascii_uppercase());
-                    out.push(char::from_digit((b & 0xf) as u32, 16).unwrap_or('0').to_ascii_uppercase());
+                    out.push(
+                        char::from_digit((b >> 4) as u32, 16)
+                            .unwrap_or('0')
+                            .to_ascii_uppercase(),
+                    );
+                    out.push(
+                        char::from_digit((b & 0xf) as u32, 16)
+                            .unwrap_or('0')
+                            .to_ascii_uppercase(),
+                    );
                 }
             }
         }
@@ -2804,9 +2846,24 @@ impl ServiceProvider for S3Provider {
             "PutObject" => {
                 let resp = handle_put_object_async(&self.store, self.file_store(), ctx).await;
                 if resp.status_code == 200 {
+                    let store = Arc::clone(&self.store);
+                    let dispatcher = self.dispatcher.clone();
+                    let account_id = ctx.account_id.clone();
+                    let region = ctx.region.clone();
                     let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
                     let key = key_from_path(&ctx.path);
-                    emit_s3_notification(&self.store, &self.dispatcher, ctx, &bucket, &key, "s3:ObjectCreated:Put").await;
+                    tokio::spawn(async move {
+                        emit_s3_notification(
+                            store,
+                            dispatcher,
+                            account_id,
+                            region,
+                            bucket,
+                            key,
+                            "s3:ObjectCreated:Put",
+                        )
+                        .await;
+                    });
                 }
                 resp
             }
@@ -2826,22 +2883,50 @@ impl ServiceProvider for S3Provider {
                 let key = key_from_path(&ctx.path);
                 let resp = handle_delete_object_async(&self.store, ctx).await;
                 if resp.status_code == 204 {
-                    emit_s3_notification(&self.store, &self.dispatcher, ctx, &bucket, &key, "s3:ObjectRemoved:Delete").await;
+                    let store = Arc::clone(&self.store);
+                    let dispatcher = self.dispatcher.clone();
+                    let account_id = ctx.account_id.clone();
+                    let region = ctx.region.clone();
+                    tokio::spawn(async move {
+                        emit_s3_notification(
+                            store,
+                            dispatcher,
+                            account_id,
+                            region,
+                            bucket,
+                            key,
+                            "s3:ObjectRemoved:Delete",
+                        )
+                        .await;
+                    });
                 }
                 resp
             }
             "DeleteObjects" => {
-                let resp = handle_delete_objects_async(&self.store, ctx).await;
                 // Notifications for batch deletes are emitted per-key inside the handler
-                // For simplicity, emit one generic event
-                resp
+                handle_delete_objects_async(&self.store, ctx).await
             }
             "CopyObject" => {
                 let resp = handle_copy_object_async(&self.store, self.file_store(), ctx).await;
                 if resp.status_code == 200 {
+                    let store = Arc::clone(&self.store);
+                    let dispatcher = self.dispatcher.clone();
+                    let account_id = ctx.account_id.clone();
+                    let region = ctx.region.clone();
                     let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
                     let key = key_from_path(&ctx.path);
-                    emit_s3_notification(&self.store, &self.dispatcher, ctx, &bucket, &key, "s3:ObjectCreated:Copy").await;
+                    tokio::spawn(async move {
+                        emit_s3_notification(
+                            store,
+                            dispatcher,
+                            account_id,
+                            region,
+                            bucket,
+                            key,
+                            "s3:ObjectCreated:Copy",
+                        )
+                        .await;
+                    });
                 }
                 resp
             }
@@ -2875,9 +2960,28 @@ impl ServiceProvider for S3Provider {
             "CompleteMultipartUpload" => {
                 let bucket = bucket_from_path(&ctx.path).unwrap_or_default();
                 let key = key_from_path(&ctx.path);
-                let resp = handle_complete_multipart_upload_async(&self.store, self.file_store(), ctx).await;
+                let resp =
+                    handle_complete_multipart_upload_async(&self.store, self.file_store(), ctx)
+                        .await;
                 if resp.status_code == 200 {
-                    emit_s3_notification(&self.store, &self.dispatcher, ctx, &bucket, &key, "s3:ObjectCreated:CompleteMultipartUpload").await;
+                    let store = Arc::clone(&self.store);
+                    let dispatcher = self.dispatcher.clone();
+                    let account_id = ctx.account_id.clone();
+                    let region = ctx.region.clone();
+                    let bucket2 = bucket.clone();
+                    let key2 = key.clone();
+                    tokio::spawn(async move {
+                        emit_s3_notification(
+                            store,
+                            dispatcher,
+                            account_id,
+                            region,
+                            bucket2,
+                            key2,
+                            "s3:ObjectCreated:CompleteMultipartUpload",
+                        )
+                        .await;
+                    });
                 }
                 resp
             }

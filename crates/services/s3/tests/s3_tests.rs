@@ -8,8 +8,8 @@ use openstack_s3::{
     store::{ObjectDataRef, S3Store},
 };
 use openstack_service_framework::{
-    traits::{RequestContext, ServiceProvider},
     SpooledBody,
+    traits::{RequestContext, ServiceProvider},
 };
 
 fn make_ctx(method: &str, path: &str, body: &[u8]) -> RequestContext {

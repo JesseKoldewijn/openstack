@@ -1207,8 +1207,10 @@ impl ServiceProvider for LambdaProvider {
                     .ok_or_else(|| {
                         DispatchError::NotImplemented("FunctionName required".to_string())
                     })?;
-                let sid = str_field(body, "StatementId").unwrap_or_else(|| Uuid::new_v4().to_string());
-                let action = str_field(body, "Action").unwrap_or_else(|| "lambda:InvokeFunction".to_string());
+                let sid =
+                    str_field(body, "StatementId").unwrap_or_else(|| Uuid::new_v4().to_string());
+                let action = str_field(body, "Action")
+                    .unwrap_or_else(|| "lambda:InvokeFunction".to_string());
                 let principal = str_field(body, "Principal").unwrap_or_default();
                 let source_arn = str_field(body, "SourceArn");
 
@@ -1232,7 +1234,11 @@ impl ServiceProvider for LambdaProvider {
                     })).unwrap_or_default();
                     Ok(json_ok(json!({ "Statement": stmt_json })))
                 } else {
-                    Ok(json_error("ResourceNotFoundException", "Function not found", 404))
+                    Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Function not found",
+                        404,
+                    ))
                 }
             }
 
@@ -1243,13 +1249,25 @@ impl ServiceProvider for LambdaProvider {
                         DispatchError::NotImplemented("FunctionName required".to_string())
                     })?;
                 let Some(store) = self.store.get(account_id, region) else {
-                    return Ok(json_error("ResourceNotFoundException", "Function not found", 404));
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Function not found",
+                        404,
+                    ));
                 };
                 let Some(func) = store.functions.get(&function_name) else {
-                    return Ok(json_error("ResourceNotFoundException", "Function not found", 404));
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "Function not found",
+                        404,
+                    ));
                 };
                 if func.policy_statements.is_empty() {
-                    return Ok(json_error("ResourceNotFoundException", "No policy found for function", 404));
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        "No policy found for function",
+                        404,
+                    ));
                 }
                 let stmts: Vec<Value> = func.policy_statements.iter().map(|s| {
                     json!({
@@ -1265,8 +1283,11 @@ impl ServiceProvider for LambdaProvider {
                     "Version": "2012-10-17",
                     "Id": "default",
                     "Statement": stmts,
-                })).unwrap_or_default();
-                Ok(json_ok(json!({ "Policy": policy_doc, "RevisionId": Uuid::new_v4().to_string() })))
+                }))
+                .unwrap_or_default();
+                Ok(json_ok(
+                    json!({ "Policy": policy_doc, "RevisionId": Uuid::new_v4().to_string() }),
+                ))
             }
 
             "RemovePermission" => {

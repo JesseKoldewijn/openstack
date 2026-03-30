@@ -7,7 +7,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use openstack_eventbridge::EventBridgeProvider;
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {

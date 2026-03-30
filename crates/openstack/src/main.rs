@@ -596,8 +596,9 @@ fn register_services(
 
     // Build a cross-service dispatcher backed by this manager.
     // EventBridge, S3, and SNS use it to fan out to SQS/SNS/Lambda.
-    let dispatcher: std::sync::Arc<dyn openstack_service_framework::traits::CrossServiceDispatcher> =
-        std::sync::Arc::new(manager.clone());
+    let dispatcher: std::sync::Arc<
+        dyn openstack_service_framework::traits::CrossServiceDispatcher,
+    > = std::sync::Arc::new(manager.clone());
 
     // S3 is special: it has a persistable store that shares state with the provider
     if services.is_enabled("s3") {

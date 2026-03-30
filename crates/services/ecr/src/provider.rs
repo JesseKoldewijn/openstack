@@ -8,7 +8,7 @@ use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::store::{EcrStore, Image, Repository};
@@ -55,23 +55,6 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
             .unwrap(),
         )),
         content_type: Cow::Borrowed("application/x-amz-json-1.1"),
-        headers: Vec::new(),
-    }
-}
-
-fn localstack_unsupported_error(service: &str) -> DispatchResponse {
-    DispatchResponse {
-        status_code: 501,
-        body: ResponseBody::Buffered(Bytes::from(
-            serde_json::to_vec(&json!({
-                "__type": "InternalFailure",
-                "message": format!(
-                    "API for service '{service}' not yet implemented or pro feature - please check https://docs.localstack.cloud/references/coverage/ for further information"
-                ),
-            }))
-            .unwrap(),
-        )),
-        content_type: Cow::Borrowed("application/json"),
         headers: Vec::new(),
     }
 }
