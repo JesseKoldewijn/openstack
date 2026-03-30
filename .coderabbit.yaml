@@ -29,6 +29,105 @@ reviews:
       instructions: >-
         Focus on least-privilege permissions, trigger safety for pull_request vs
         pull_request_target, secret handling, and deterministic CI behavior.
+    - path: "crates/services/*/src/provider.rs"
+      instructions: |
+        Every new or modified operation match arm in a service provider MUST have all
+        three of the following — flag any that are missing as a required change, not
+        a suggestion:
+        1. A parity test scenario in tests/parity/scenarios/ (core.json or extended.json)
+           that exercises the operation against both openstack and LocalStack.
+        2. A unit test in the service's tests/<service>_tests.rs covering the happy path
+           and at least one error path.
+        3. A performance regression test in tests/<service>_perf_tests.rs with a
+           timing assertion using std::time::Instant.
+        Also verify that error branches return proper service-specific error responses
+        via the service's existing error helper functions, not raw strings or panics.
+        Flag any new match arm that constructs an error response inline without going
+        through the service's established error formatting pattern.
+    - path: "crates/services/*/src/store.rs"
+      instructions: |
+        Review for thread-safety of state mutations. Stores are wrapped in
+        Arc<AccountRegionBundle<...>> — flag any mutation that bypasses the existing
+        locking or interior-mutability pattern.
+        Ensure new state fields have corresponding cleanup logic so state does not leak
+        across test runs or between account/region scopes.
+        Verify that structural changes to the store (new fields, changed types) are
+        reflected in both the service unit tests and at least one parity scenario.
+        Flag store methods that grow unbounded collections without a corresponding
+        eviction or limit enforcement path.
+    - path: "crates/services/*/tests/*_tests.rs"
+      instructions: |
+        Every operation dispatched in the service's provider.rs must have at least one
+        test covering the happy path and one covering the primary error path (e.g.
+        resource not found, invalid input). Flag any operation that has happy-path
+        coverage only.
+        Tests must use the make_ctx() helper pattern established in each test file.
+        Assert on both status_code and meaningful response body content — flag tests
+        that only check status_code or that call unwrap() on the response body without
+        asserting its contents.
+        Test function names must be descriptive and follow the existing snake_case
+        convention; flag names like test1 or test_thing that do not convey intent.
+    - path: "crates/services/*/tests/*_perf_tests.rs"
+      instructions: |
+        Each service MUST have a <service>_perf_tests.rs file. If the service being
+        modified does not have one, flag its absence as a required addition.
+        Every operation added to the provider must have a corresponding perf test entry
+        in this file — flag any missing coverage as a required change.
+        Perf tests must measure elapsed time with std::time::Instant and assert against
+        a threshold. Thresholds must be intentionally loose (generous multiples of
+        expected runtime) to tolerate debug-mode overhead and CI variance while still
+        catching catastrophic regressions.
+        Test names must use the perf_ prefix (e.g. perf_put_item_latency). Flag any
+        test in this file that does not assert on timing.
+    - path: "tests/parity/scenarios/*.json"
+      instructions: |
+        Every scenario must include setup, steps, and cleanup phases. Cleanup must
+        tear down all resources created during setup and steps — flag any scenario
+        where cleanup is absent or incomplete.
+        Step IDs must follow the <service>-<operation-name> convention
+        (e.g. sqs-send-message, s3-put-object). Scenario IDs must follow
+        <service>-<descriptive-name> (e.g. sqs-fifo-lifecycle). Flag any entry that
+        deviates from these conventions.
+        When a new operation is added to any service provider, verify that at least one
+        scenario in core.json or extended.json covers it. Flag the absence of scenario
+        coverage for a new operation as a required change.
+        Flag scenarios that share mutable global resource names without using template
+        variables (e.g. {{bucket}}, {{queue_url}}) — these cause flaky parallel runs.
+    - path: "tests/parity/known_differences.json"
+      instructions: |
+        Every entry must have both an expires field (ISO 8601 date) and a reason field
+        explaining why the behavioral difference is accepted. Flag entries missing
+        either field.
+        Flag any entry whose expires date is in the past — expired suppressions must
+        be removed or renewed with an updated justification.
+        Flag suppressions that are scoped too broadly (e.g. covering an entire service
+        rather than a specific operation or response field). Each known difference
+        should target the narrowest possible scope.
+        New entries must not be added for differences that indicate unimplemented
+        functionality — those should be tracked as work items, not suppressed in
+        parity.
+    - path: "tests/bench/*.sh"
+      instructions: |
+        Benchmark scripts must include entries for all 24 services. Flag any service
+        that is absent from bench_services.sh.
+        When a new operation is added in bench_services.sh, a corresponding
+        --op-p95-max entry must exist in bench_gate.sh with an explicitly justified
+        threshold. Flag new operations that lack a gate threshold as a required
+        addition.
+        Flag any operation that uses the global --p95-max fallback without a comment
+        explaining why a per-operation threshold is not needed. Body-transfer
+        operations (put/get with payload) must always have size-appropriate per-op
+        thresholds rather than relying on the global metadata ceiling.
+    - path: "crates/tests/integration/tests/smoke_tests.rs"
+      instructions: |
+        Every service provider must have at least one smoke_<service>_<workflow>()
+        test covering the full create/read/delete lifecycle. Flag any service that
+        lacks smoke test coverage.
+        All HTTP operations in smoke tests must go through the send_with_latency()
+        helper to enforce the 50ms latency guardrail. Flag any direct .send().await
+        call that bypasses this helper.
+        When a new service is added to the codebase, flag the absence of a
+        corresponding smoke test as a required change before the PR can merge.
   auto_review:
     enabled: true
     auto_incremental_review: true
