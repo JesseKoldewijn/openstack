@@ -358,3 +358,113 @@ async fn test_describe_images_missing_repository_name_fails() {
         body_str(&resp)
     );
 }
+
+#[tokio::test]
+async fn test_batch_delete_image_by_digest() {
+    let p = EcrProvider::new();
+    // Create repo and push an image
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "delete-test" }),
+    ))
+    .await
+    .unwrap();
+    let push_resp = p
+        .dispatch(&make_ctx(
+            "PutImage",
+            json!({ "repositoryName": "delete-test", "imageManifest": "{}", "imageTag": "v1.0" }),
+        ))
+        .await
+        .unwrap();
+    let digest = serde_json::from_str::<Value>(&body_str(&push_resp)).unwrap()["image"]["imageId"]
+        ["imageDigest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Delete by digest
+    let del_resp = p
+        .dispatch(&make_ctx(
+            "BatchDeleteImage",
+            json!({ "repositoryName": "delete-test", "imageIds": [{ "imageDigest": digest }] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status_code, 200);
+    let body: Value = serde_json::from_str(&body_str(&del_resp)).unwrap();
+    assert_eq!(body["failures"].as_array().unwrap().len(), 0);
+    assert_eq!(body["imageIds"].as_array().unwrap().len(), 1);
+
+    // Confirm image is gone
+    let list_resp = p
+        .dispatch(&make_ctx(
+            "ListImages",
+            json!({ "repositoryName": "delete-test" }),
+        ))
+        .await
+        .unwrap();
+    let list_body: Value = serde_json::from_str(&body_str(&list_resp)).unwrap();
+    assert_eq!(list_body["imageIds"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_batch_delete_image_by_tag() {
+    let p = EcrProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "tag-del-test" }),
+    ))
+    .await
+    .unwrap();
+    p.dispatch(&make_ctx(
+        "PutImage",
+        json!({ "repositoryName": "tag-del-test", "imageManifest": "{}", "imageTag": "latest" }),
+    ))
+    .await
+    .unwrap();
+
+    let del_resp = p
+        .dispatch(&make_ctx(
+            "BatchDeleteImage",
+            json!({ "repositoryName": "tag-del-test", "imageIds": [{ "imageTag": "latest" }] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status_code, 200);
+    let body: Value = serde_json::from_str(&body_str(&del_resp)).unwrap();
+    assert_eq!(body["failures"].as_array().unwrap().len(), 0);
+    assert_eq!(body["imageIds"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_batch_delete_image_not_found_returns_failure() {
+    let p = EcrProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "notfound-test" }),
+    ))
+    .await
+    .unwrap();
+
+    let del_resp = p
+        .dispatch(&make_ctx(
+            "BatchDeleteImage",
+            json!({ "repositoryName": "notfound-test", "imageIds": [{ "imageDigest": "sha256:nonexistent" }] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status_code, 200);
+    let body: Value = serde_json::from_str(&body_str(&del_resp)).unwrap();
+    assert_eq!(body["failures"].as_array().unwrap().len(), 1);
+    assert_eq!(body["failures"][0]["failureCode"], "ImageNotFoundException");
+}
+
+#[tokio::test]
+async fn test_batch_delete_image_missing_repo_returns_400() {
+    let p = EcrProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("BatchDeleteImage", json!({ "imageIds": [] })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+}

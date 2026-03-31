@@ -150,7 +150,6 @@ impl ServiceProvider for EcrProvider {
                 let mut store = self.store.get_or_create(account_id, region);
                 match store.repositories.remove(&name) {
                     Some(repo) => {
-                        // remove all images for this repo
                         store.images.retain(|_, img| img.repository_name != name);
                         Ok(json_ok(json!({
                             "repository": {
@@ -295,6 +294,84 @@ impl ServiceProvider for EcrProvider {
             }
 
             // ----------------------------------------------------------------
+            // BatchDeleteImage
+            // ----------------------------------------------------------------
+            "BatchDeleteImage" => {
+                let repo_name = match str_param(ctx, "repositoryName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidParameterException",
+                            "repositoryName required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                let image_ids = ctx
+                    .request_body
+                    .get("imageIds")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if image_ids.is_empty() {
+                    return Ok(json_ok(json!({ "imageIds": [], "failures": [] })));
+                }
+
+                let mut deleted: Vec<Value> = Vec::new();
+                let mut failures: Vec<Value> = Vec::new();
+
+                for id in &image_ids {
+                    let tag = id.get("imageTag").and_then(|v| v.as_str());
+                    let digest = id.get("imageDigest").and_then(|v| v.as_str());
+
+                    // Find the digest to delete (may be looked up by tag)
+                    let target_digest = if let Some(d) = digest {
+                        if store.images.contains_key(d) {
+                            Some(d.to_string())
+                        } else {
+                            None
+                        }
+                    } else if let Some(t) = tag {
+                        store
+                            .images
+                            .iter()
+                            .find(|(_, img)| {
+                                img.repository_name == repo_name
+                                    && img.image_tags.contains(&t.to_string())
+                            })
+                            .map(|(k, _)| k.clone())
+                    } else {
+                        None
+                    };
+
+                    match target_digest {
+                        Some(d) => {
+                            store.images.remove(&d);
+                            deleted.push(json!({
+                                "imageDigest": d,
+                                "imageTag": tag,
+                            }));
+                        }
+                        None => {
+                            failures.push(json!({
+                                "imageId": {
+                                    "imageTag": tag,
+                                    "imageDigest": digest,
+                                },
+                                "failureCode": "ImageNotFoundException",
+                                "failureMessage": "Requested image not found",
+                            }));
+                        }
+                    }
+                }
+
+                Ok(json_ok(
+                    json!({ "imageIds": deleted, "failures": failures }),
+                ))
+            }
+
+            // ----------------------------------------------------------------
             // DescribeImages
             // ----------------------------------------------------------------
             "DescribeImages" => {
@@ -311,7 +388,6 @@ impl ServiceProvider for EcrProvider {
                 let Some(store) = self.store.get(account_id, region) else {
                     return Ok(json_ok(json!({ "imageDetails": [] })));
                 };
-                // Optional filter: a list of image IDs (digest or tag)
                 let filter_digests: Vec<String> = ctx
                     .request_body
                     .get("imageIds")
