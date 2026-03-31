@@ -365,8 +365,7 @@ async fn test_describe_images_missing_repository_name_fails() {
         body_str(&resp)
     );
     assert_eq!(
-        b["message"],
-        "repositoryName required",
+        b["message"], "repositoryName required",
         "expected 'repositoryName required' message"
     );
 }
@@ -493,8 +492,7 @@ async fn test_batch_delete_image_missing_repo_returns_400() {
         body_str(&resp)
     );
     assert_eq!(
-        b["message"],
-        "repositoryName required",
+        b["message"], "repositoryName required",
         "expected 'repositoryName required' message"
     );
 }
