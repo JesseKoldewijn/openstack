@@ -711,3 +711,45 @@ async fn test_get_metric_data_expression_sum_aggregates_metric_results() {
         "SUM expression value should be 20.0, got {sum}"
     );
 }
+
+#[tokio::test]
+async fn test_get_metric_data_invalid_time_format_returns_graceful_response() {
+    // AWS behavior: malformed time strings should not panic the provider.
+    // The provider should return 200 with an empty (or best-effort) MetricDataResults array.
+    let p = CloudWatchProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetMetricData",
+            json!({
+                "StartTime": "not-a-date",
+                "EndTime": "also-not-a-date",
+                "MetricDataQueries": [
+                    {
+                        "Id": "m1",
+                        "MetricStat": {
+                            "Metric": {
+                                "Namespace": "TestNS",
+                                "MetricName": "TestMetric"
+                            },
+                            "Period": 60,
+                            "Stat": "Sum"
+                        }
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status_code, 200,
+        "invalid time format should return 200, not panic; body={}",
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert!(
+        b.get("MetricDataResults").is_some(),
+        "response should contain MetricDataResults key; body={}",
+        body_str(&resp)
+    );
+}

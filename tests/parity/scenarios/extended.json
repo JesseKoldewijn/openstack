@@ -19,6 +19,7 @@
 
   {
     "id": "kinesis-add-tags-to-stream",
+    "operation": "AddTagsToStream",
     "profile": "extended",
     "service": "kinesis",
     "setup": [
@@ -63,6 +64,7 @@
 
   {
     "id": "kinesis-list-tags-for-stream",
+    "operation": "ListTagsForStream",
     "profile": "extended",
     "service": "kinesis",
     "setup": [
@@ -106,6 +108,7 @@
 
   {
     "id": "kinesis-remove-tags-from-stream",
+    "operation": "RemoveTagsFromStream",
     "profile": "extended",
     "service": "kinesis",
     "setup": [

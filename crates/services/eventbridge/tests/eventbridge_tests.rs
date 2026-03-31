@@ -1,8 +1,13 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use openstack_eventbridge::EventBridgeProvider;
-use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
+use openstack_service_framework::traits::{
+    CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
+    ServiceProvider,
+};
 use serde_json::{Value, json};
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
@@ -402,5 +407,93 @@ async fn test_put_events_missing_entries_fails() {
         "expected 400 for missing Entries, got {}: {}",
         resp.status_code,
         body_str(&resp)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Mock dispatcher for cross-service dispatch testing
+// ---------------------------------------------------------------------------
+
+struct MockDispatcher {
+    dispatched_ops: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl CrossServiceDispatcher for MockDispatcher {
+    async fn dispatch_to(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        self.dispatched_ops
+            .lock()
+            .unwrap()
+            .push(ctx.operation.clone());
+        Ok(DispatchResponse {
+            status_code: 200,
+            body: ResponseBody::Buffered(Bytes::from(b"{}".as_ref())),
+            content_type: std::borrow::Cow::Borrowed("application/json"),
+            headers: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_put_events_dispatches_to_sqs_target_via_mock() {
+    let dispatched_ops: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mock = MockDispatcher {
+        dispatched_ops: Arc::clone(&dispatched_ops),
+    };
+    let p = EventBridgeProvider::new_with_dispatcher(Arc::new(mock));
+
+    // Rule matching events from "test.service"
+    p.dispatch(&make_ctx(
+        "PutRule",
+        json!({
+            "Name": "mock-rule",
+            "EventPattern": r#"{"source":["test.service"]}"#,
+            "State": "ENABLED",
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // SQS target
+    p.dispatch(&make_ctx(
+        "PutTargets",
+        json!({
+            "Rule": "mock-rule",
+            "Targets": [
+                { "Id": "sqs-target", "Arn": "arn:aws:sqs:us-east-1:000000000000:test-queue" }
+            ]
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // Emit a matching event
+    let resp = p
+        .dispatch(&make_ctx(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    {
+                        "Source": "test.service",
+                        "DetailType": "TestEvent",
+                        "Detail": r#"{"key":"value"}"#,
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    assert_eq!(body(&resp)["FailedEntryCount"], 0);
+
+    // Give the spawned dispatch task time to run
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let ops = dispatched_ops.lock().unwrap();
+    assert!(
+        ops.iter().any(|op| op == "SendMessage"),
+        "expected a SendMessage dispatch to SQS target, got: {:?}",
+        *ops
     );
 }
