@@ -742,7 +742,8 @@ async fn test_get_metric_data_invalid_time_format_returns_graceful_response() {
         .unwrap();
 
     assert_eq!(
-        resp.status_code, 200,
+        resp.status_code,
+        200,
         "invalid time format should return 200, not panic; body={}",
         body_str(&resp)
     );

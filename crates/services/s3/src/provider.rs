@@ -2953,7 +2953,8 @@ impl ServiceProvider for S3Provider {
             }
             "DeleteObjects" => {
                 // Notifications for batch deletes are emitted per-key inside the handler
-                handle_delete_objects_async(Arc::clone(&self.store), self.dispatcher.clone(), ctx).await
+                handle_delete_objects_async(Arc::clone(&self.store), self.dispatcher.clone(), ctx)
+                    .await
             }
             "CopyObject" => {
                 let resp = handle_copy_object_async(&self.store, self.file_store(), ctx).await;

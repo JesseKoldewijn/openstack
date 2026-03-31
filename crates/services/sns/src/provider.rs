@@ -570,8 +570,14 @@ async fn handle_publish(
                 if let Some(disp) = &dispatcher {
                     // Extract account ID and queue name from ARN: arn:aws:sqs:region:account:queue-name
                     let parts: Vec<&str> = endpoint.split(':').collect();
-                    let queue_account_id = parts.get(4).map(|s| s.to_string()).unwrap_or_else(|| account_id.clone());
-                    let queue_name = parts.last().map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string());
+                    let queue_account_id = parts
+                        .get(4)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| account_id.clone());
+                    let queue_name = parts
+                        .last()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
                     let body = format!(
                         "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F{queue_account_id}%2F{queue_name}&MessageBody={encoded}",
                         encoded = url_encode_value(&payload)

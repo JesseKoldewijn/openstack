@@ -484,11 +484,7 @@ impl ServiceProvider for KmsProvider {
                 let key_id = match str_param(ctx, "KeyId") {
                     Some(v) if !v.is_empty() => v,
                     _ => {
-                        return Ok(json_error(
-                            "ValidationException",
-                            "KeyId is required",
-                            400,
-                        ));
+                        return Ok(json_error("ValidationException", "KeyId is required", 400));
                     }
                 };
                 let message_b64 = match str_param(ctx, "Message") {
@@ -570,11 +566,7 @@ impl ServiceProvider for KmsProvider {
                 let key_id = match str_param(ctx, "KeyId") {
                     Some(v) if !v.is_empty() => v,
                     _ => {
-                        return Ok(json_error(
-                            "ValidationException",
-                            "KeyId is required",
-                            400,
-                        ));
+                        return Ok(json_error("ValidationException", "KeyId is required", 400));
                     }
                 };
                 let message_b64 = match str_param(ctx, "Message") {
