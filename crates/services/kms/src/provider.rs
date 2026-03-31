@@ -497,6 +497,23 @@ impl ServiceProvider for KmsProvider {
                         ));
                     }
                 };
+                let signing_algorithm = match str_param(ctx, "SigningAlgorithm").as_deref() {
+                    Some("HMAC_SHA_256") | Some("HMAC_SHA256") => "HMAC_SHA_256",
+                    Some(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "SigningAlgorithm must be HMAC_SHA_256",
+                            400,
+                        ));
+                    }
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "SigningAlgorithm is required",
+                            400,
+                        ));
+                    }
+                };
 
                 let store = self.store.get(account_id, region);
                 let (key_arn, key_material_hex, key_state) =
@@ -556,7 +573,7 @@ impl ServiceProvider for KmsProvider {
 
                 Ok(json_ok(json!({
                     "Signature": sig,
-                    "SigningAlgorithm": "HMAC_SHA_256",
+                    "SigningAlgorithm": signing_algorithm,
                     "KeyId": key_arn,
                 })))
             }
@@ -585,6 +602,23 @@ impl ServiceProvider for KmsProvider {
                         return Ok(json_error(
                             "ValidationException",
                             "Signature is required",
+                            400,
+                        ));
+                    }
+                };
+                let signing_algorithm = match str_param(ctx, "SigningAlgorithm").as_deref() {
+                    Some("HMAC_SHA_256") | Some("HMAC_SHA256") => "HMAC_SHA_256",
+                    Some(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "SigningAlgorithm must be HMAC_SHA_256",
+                            400,
+                        ));
+                    }
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "SigningAlgorithm is required",
                             400,
                         ));
                     }
@@ -659,7 +693,7 @@ impl ServiceProvider for KmsProvider {
                     Ok(json_ok(json!({
                         "KeyId": key_arn,
                         "SignatureValid": true,
-                        "SigningAlgorithm": "HMAC_SHA_256",
+                        "SigningAlgorithm": signing_algorithm,
                     })))
                 } else {
                     Ok(json_error(

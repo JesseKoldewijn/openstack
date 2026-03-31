@@ -753,4 +753,11 @@ async fn test_get_metric_data_invalid_time_format_returns_graceful_response() {
         "response should contain MetricDataResults key; body={}",
         body_str(&resp)
     );
+    assert!(
+        b.get("MetricDataResults")
+            .and_then(|v| v.as_array())
+            .is_some(),
+        "MetricDataResults should be an array; body={}",
+        body_str(&resp)
+    );
 }

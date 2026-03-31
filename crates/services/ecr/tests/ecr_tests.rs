@@ -357,6 +357,18 @@ async fn test_describe_images_missing_repository_name_fails() {
         resp.status_code,
         body_str(&resp)
     );
+    let b = body_json(&resp);
+    assert_eq!(
+        b["__type"],
+        "InvalidParameterException",
+        "expected InvalidParameterException, got: {}",
+        body_str(&resp)
+    );
+    assert_eq!(
+        b["message"],
+        "repositoryName required",
+        "expected 'repositoryName required' message"
+    );
 }
 
 #[tokio::test]
@@ -466,5 +478,23 @@ async fn test_batch_delete_image_missing_repo_returns_400() {
         .dispatch(&make_ctx("BatchDeleteImage", json!({ "imageIds": [] })))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 400);
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing repositoryName in BatchDeleteImage, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body_json(&resp);
+    assert_eq!(
+        b["__type"],
+        "InvalidParameterException",
+        "expected InvalidParameterException, got: {}",
+        body_str(&resp)
+    );
+    assert_eq!(
+        b["message"],
+        "repositoryName required",
+        "expected 'repositoryName required' message"
+    );
 }

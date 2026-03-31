@@ -660,6 +660,15 @@ async fn test_get_policy_no_policy_returns_404() {
         "expected ResourceNotFoundException error type, got: {}",
         b["__type"]
     );
+    assert!(
+        b["Message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("policy"),
+        "expected no-policy message, got: {}",
+        b["Message"]
+    );
 }
 
 #[tokio::test]
@@ -707,6 +716,35 @@ async fn test_remove_permission() {
     let stmts = policy["Statement"].as_array().unwrap();
     assert_eq!(stmts.len(), 1, "only s2 should remain");
     assert_eq!(stmts[0]["Sid"], "s2");
+}
+
+#[tokio::test]
+async fn test_remove_permission_missing_statement() {
+    let p = LambdaProvider::new();
+    create_function(&p, "rm-missing-func").await;
+
+    // Try to remove a statement that doesn't exist
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "RemovePermission",
+            json!({}),
+            "/2015-03-31/functions/rm-missing-func/policy/nonexistent-sid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        404,
+        "expected 404 for missing statement, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(
+        b["__type"], "ResourceNotFoundException",
+        "expected ResourceNotFoundException, got: {}",
+        b["__type"]
+    );
 }
 
 #[tokio::test]

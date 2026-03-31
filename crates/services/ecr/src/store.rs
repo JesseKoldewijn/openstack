@@ -121,10 +121,7 @@ impl EcrStore {
     ///
     /// O(k) where k is the number of images in the repo — no scanning of
     /// unrelated repos.
-    pub fn images_for_repo<'a>(
-        &'a self,
-        repo_name: &str,
-    ) -> impl Iterator<Item = &'a Image> + 'a {
+    pub fn images_for_repo<'a>(&'a self, repo_name: &str) -> impl Iterator<Item = &'a Image> + 'a {
         let digests = self
             .repo_index
             .get(repo_name)
