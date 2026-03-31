@@ -978,7 +978,8 @@ async fn handle_delete_object_async(
 
 /// Async DeleteObjects (batch) — deletes backing files for removed objects.
 async fn handle_delete_objects_async(
-    store_bundle: &AccountRegionBundle<S3Store>,
+    store_bundle: Arc<AccountRegionBundle<S3Store>>,
+    dispatcher: Option<Arc<dyn CrossServiceDispatcher>>,
     ctx: &RequestContext,
 ) -> DispatchResponse {
     let bucket = match bucket_from_path(&ctx.path) {
@@ -1060,6 +1061,28 @@ async fn handle_delete_objects_async(
         }
         while cleanup_set.join_next().await.is_some() {}
     }
+
+    // Emit notifications for each deleted key
+    let dispatcher = dispatcher.clone();
+    let account_id = ctx.account_id.clone();
+    let region = ctx.region.clone();
+    let bucket_for_notify = bucket.clone();
+    let keys_for_notify = keys.clone();
+    let store_bundle_clone = Arc::clone(&store_bundle);
+    tokio::spawn(async move {
+        for (key, _version_id) in keys_for_notify {
+            emit_s3_notification(
+                store_bundle_clone.clone(),
+                dispatcher.clone(),
+                account_id.clone(),
+                region.clone(),
+                bucket_for_notify.clone(),
+                key,
+                "s3:ObjectRemoved:Delete",
+            )
+            .await;
+        }
+    });
 
     xml_ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -2450,6 +2473,18 @@ fn handle_put_bucket_notification(store: &mut S3Store, ctx: &RequestContext) -> 
         &mut configs,
     );
 
+    // Check if body contains notification config content but parsing failed
+    let body_has_configs = body.contains("QueueConfiguration")
+        || body.contains("TopicConfiguration")
+        || body.contains("CloudFunctionConfiguration");
+    if body_has_configs && configs.is_empty() {
+        return s3_error(
+            "MalformedXML",
+            "The XML you provided was ill-formed or did not validate against our published schema",
+            400,
+        );
+    }
+
     if let Some(b) = store.get_bucket_mut(&bucket) {
         b.notifications = configs;
     }
@@ -2918,7 +2953,7 @@ impl ServiceProvider for S3Provider {
             }
             "DeleteObjects" => {
                 // Notifications for batch deletes are emitted per-key inside the handler
-                handle_delete_objects_async(&self.store, ctx).await
+                handle_delete_objects_async(Arc::clone(&self.store), self.dispatcher.clone(), ctx).await
             }
             "CopyObject" => {
                 let resp = handle_copy_object_async(&self.store, self.file_store(), ctx).await;

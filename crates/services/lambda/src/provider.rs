@@ -1307,7 +1307,16 @@ impl ServiceProvider for LambdaProvider {
                     .unwrap_or_default();
 
                 let function_arn = make_arn(region, account_id, &function_name);
-                let mut store = self.store.get_or_create(account_id, region);
+                let mut store = match self.store.get_mut(account_id, region) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Function not found: {function_arn}"),
+                            404,
+                        ));
+                    }
+                };
                 let func = match store.functions.get_mut(&function_name) {
                     Some(f) => f,
                     None => {

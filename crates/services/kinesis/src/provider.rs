@@ -2,14 +2,14 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::store::{KinesisStore, ShardIteratorState, ShardIteratorType};
 
@@ -876,13 +876,22 @@ impl ServiceProvider for KinesisProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let mut store = match self.store.get_mut(account_id, region) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            "Stream not found",
+                            400,
+                        ));
+                    }
+                };
                 let stream = match store.streams.get_mut(stream_name) {
                     Some(s) => s,
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
-                            &format!("Stream {stream_name} not found"),
+                            "Stream not found",
                             400,
                         ));
                     }

@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
@@ -151,14 +151,34 @@ impl ServiceProvider for StsProvider {
                 // Base64-decode the EncodedMessage and return it as DecodedMessage.
                 // In AWS this contains a JSON policy evaluation context; here we decode
                 // whatever was passed so Sign/Verify round-trips work correctly.
-                let encoded = param(ctx, "EncodedMessage").unwrap_or_default();
-                let decoded = if encoded.is_empty() {
-                    "{\"allowed\":true}".to_string()
-                } else {
-                    B64.decode(encoded.as_bytes())
-                        .ok()
-                        .and_then(|b| String::from_utf8(b).ok())
-                        .unwrap_or_else(|| encoded.clone())
+                let encoded = match param(ctx, "EncodedMessage") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(sts_error(
+                            "InvalidAuthorizationMessage",
+                            "EncodedMessage is required or invalid",
+                            400,
+                        ));
+                    }
+                };
+                let decoded = match B64.decode(encoded.as_bytes()) {
+                    Ok(b) => match String::from_utf8(b) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            return Ok(sts_error(
+                                "InvalidAuthorizationMessage",
+                                "EncodedMessage is required or invalid",
+                                400,
+                            ));
+                        }
+                    },
+                    Err(_) => {
+                        return Ok(sts_error(
+                            "InvalidAuthorizationMessage",
+                            "EncodedMessage is required or invalid",
+                            400,
+                        ));
+                    }
                 };
                 // XML-escape the decoded JSON before embedding it in XML.
                 let escaped = decoded

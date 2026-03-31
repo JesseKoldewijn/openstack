@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use openstack_service_framework::traits::{RequestContext, ServiceProvider};
 use openstack_sts::StsProvider;
 
@@ -128,26 +128,25 @@ async fn test_decode_authorization_message_round_trip() {
 }
 
 #[tokio::test]
-async fn test_decode_authorization_message_empty_returns_default() {
+async fn test_decode_authorization_message_empty_returns_error() {
     let p = StsProvider::new();
-    // Passing an empty EncodedMessage — must succeed with a placeholder.
+    // Passing an empty EncodedMessage — must return an error.
     let resp = p
         .dispatch(&make_ctx("DecodeAuthorizationMessage", &[]))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
     let xml = body_str(&resp);
     assert!(
-        xml.contains("DecodedMessage"),
-        "response must contain DecodedMessage element: {xml}"
+        xml.contains("InvalidAuthorizationMessage"),
+        "response must contain InvalidAuthorizationMessage error: {xml}"
     );
 }
 
 #[tokio::test]
-async fn test_decode_authorization_message_non_base64_passthrough() {
+async fn test_decode_authorization_message_invalid_base64_returns_error() {
     let p = StsProvider::new();
-    // If the input is not valid base64, the implementation should not panic
-    // and should return 200 (falling back to the raw string).
+    // If the input is not valid base64, the implementation should return an error.
     let resp = p
         .dispatch(&make_ctx(
             "DecodeAuthorizationMessage",
@@ -156,7 +155,9 @@ async fn test_decode_authorization_message_non_base64_passthrough() {
         .await
         .unwrap();
     assert_eq!(
-        resp.status_code, 200,
-        "expected non-crash on invalid base64"
+        resp.status_code,
+        400,
+        "expected error on invalid base64: {}",
+        body_str(&resp)
     );
 }

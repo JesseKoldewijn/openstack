@@ -543,10 +543,15 @@ async fn handle_publish(
         })
         .collect();
 
+    // Extract dispatcher into owned value to avoid holding store borrow across .await
+    let dispatcher = dispatcher.clone();
+    let region = ctx.region.clone();
+    let account_id = ctx.account_id.clone();
+
     // Deliver to each subscriber
-    for (_sub_arn, protocol_str, endpoint, raw_delivery, filter_policy) in &delivery_tasks {
+    for (_sub_arn, protocol_str, endpoint, raw_delivery, filter_policy) in delivery_tasks {
         // Apply filter policy
-        if let Some(fp) = filter_policy
+        if let Some(ref fp) = filter_policy
             && !fp.matches(&message_attributes)
         {
             continue;
@@ -556,28 +561,25 @@ async fn handle_publish(
             "sqs" => {
                 // SQS delivery: format SNS notification envelope and deliver to SQS queue.
                 // The endpoint is the SQS queue ARN.
-                let payload = if *raw_delivery {
+                let payload = if raw_delivery {
                     message.clone()
                 } else {
                     format_sns_notification(&topic_arn, &message_id, &message, &subject)
                 };
 
-                if let Some(disp) = dispatcher {
-                    // Extract queue name from ARN: arn:aws:sqs:region:account:queue-name
-                    let queue_name = endpoint
-                        .split(':')
-                        .next_back()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let account_id = &ctx.account_id;
+                if let Some(disp) = &dispatcher {
+                    // Extract account ID and queue name from ARN: arn:aws:sqs:region:account:queue-name
+                    let parts: Vec<&str> = endpoint.split(':').collect();
+                    let queue_account_id = parts.get(4).map(|s| s.to_string()).unwrap_or_else(|| account_id.clone());
+                    let queue_name = parts.last().map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string());
                     let body = format!(
-                        "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F{account_id}%2F{queue_name}&MessageBody={encoded}",
+                        "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F{queue_account_id}%2F{queue_name}&MessageBody={encoded}",
                         encoded = url_encode_value(&payload)
                     );
                     let mut dispatch_ctx =
-                        RequestContext::new("sqs", "SendMessage", &ctx.region, &ctx.account_id);
+                        RequestContext::new("sqs", "SendMessage", &region, &queue_account_id);
                     dispatch_ctx.method = "POST".to_string();
-                    dispatch_ctx.path = format!("/{account_id}/{queue_name}");
+                    dispatch_ctx.path = format!("/{queue_account_id}/{queue_name}");
                     dispatch_ctx.raw_body = Some(Bytes::from(body.into_bytes()));
                     if let Err(e) = disp.dispatch_to(&dispatch_ctx).await {
                         warn!(err = %e, endpoint = %endpoint, "SNS → SQS dispatch failed");

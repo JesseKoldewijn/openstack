@@ -481,8 +481,26 @@ impl ServiceProvider for KmsProvider {
             "Sign" => {
                 // HMAC-SHA256 deterministic sign: signature = HMAC-SHA256(key_material, message)
                 // This allows Verify to corroborate the signature without external state.
-                let key_id = str_param(ctx, "KeyId").unwrap_or_default();
-                let message_b64 = str_param(ctx, "Message").unwrap_or_default();
+                let key_id = match str_param(ctx, "KeyId") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "KeyId is required",
+                            400,
+                        ));
+                    }
+                };
+                let message_b64 = match str_param(ctx, "Message") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Message is required",
+                            400,
+                        ));
+                    }
+                };
 
                 let store = self.store.get(account_id, region);
                 let (key_arn, key_material_hex, key_state) =
@@ -509,8 +527,8 @@ impl ServiceProvider for KmsProvider {
                     Ok(b) => b,
                     Err(_) => {
                         return Ok(json_error(
-                            "KMSInvalidStateException",
-                            "Key material is corrupt",
+                            "ValidationException",
+                            "Invalid key material",
                             400,
                         ));
                     }
@@ -520,7 +538,7 @@ impl ServiceProvider for KmsProvider {
                     Err(_) => {
                         return Ok(json_error(
                             "ValidationException",
-                            "Message is not valid base64",
+                            "Message must be valid base64",
                             400,
                         ));
                     }
@@ -530,9 +548,9 @@ impl ServiceProvider for KmsProvider {
                     Ok(m) => m,
                     Err(_) => {
                         return Ok(json_error(
-                            "KMSInvalidStateException",
-                            "Key material has invalid length for HMAC",
-                            400,
+                            "KMSInternalException",
+                            "Failed to initialize HMAC",
+                            500,
                         ));
                     }
                 };
@@ -549,9 +567,36 @@ impl ServiceProvider for KmsProvider {
 
             "Verify" => {
                 // Re-compute HMAC and compare to the provided signature.
-                let key_id = str_param(ctx, "KeyId").unwrap_or_default();
-                let message_b64 = str_param(ctx, "Message").unwrap_or_default();
-                let provided_sig_b64 = str_param(ctx, "Signature").unwrap_or_default();
+                let key_id = match str_param(ctx, "KeyId") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "KeyId is required",
+                            400,
+                        ));
+                    }
+                };
+                let message_b64 = match str_param(ctx, "Message") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Message is required",
+                            400,
+                        ));
+                    }
+                };
+                let provided_sig_b64 = match str_param(ctx, "Signature") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Signature is required",
+                            400,
+                        ));
+                    }
+                };
 
                 let store = self.store.get(account_id, region);
                 let (key_arn, key_material_hex, key_state) =
@@ -578,8 +623,8 @@ impl ServiceProvider for KmsProvider {
                     Ok(b) => b,
                     Err(_) => {
                         return Ok(json_error(
-                            "KMSInvalidStateException",
-                            "Key material is corrupt",
+                            "ValidationException",
+                            "Invalid key material",
                             400,
                         ));
                     }
@@ -589,7 +634,7 @@ impl ServiceProvider for KmsProvider {
                     Err(_) => {
                         return Ok(json_error(
                             "ValidationException",
-                            "Message is not valid base64",
+                            "Message must be valid base64",
                             400,
                         ));
                     }
@@ -599,7 +644,7 @@ impl ServiceProvider for KmsProvider {
                     Err(_) => {
                         return Ok(json_error(
                             "ValidationException",
-                            "Signature is not valid base64",
+                            "Signature must be valid base64",
                             400,
                         ));
                     }
@@ -609,9 +654,9 @@ impl ServiceProvider for KmsProvider {
                     Ok(m) => m,
                     Err(_) => {
                         return Ok(json_error(
-                            "KMSInvalidStateException",
-                            "Key material has invalid length for HMAC",
-                            400,
+                            "KMSInternalException",
+                            "Failed to initialize HMAC",
+                            500,
                         ));
                     }
                 };
