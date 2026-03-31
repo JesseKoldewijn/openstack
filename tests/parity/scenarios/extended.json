@@ -538,6 +538,130 @@
   },
 
   {
+    "id": "ecr-batch-delete-image",
+    "profile": "extended",
+    "service": "ecr",
+    "setup": [
+      {
+        "id": "create-ecr-batch-del-repo",
+        "protocol": "json-1.1",
+        "command": ["ecr", "create-repository", "--repository-name", "batch-del-parity-repo"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "put-image-v1",
+        "protocol": "json-1.1",
+        "command": [
+          "ecr", "put-image",
+          "--repository-name", "batch-del-parity-repo",
+          "--image-manifest", "{\"schemaVersion\":2,\"tag\":\"v1.0\"}",
+          "--image-tag", "v1.0"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "put-image-v2",
+        "protocol": "json-1.1",
+        "command": [
+          "ecr", "put-image",
+          "--repository-name", "batch-del-parity-repo",
+          "--image-manifest", "{\"schemaVersion\":2,\"tag\":\"v2.0\"}",
+          "--image-tag", "v2.0"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "batch-delete-both-images",
+        "protocol": "json-1.1",
+        "command": [
+          "ecr", "batch-delete-image",
+          "--repository-name", "batch-del-parity-repo",
+          "--image-ids", "[{\"imageTag\":\"v1.0\"},{\"imageTag\":\"v2.0\"}]"
+        ],
+        "expect_success": true,
+        "capture_json": "delete_result"
+      }
+    ],
+    "assertions": [
+      { "path": "length(delete_result.imageIds)", "equals": 2 },
+      { "path": "length(delete_result.failures)", "equals": 0 }
+    ],
+    "cleanup": [
+      {
+        "id": "delete-ecr-batch-del-repo",
+        "protocol": "json-1.1",
+        "command": ["ecr", "delete-repository", "--repository-name", "batch-del-parity-repo", "--force"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+
+  {
+    "id": "eventbridge-put-events-with-rule",
+    "profile": "extended",
+    "service": "events",
+    "setup": [
+      {
+        "id": "create-event-bus-parity",
+        "protocol": "json-1.1",
+        "command": ["events", "create-event-bus", "--name", "parity-bus"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "put-matching-rule",
+        "protocol": "json-1.1",
+        "command": [
+          "events", "put-rule",
+          "--name", "parity-rule",
+          "--event-bus-name", "parity-bus",
+          "--event-pattern", "{\"source\":[\"test.source\"]}"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "steps": [
+      {
+        "id": "put-matching-event",
+        "protocol": "json-1.1",
+        "command": [
+          "events", "put-events",
+          "--entries", "[{\"Source\":\"test.source\",\"DetailType\":\"TestEvent\",\"Detail\":\"{}\",\"EventBusName\":\"parity-bus\"}]"
+        ],
+        "expect_success": true,
+        "capture_json": "put_result"
+      }
+    ],
+    "assertions": [
+      { "path": "put_result.FailedEntryCount", "equals": 0 },
+      { "path": "length(put_result.Entries)", "equals": 1 }
+    ],
+    "cleanup": [
+      {
+        "id": "delete-parity-rule",
+        "protocol": "json-1.1",
+        "command": ["events", "delete-rule", "--name", "parity-rule", "--event-bus-name", "parity-bus"],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "delete-parity-bus",
+        "protocol": "json-1.1",
+        "command": ["events", "delete-event-bus", "--name", "parity-bus"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+
+  {
     "id": "s3-put-bucket-notification-configuration",
     "profile": "extended",
     "service": "s3",
