@@ -150,7 +150,7 @@ impl ServiceProvider for EcrProvider {
                 let mut store = self.store.get_or_create(account_id, region);
                 match store.repositories.remove(&name) {
                     Some(repo) => {
-                        store.images.retain(|_, img| img.repository_name != name);
+                        store.remove_repo_images(&name);
                         Ok(json_ok(json!({
                             "repository": {
                                 "repositoryName": repo.name,
@@ -229,7 +229,7 @@ impl ServiceProvider for EcrProvider {
                     pushed_at: Utc::now(),
                     size_bytes: image_manifest.len() as u64,
                 };
-                store.images.insert(digest.clone(), image);
+                store.insert_image(digest.clone(), image);
                 Ok(json_ok(json!({
                     "image": {
                         "repositoryName": repo_name,
@@ -270,24 +270,27 @@ impl ServiceProvider for EcrProvider {
                 for id in &image_ids {
                     let tag = id.get("imageTag").and_then(|v| v.as_str());
                     let digest = id.get("imageDigest").and_then(|v| v.as_str());
-                    for img in store.images.values() {
-                        if img.repository_name != repo_name {
-                            continue;
-                        }
-                        let matches = digest
-                            .map(|d| d == img.image_digest)
-                            .or_else(|| tag.map(|t| img.image_tags.contains(&t.to_string())))
-                            .unwrap_or(false);
-                        if matches {
-                            images.push(json!({
-                                "repositoryName": img.repository_name,
-                                "imageId": {
-                                    "imageDigest": img.image_digest,
-                                    "imageTag": img.image_tags.first(),
-                                },
-                                "imageManifest": img.image_manifest,
-                            }));
-                        }
+
+                    // Resolve to a digest using the index — O(1) per lookup.
+                    let resolved = if let Some(d) = digest {
+                        store.images.get(d)
+                    } else if let Some(t) = tag {
+                        store
+                            .digest_for_tag(&repo_name, t)
+                            .and_then(|d| store.images.get(d))
+                    } else {
+                        None
+                    };
+
+                    if let Some(img) = resolved.filter(|img| img.repository_name == repo_name) {
+                        images.push(json!({
+                            "repositoryName": img.repository_name,
+                            "imageId": {
+                                "imageDigest": img.image_digest,
+                                "imageTag": img.image_tags.first(),
+                            },
+                            "imageManifest": img.image_manifest,
+                        }));
                     }
                 }
                 Ok(json_ok(json!({ "images": images, "failures": [] })))
@@ -325,7 +328,7 @@ impl ServiceProvider for EcrProvider {
                     let tag = id.get("imageTag").and_then(|v| v.as_str());
                     let digest = id.get("imageDigest").and_then(|v| v.as_str());
 
-                    // Find the digest to delete (may be looked up by tag)
+                    // Resolve digest via index — O(1) for both tag and digest lookups.
                     let target_digest = if let Some(d) = digest {
                         if store.images.contains_key(d) {
                             Some(d.to_string())
@@ -333,21 +336,14 @@ impl ServiceProvider for EcrProvider {
                             None
                         }
                     } else if let Some(t) = tag {
-                        store
-                            .images
-                            .iter()
-                            .find(|(_, img)| {
-                                img.repository_name == repo_name
-                                    && img.image_tags.contains(&t.to_string())
-                            })
-                            .map(|(k, _)| k.clone())
+                        store.digest_for_tag(&repo_name, t).map(String::from)
                     } else {
                         None
                     };
 
                     match target_digest {
                         Some(d) => {
-                            store.images.remove(&d);
+                            store.remove_image(&d);
                             deleted.push(json!({
                                 "imageDigest": d,
                                 "imageTag": tag,
@@ -418,9 +414,7 @@ impl ServiceProvider for EcrProvider {
                     .unwrap_or_default();
 
                 let image_details: Vec<Value> = store
-                    .images
-                    .values()
-                    .filter(|img| img.repository_name == repo_name)
+                    .images_for_repo(&repo_name)
                     .filter(|img| {
                         if filter_digests.is_empty() && filter_tags.is_empty() {
                             return true;
@@ -463,9 +457,7 @@ impl ServiceProvider for EcrProvider {
                     return Ok(json_ok(json!({ "imageIds": [] })));
                 };
                 let image_ids: Vec<Value> = store
-                    .images
-                    .values()
-                    .filter(|img| img.repository_name == repo_name)
+                    .images_for_repo(&repo_name)
                     .map(|img| {
                         json!({
                             "imageDigest": img.image_digest,

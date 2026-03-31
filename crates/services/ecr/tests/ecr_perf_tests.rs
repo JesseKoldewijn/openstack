@@ -131,3 +131,97 @@ async fn perf_put_image_and_describe_round_trip() {
         elapsed.as_millis()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Perf 3 — BatchDeleteImage × 200 images by tag in under 200 ms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_batch_delete_image_by_tag() {
+    let p = EcrProvider::new();
+    create_repo(&p, "perf-del-repo").await;
+
+    let n = 200usize;
+    for i in 0..n {
+        push_image(&p, "perf-del-repo", &format!("tag-{i:04}")).await;
+    }
+
+    // Build imageIds array for all n images
+    let image_ids: Vec<serde_json::Value> = (0..n)
+        .map(|i| json!({ "imageTag": format!("tag-{i:04}") }))
+        .collect();
+
+    let start = Instant::now();
+    let resp = p
+        .dispatch(&make_ctx(
+            "BatchDeleteImage",
+            json!({
+                "repositoryName": "perf-del-repo",
+                "imageIds": image_ids,
+            }),
+        ))
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(resp.status_code, 200);
+    let body: Value = serde_json::from_slice(resp.body.as_bytes()).unwrap();
+    assert_eq!(
+        body["imageIds"].as_array().unwrap().len(),
+        n,
+        "expected {n} deleted"
+    );
+    assert_eq!(
+        body["failures"].as_array().unwrap().len(),
+        0,
+        "expected 0 failures"
+    );
+
+    assert!(
+        elapsed.as_millis() < 200,
+        "BatchDeleteImage×{n} by tag took {}ms — expected <200ms",
+        elapsed.as_millis()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Perf 4 — BatchGetImage × 100 images by tag in under 100 ms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_batch_get_image_by_tag() {
+    let p = EcrProvider::new();
+    create_repo(&p, "perf-get-repo").await;
+
+    let n = 100usize;
+    for i in 0..n {
+        push_image(&p, "perf-get-repo", &format!("img-{i:04}")).await;
+    }
+
+    let image_ids: Vec<serde_json::Value> = (0..n)
+        .map(|i| json!({ "imageTag": format!("img-{i:04}") }))
+        .collect();
+
+    let start = Instant::now();
+    let resp = p
+        .dispatch(&make_ctx(
+            "BatchGetImage",
+            json!({
+                "repositoryName": "perf-get-repo",
+                "imageIds": image_ids,
+            }),
+        ))
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(resp.status_code, 200);
+    let body: Value = serde_json::from_slice(resp.body.as_bytes()).unwrap();
+    assert_eq!(body["images"].as_array().unwrap().len(), n);
+
+    assert!(
+        elapsed.as_millis() < 100,
+        "BatchGetImage×{n} by tag took {}ms — expected <100ms",
+        elapsed.as_millis()
+    );
+}
