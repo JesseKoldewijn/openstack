@@ -753,11 +753,18 @@ async fn test_get_metric_data_invalid_time_format_returns_graceful_response() {
         "response should contain MetricDataResults key; body={}",
         body_str(&resp)
     );
+    let results = b
+        .get("MetricDataResults")
+        .and_then(|v| v.as_array())
+        .expect("MetricDataResults should be an array");
+    // With malformed time input the provider should return an empty result set —
+    // no data can be aggregated when time bounds are unparseable.
     assert!(
-        b.get("MetricDataResults")
-            .and_then(|v| v.as_array())
-            .is_some(),
-        "MetricDataResults should be an array; body={}",
+        results.is_empty()
+            || results
+                .iter()
+                .all(|r| r["Values"].as_array().map_or(true, |v| v.is_empty())),
+        "expected empty or zero-value results for malformed time input, got: {}",
         body_str(&resp)
     );
 }

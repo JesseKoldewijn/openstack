@@ -101,14 +101,35 @@ async fn perf_put_image_and_describe_round_trip() {
     let p = EcrProvider::new();
     let n = 50usize;
 
-    // Create repos and push one image each
+    // Create repos first (not timed)
     for i in 0..n {
-        let repo = format!("perf-repo-{i:03}");
-        create_repo(&p, &repo).await;
-        push_image(&p, &repo, "latest").await;
+        create_repo(&p, &format!("perf-repo-{i:03}")).await;
     }
 
-    // Now time DescribeImages across all repos
+    // Time PutImage × n
+    let start = Instant::now();
+    for i in 0..n {
+        let resp = p
+            .dispatch(&make_ctx(
+                "PutImage",
+                json!({
+                    "repositoryName": format!("perf-repo-{i:03}"),
+                    "imageManifest": "{}",
+                    "imageTag": "latest",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200, "PutImage failed on repo {i}");
+    }
+    let put_elapsed = start.elapsed();
+    assert!(
+        put_elapsed.as_millis() < 2000,
+        "PutImage x{n} took {}ms — expected <2000ms",
+        put_elapsed.as_millis()
+    );
+
+    // Time DescribeImages × n
     let start = Instant::now();
     for i in 0..n {
         let repo = format!("perf-repo-{i:03}");
@@ -124,10 +145,43 @@ async fn perf_put_image_and_describe_round_trip() {
         assert_eq!(body["imageDetails"].as_array().unwrap().len(), 1);
     }
     let elapsed = start.elapsed();
-
     assert!(
         elapsed.as_millis() < 2000,
         "DescribeImages x{n} repos took {}ms — expected <2000ms",
+        elapsed.as_millis()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Perf — ListImages × 50 repos in under 500 ms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_list_images() {
+    let p = EcrProvider::new();
+    let n = 50usize;
+
+    for i in 0..n {
+        let repo = format!("perf-list-repo-{i:03}");
+        create_repo(&p, &repo).await;
+        push_image(&p, &repo, "v1").await;
+    }
+
+    let start = Instant::now();
+    for i in 0..n {
+        let resp = p
+            .dispatch(&make_ctx(
+                "ListImages",
+                json!({ "repositoryName": format!("perf-list-repo-{i:03}") }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_millis() < 500,
+        "ListImages x{n} took {}ms — expected <500ms",
         elapsed.as_millis()
     );
 }

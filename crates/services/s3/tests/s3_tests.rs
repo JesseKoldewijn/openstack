@@ -1466,6 +1466,12 @@ async fn test_put_notification_sns_topic_configuration() {
         .dispatch(&make_notification_ctx("GET", "sns-notif-bucket", b""))
         .await
         .unwrap();
+    assert_eq!(
+        get_resp.status_code,
+        200,
+        "GET notification config failed: {}",
+        std::str::from_utf8(get_resp.body.as_bytes()).unwrap_or("")
+    );
     let body = std::str::from_utf8(get_resp.body.as_bytes()).unwrap();
     assert!(
         body.contains("TopicConfiguration"),
