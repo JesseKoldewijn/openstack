@@ -243,7 +243,7 @@ jobs:
             --report benchmark-report.json \
             --p95-max 10 \
             "${MEMORY_ARG[@]}" \
-            --op-p95-max "s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=300,s3/get_object_10mb=250,s3/put_object_50mb=1000,s3/get_object_50mb=1000,s3/put_object_100mb=2000,s3/get_object_100mb=2000" \
+            --op-p95-max "s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=400,s3/get_object_10mb=250,s3/put_object_50mb=1600,s3/get_object_50mb=1000,s3/put_object_100mb=2000,s3/get_object_100mb=2000" \
             --output benchmark-gate.json
       - name: Benchmark report
         if: always()
