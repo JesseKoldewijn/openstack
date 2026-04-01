@@ -446,7 +446,189 @@ impl ServiceProvider for CloudWatchProvider {
             // ----------------------------------------------------------------
             // GetMetricData
             // ----------------------------------------------------------------
-            "GetMetricData" => Ok(json_ok(json!({ "MetricDataResults": [], "Messages": [] }))),
+            "GetMetricData" => {
+                let queries = ctx
+                    .request_body
+                    .get("MetricDataQueries")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                let start_time = ctx
+                    .request_body
+                    .get("StartTime")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|| Utc::now() - chrono::Duration::hours(1));
+                let end_time = ctx
+                    .request_body
+                    .get("EndTime")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(Utc::now);
+
+                // Even if no store exists yet, we still need to return one
+                // MetricDataResult entry per query (with empty Values/Timestamps).
+                let empty_metrics: Vec<crate::store::MetricDatum> = Vec::new();
+                let store_guard;
+                let metrics_slice: &[crate::store::MetricDatum] =
+                    if let Some(s) = self.store.get(account_id, region) {
+                        store_guard = s;
+                        &store_guard.metrics
+                    } else {
+                        &empty_metrics
+                    };
+
+                let mut results: Vec<Value> = Vec::new();
+                for query in &queries {
+                    let id = query
+                        .get("Id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let label = query
+                        .get("Label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&id)
+                        .to_string();
+
+                    if let Some(metric_stat) = query.get("MetricStat") {
+                        // MetricStat query: { Metric: { Namespace, MetricName }, Period, Stat }
+                        let namespace = metric_stat
+                            .get("Metric")
+                            .and_then(|m| m.get("Namespace"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let metric_name = metric_stat
+                            .get("Metric")
+                            .and_then(|m| m.get("MetricName"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let period_secs = metric_stat
+                            .get("Period")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(60);
+                        let stat = metric_stat
+                            .get("Stat")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Average")
+                            .to_string();
+
+                        let matching: Vec<f64> = metrics_slice
+                            .iter()
+                            .filter(|m| {
+                                m.namespace == namespace
+                                    && m.metric_name == metric_name
+                                    && m.timestamp >= start_time
+                                    && m.timestamp <= end_time
+                            })
+                            .map(|m| m.value)
+                            .collect();
+
+                        let (timestamps, values) = if matching.is_empty() {
+                            (vec![], vec![])
+                        } else {
+                            let v = match stat.as_str() {
+                                "Sum" | "SampleCount" => matching.iter().sum::<f64>(),
+                                "Minimum" => matching.iter().cloned().fold(f64::INFINITY, f64::min),
+                                "Maximum" => {
+                                    matching.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                                }
+                                _ => {
+                                    // Average / p* default
+                                    matching.iter().sum::<f64>() / matching.len() as f64
+                                }
+                            };
+                            let ts = start_time + chrono::Duration::seconds(period_secs);
+                            (
+                                vec![ts.to_rfc3339()],
+                                vec![if v.is_finite() { v } else { 0.0 }],
+                            )
+                        };
+
+                        results.push(json!({
+                            "Id": id,
+                            "Label": label,
+                            "Timestamps": timestamps,
+                            "Values": values,
+                            "StatusCode": "Complete",
+                        }));
+                    } else if let Some(expr_str) = query.get("Expression").and_then(|v| v.as_str())
+                    {
+                        // Math expression: simple SUM/AVG/MIN/MAX over other query IDs
+                        // e.g. "SUM(METRICS())" or "m1+m2"
+                        // We implement a best-effort evaluation: SUM of all previously computed results
+                        let val: f64 = if expr_str.to_ascii_uppercase().starts_with("SUM") {
+                            results
+                                .iter()
+                                .flat_map(|r| {
+                                    r.get("Values")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| a.iter().filter_map(|v| v.as_f64()).sum::<f64>())
+                                        .into_iter()
+                                })
+                                .sum()
+                        } else if expr_str.to_ascii_uppercase().starts_with("AVG") {
+                            let (sum, count) =
+                                results.iter().fold((0.0f64, 0usize), |(s, c), r| {
+                                    let vals: Vec<f64> = r
+                                        .get("Values")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+                                        .unwrap_or_default();
+                                    (s + vals.iter().sum::<f64>(), c + vals.len())
+                                });
+                            if count > 0 { sum / count as f64 } else { 0.0 }
+                        } else if expr_str.to_ascii_uppercase().starts_with("MIN") {
+                            results
+                                .iter()
+                                .flat_map(|r| {
+                                    r.get("Values")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| {
+                                            a.iter()
+                                                .filter_map(|v| v.as_f64())
+                                                .fold(f64::INFINITY, f64::min)
+                                        })
+                                        .into_iter()
+                                })
+                                .fold(f64::INFINITY, f64::min)
+                        } else if expr_str.to_ascii_uppercase().starts_with("MAX") {
+                            results
+                                .iter()
+                                .flat_map(|r| {
+                                    r.get("Values")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| {
+                                            a.iter()
+                                                .filter_map(|v| v.as_f64())
+                                                .fold(f64::NEG_INFINITY, f64::max)
+                                        })
+                                        .into_iter()
+                                })
+                                .fold(f64::NEG_INFINITY, f64::max)
+                        } else {
+                            0.0
+                        };
+                        let final_val = if val.is_finite() { val } else { 0.0 };
+                        results.push(json!({
+                            "Id": id,
+                            "Label": label,
+                            "Timestamps": [start_time.to_rfc3339()],
+                            "Values": [final_val],
+                            "StatusCode": "Complete",
+                        }));
+                    }
+                }
+
+                Ok(json_ok(
+                    json!({ "MetricDataResults": results, "Messages": [] }),
+                ))
+            }
 
             // ----------------------------------------------------------------
             // PutMetricAlarm

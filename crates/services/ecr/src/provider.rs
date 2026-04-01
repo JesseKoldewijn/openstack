@@ -59,23 +59,6 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     }
 }
 
-fn localstack_unsupported_error(service: &str) -> DispatchResponse {
-    DispatchResponse {
-        status_code: 501,
-        body: ResponseBody::Buffered(Bytes::from(
-            serde_json::to_vec(&json!({
-                "__type": "InternalFailure",
-                "message": format!(
-                    "API for service '{service}' not yet implemented or pro feature - please check https://docs.localstack.cloud/references/coverage/ for further information"
-                ),
-            }))
-            .unwrap(),
-        )),
-        content_type: Cow::Borrowed("application/json"),
-        headers: Vec::new(),
-    }
-}
-
 fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
     ctx.request_body
         .get(key)
@@ -167,8 +150,7 @@ impl ServiceProvider for EcrProvider {
                 let mut store = self.store.get_or_create(account_id, region);
                 match store.repositories.remove(&name) {
                     Some(repo) => {
-                        // remove all images for this repo
-                        store.images.retain(|_, img| img.repository_name != name);
+                        store.remove_repo_images(&name);
                         Ok(json_ok(json!({
                             "repository": {
                                 "repositoryName": repo.name,
@@ -247,7 +229,7 @@ impl ServiceProvider for EcrProvider {
                     pushed_at: Utc::now(),
                     size_bytes: image_manifest.len() as u64,
                 };
-                store.images.insert(digest.clone(), image);
+                store.insert_image(digest.clone(), image);
                 Ok(json_ok(json!({
                     "image": {
                         "repositoryName": repo_name,
@@ -288,33 +270,204 @@ impl ServiceProvider for EcrProvider {
                 for id in &image_ids {
                     let tag = id.get("imageTag").and_then(|v| v.as_str());
                     let digest = id.get("imageDigest").and_then(|v| v.as_str());
-                    for img in store.images.values() {
-                        if img.repository_name != repo_name {
-                            continue;
+
+                    // Resolve to a digest using the index — O(1) per lookup.
+                    // When both digest and tag are provided, both must match the
+                    // same image (unified imageId semantics).
+                    let resolved = if let Some(d) = digest {
+                        let img = store.images.get(d);
+                        // If a tag is also specified, verify it belongs to the same image.
+                        if let Some(t) = tag {
+                            img.filter(|img| img.image_tags.iter().any(|it| it == t))
+                        } else {
+                            img
                         }
-                        let matches = digest
-                            .map(|d| d == img.image_digest)
-                            .or_else(|| tag.map(|t| img.image_tags.contains(&t.to_string())))
-                            .unwrap_or(false);
-                        if matches {
-                            images.push(json!({
-                                "repositoryName": img.repository_name,
-                                "imageId": {
-                                    "imageDigest": img.image_digest,
-                                    "imageTag": img.image_tags.first(),
-                                },
-                                "imageManifest": img.image_manifest,
-                            }));
-                        }
+                    } else if let Some(t) = tag {
+                        store
+                            .digest_for_tag(&repo_name, t)
+                            .and_then(|d| store.images.get(d))
+                    } else {
+                        None
+                    };
+
+                    if let Some(img) = resolved.filter(|img| img.repository_name == repo_name) {
+                        images.push(json!({
+                            "repositoryName": img.repository_name,
+                            "imageId": {
+                                "imageDigest": img.image_digest,
+                                "imageTag": img.image_tags.first(),
+                            },
+                            "imageManifest": img.image_manifest,
+                        }));
                     }
                 }
                 Ok(json_ok(json!({ "images": images, "failures": [] })))
             }
 
             // ----------------------------------------------------------------
+            // BatchDeleteImage
+            // ----------------------------------------------------------------
+            "BatchDeleteImage" => {
+                let repo_name = match str_param(ctx, "repositoryName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidParameterException",
+                            "repositoryName required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                // Verify the repository exists before the empty fast-path.
+                if !store.repositories.contains_key(repo_name.as_str()) {
+                    return Ok(json_error(
+                        "RepositoryNotFoundException",
+                        &format!("The repository with name '{repo_name}' does not exist"),
+                        400,
+                    ));
+                }
+                let image_ids = ctx
+                    .request_body
+                    .get("imageIds")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if image_ids.is_empty() {
+                    return Ok(json_ok(json!({ "imageIds": [], "failures": [] })));
+                }
+
+                let mut deleted: Vec<Value> = Vec::new();
+                let mut failures: Vec<Value> = Vec::new();
+
+                for id in &image_ids {
+                    let tag = id.get("imageTag").and_then(|v| v.as_str());
+                    let digest = id.get("imageDigest").and_then(|v| v.as_str());
+
+                    // Resolve digest via index — O(1) for both tag and digest lookups.
+                    // Scope to repo_name to prevent cross-repo deletions.
+                    let target_digest = if let Some(d) = digest {
+                        // Verify the digest exists AND belongs to this repo
+                        if store
+                            .images
+                            .get(d)
+                            .is_some_and(|img| img.repository_name == repo_name)
+                        {
+                            Some(d.to_string())
+                        } else {
+                            None
+                        }
+                    } else if let Some(t) = tag {
+                        store.digest_for_tag(&repo_name, t).map(String::from)
+                    } else {
+                        None
+                    };
+
+                    match target_digest {
+                        Some(d) => {
+                            store.remove_image(&d);
+                            deleted.push(json!({
+                                "imageDigest": d,
+                                "imageTag": tag,
+                            }));
+                        }
+                        None => {
+                            failures.push(json!({
+                                "imageId": {
+                                    "imageTag": tag,
+                                    "imageDigest": digest,
+                                },
+                                "failureCode": "ImageNotFoundException",
+                                "failureMessage": "Requested image not found",
+                            }));
+                        }
+                    }
+                }
+
+                Ok(json_ok(
+                    json!({ "imageIds": deleted, "failures": failures }),
+                ))
+            }
+
+            // ----------------------------------------------------------------
             // DescribeImages
             // ----------------------------------------------------------------
-            "DescribeImages" => Ok(localstack_unsupported_error("ecr")),
+            "DescribeImages" => {
+                let repo_name = match str_param(ctx, "repositoryName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidParameterException",
+                            "repositoryName required",
+                            400,
+                        ));
+                    }
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "imageDetails": [] })));
+                };
+
+                // Build a list of imageId filter entries.  Each entry may specify
+                // imageDigest, imageTag, or both.  When both are present, an image
+                // must satisfy BOTH constraints (unified imageId semantics).
+                let id_filters: Vec<(Option<String>, Option<String>)> = ctx
+                    .request_body
+                    .get("imageIds")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|id| {
+                                let d = id
+                                    .get("imageDigest")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                let t = id
+                                    .get("imageTag")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                (d, t)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let image_details: Vec<Value> = store
+                    .images_for_repo(&repo_name)
+                    .filter(|img| {
+                        if id_filters.is_empty() {
+                            return true;
+                        }
+                        // An image matches if it satisfies at least one filter entry.
+                        id_filters.iter().any(|(filter_digest, filter_tag)| {
+                            let digest_ok = match filter_digest {
+                                Some(d) => img.image_digest == *d,
+                                None => true,
+                            };
+                            let tag_ok = match filter_tag {
+                                Some(t) => img.image_tags.iter().any(|it| it == t),
+                                None => true,
+                            };
+                            // At least one constraint must be specified, and all
+                            // specified constraints must match.
+                            (filter_digest.is_some() || filter_tag.is_some())
+                                && digest_ok
+                                && tag_ok
+                        })
+                    })
+                    .map(|img| {
+                        json!({
+                            "repositoryName": img.repository_name,
+                            "registryId": account_id,
+                            "imageDigest": img.image_digest,
+                            "imageTags": img.image_tags,
+                            "imageSizeInBytes": img.size_bytes,
+                            "imagePushedAt": img.pushed_at.timestamp(),
+                            "imageManifestMediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                        })
+                    })
+                    .collect();
+                Ok(json_ok(json!({ "imageDetails": image_details })))
+            }
 
             // ----------------------------------------------------------------
             // ListImages
@@ -334,9 +487,7 @@ impl ServiceProvider for EcrProvider {
                     return Ok(json_ok(json!({ "imageIds": [] })));
                 };
                 let image_ids: Vec<Value> = store
-                    .images
-                    .values()
-                    .filter(|img| img.repository_name == repo_name)
+                    .images_for_repo(&repo_name)
                     .map(|img| {
                         json!({
                             "imageDigest": img.image_digest,

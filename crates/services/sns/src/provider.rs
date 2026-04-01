@@ -5,8 +5,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
+    CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
+    ServiceProvider,
 };
+use openstack_service_framework::xml::url_encode;
 use openstack_state::AccountRegionBundle;
 use tracing::{debug, warn};
 
@@ -14,12 +16,23 @@ use crate::store::{FilterPolicy, MessageAttribute, Protocol, SnsStore};
 
 pub struct SnsProvider {
     store: Arc<AccountRegionBundle<SnsStore>>,
+    /// Optional dispatcher for real SQS delivery.
+    dispatcher: Option<Arc<dyn CrossServiceDispatcher>>,
 }
 
 impl SnsProvider {
     pub fn new() -> Self {
         Self {
             store: Arc::new(AccountRegionBundle::new()),
+            dispatcher: None,
+        }
+    }
+
+    /// Construct with a cross-service dispatcher for real SQS delivery.
+    pub fn new_with_dispatcher(dispatcher: Arc<dyn CrossServiceDispatcher>) -> Self {
+        Self {
+            store: Arc::new(AccountRegionBundle::new()),
+            dispatcher: Some(dispatcher),
         }
     }
 }
@@ -89,6 +102,13 @@ fn escape_xml(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+// url_encode_value is now provided by openstack_service_framework::xml::url_encode
+// keeping a local alias for readability
+#[inline(always)]
+fn url_encode_value(s: &str) -> String {
+    url_encode(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -469,7 +489,13 @@ fn handle_set_subscription_attributes(
     xml_no_result("SetSubscriptionAttributes", &new_request_id())
 }
 
-fn handle_publish(store: &mut SnsStore, params: &HashMap<String, String>) -> DispatchResponse {
+async fn handle_publish(
+    store: &mut SnsStore,
+    params: &HashMap<String, String>,
+    dispatcher: &Option<Arc<dyn CrossServiceDispatcher>>,
+    ctx: &RequestContext,
+) -> DispatchResponse {
+    // --- Synchronous phase: validate and collect all data under the store borrow ---
     let topic_arn = match params.get("TopicArn") {
         Some(a) => a.clone(),
         None => return sns_error("InvalidParameter", "TopicArn is required", 400),
@@ -486,7 +512,7 @@ fn handle_publish(store: &mut SnsStore, params: &HashMap<String, String>) -> Dis
     let message_id = uuid::Uuid::new_v4().to_string();
     let message_attributes = extract_message_attributes(params);
 
-    // Collect subscriptions and delivery info before mutating store
+    // Collect subscriptions while the store borrow is active — no awaits here.
     let delivery_tasks: Vec<(String, String, String, bool, Option<FilterPolicy>)> = store
         .list_subscriptions_by_topic(&topic_arn)
         .into_iter()
@@ -501,10 +527,68 @@ fn handle_publish(store: &mut SnsStore, params: &HashMap<String, String>) -> Dis
         })
         .collect();
 
-    // Deliver to each subscriber
-    for (_sub_arn, protocol_str, endpoint, raw_delivery, filter_policy) in &delivery_tasks {
+    // Clone all data needed for the async phase so the store borrow (and thus
+    // the write guard in the caller) can be dropped before any .await.
+    let dispatcher = dispatcher.clone();
+    let region = ctx.region.clone();
+    let account_id = ctx.account_id.clone();
+
+    // Build the success response now while we still have topic_arn / message_id.
+    let response = sns_publish_ok(&message_id);
+
+    // --- Async phase: fan-out delivery. Store borrow is no longer needed. ---
+    let payload = PublishPayload {
+        delivery_tasks,
+        message,
+        subject,
+        topic_arn,
+        message_id,
+        message_attributes,
+        dispatcher,
+        region,
+        account_id,
+    };
+    dispatch_publish_deliveries(payload).await;
+
+    response
+}
+
+struct PublishPayload {
+    delivery_tasks: Vec<(String, String, String, bool, Option<FilterPolicy>)>,
+    message: String,
+    subject: String,
+    topic_arn: String,
+    message_id: String,
+    message_attributes: HashMap<String, MessageAttribute>,
+    dispatcher: Option<Arc<dyn CrossServiceDispatcher>>,
+    region: String,
+    account_id: String,
+}
+
+/// Build the XML success response for a Publish call.
+fn sns_publish_ok(message_id: &str) -> DispatchResponse {
+    let rid = new_request_id();
+    let inner = format!("<MessageId>{message_id}</MessageId>");
+    xml_wrap("Publish", &rid, &inner)
+}
+
+/// Fan-out delivery to all subscribers — called after the store guard is released.
+async fn dispatch_publish_deliveries(payload: PublishPayload) {
+    let PublishPayload {
+        delivery_tasks,
+        message,
+        subject,
+        topic_arn,
+        message_id,
+        message_attributes,
+        dispatcher,
+        region,
+        account_id,
+    } = payload;
+
+    for (_sub_arn, protocol_str, endpoint, raw_delivery, filter_policy) in delivery_tasks {
         // Apply filter policy
-        if let Some(fp) = filter_policy
+        if let Some(ref fp) = filter_policy
             && !fp.matches(&message_attributes)
         {
             continue;
@@ -512,21 +596,47 @@ fn handle_publish(store: &mut SnsStore, params: &HashMap<String, String>) -> Dis
 
         match protocol_str.as_str() {
             "sqs" => {
-                // SQS delivery: format SNS notification envelope and deliver to SQS queue
-                // The endpoint is the SQS queue ARN. For in-process delivery we just log it.
-                // Real delivery would require access to the SQS store — cross-service
-                // delivery is done by the gateway layer. Here we just record it.
-                let payload = if *raw_delivery {
+                // SQS delivery: format SNS notification envelope and deliver to SQS queue.
+                // The endpoint is the SQS queue ARN.
+                let payload = if raw_delivery {
                     message.clone()
                 } else {
                     format_sns_notification(&topic_arn, &message_id, &message, &subject)
                 };
-                debug!(
-                    protocol = "sqs",
-                    endpoint = %endpoint,
-                    payload_len = payload.len(),
-                    "SNS → SQS delivery (in-process)"
-                );
+
+                if let Some(disp) = &dispatcher {
+                    // Extract account ID and queue name from ARN: arn:aws:sqs:region:account:queue-name
+                    let parts: Vec<&str> = endpoint.split(':').collect();
+                    let queue_account_id = parts
+                        .get(4)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| account_id.clone());
+                    let queue_name = parts
+                        .last()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let body = format!(
+                        "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F{queue_account_id}%2F{queue_name}&MessageBody={encoded}",
+                        encoded = url_encode_value(&payload)
+                    );
+                    let mut dispatch_ctx =
+                        RequestContext::new("sqs", "SendMessage", &region, &queue_account_id);
+                    dispatch_ctx.method = "POST".to_string();
+                    dispatch_ctx.path = format!("/{queue_account_id}/{queue_name}");
+                    dispatch_ctx.raw_body = Some(Bytes::from(body.into_bytes()));
+                    if let Err(e) = disp.dispatch_to(&dispatch_ctx).await {
+                        warn!(err = %e, endpoint = %endpoint, "SNS → SQS dispatch failed");
+                    } else {
+                        debug!(protocol = "sqs", endpoint = %endpoint, "SNS → SQS delivered");
+                    }
+                } else {
+                    debug!(
+                        protocol = "sqs",
+                        endpoint = %endpoint,
+                        payload_len = payload.len(),
+                        "SNS → SQS delivery (no dispatcher)"
+                    );
+                }
             }
             "http" | "https" => {
                 // HTTP delivery: fire-and-forget POST in background
@@ -558,12 +668,6 @@ fn handle_publish(store: &mut SnsStore, params: &HashMap<String, String>) -> Dis
             }
         }
     }
-
-    xml_wrap(
-        "Publish",
-        &new_request_id(),
-        &format!("<MessageId>{}</MessageId>", escape_xml(&message_id)),
-    )
 }
 
 fn handle_publish_batch(
@@ -709,21 +813,33 @@ impl ServiceProvider for SnsProvider {
             }
             // Write ops — acquire exclusive (write) lock
             other => {
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 match other {
-                    "CreateTopic" => handle_create_topic(&mut store, ctx, &params),
-                    "DeleteTopic" => handle_delete_topic(&mut store, &params),
-                    "SetTopicAttributes" => handle_set_topic_attributes(&mut store, &params),
-                    "Subscribe" => handle_subscribe(&mut store, ctx, &params),
-                    "Unsubscribe" => handle_unsubscribe(&mut store, &params),
-                    "SetSubscriptionAttributes" => {
-                        handle_set_subscription_attributes(&mut store, &params)
+                    "Publish" => {
+                        // handle_publish collects all data from the store synchronously,
+                        // then fans out asynchronously. The store guard (write lock) is
+                        // released before any .await inside handle_publish.
+                        let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                        handle_publish(&mut store, &params, &self.dispatcher, ctx).await
                     }
-                    "Publish" => handle_publish(&mut store, &params),
-                    "PublishBatch" => handle_publish_batch(&mut store, &params),
                     _ => {
-                        warn!(service = "sns", action = %other, "SNS action not implemented");
-                        return Err(DispatchError::NotImplemented(other.to_string()));
+                        let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                        match other {
+                            "CreateTopic" => handle_create_topic(&mut store, ctx, &params),
+                            "DeleteTopic" => handle_delete_topic(&mut store, &params),
+                            "SetTopicAttributes" => {
+                                handle_set_topic_attributes(&mut store, &params)
+                            }
+                            "Subscribe" => handle_subscribe(&mut store, ctx, &params),
+                            "Unsubscribe" => handle_unsubscribe(&mut store, &params),
+                            "SetSubscriptionAttributes" => {
+                                handle_set_subscription_attributes(&mut store, &params)
+                            }
+                            "PublishBatch" => handle_publish_batch(&mut store, &params),
+                            _ => {
+                                warn!(service = "sns", action = %other, "SNS action not implemented");
+                                return Err(DispatchError::NotImplemented(other.to_string()));
+                            }
+                        }
                     }
                 }
             }

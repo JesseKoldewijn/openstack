@@ -326,6 +326,9 @@ pub struct UploadPart {
 pub struct NotificationConfig {
     pub id: String,
     pub destination_arn: String,
+    /// "sqs" | "sns" | "lambda"
+    #[serde(default)]
+    pub destination_type: String,
     pub events: Vec<String>,
     pub prefix_filter: Option<String>,
     pub suffix_filter: Option<String>,

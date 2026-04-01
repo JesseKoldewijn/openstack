@@ -1,13 +1,16 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use openstack_config::Config;
 use tracing::{error, warn};
 
 use crate::container::ServiceContainer;
 use crate::lifecycle::ServiceState;
-use crate::traits::{DispatchError, DispatchResponse, RequestContext, ServiceProvider};
+use crate::traits::{
+    CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ServiceProvider,
+};
 
 #[derive(Debug, Clone)]
 pub struct ServiceManagerMetrics {
@@ -124,5 +127,15 @@ impl ServicePluginManager {
                 error!("Failed to stop service '{}': {}", name, e);
             }
         }
+    }
+}
+
+/// Implement `CrossServiceDispatcher` for the manager so that providers can
+/// fan-out requests to other registered services without depending on the
+/// concrete `ServicePluginManager` type.
+#[async_trait]
+impl CrossServiceDispatcher for ServicePluginManager {
+    async fn dispatch_to(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        self.dispatch(ctx).await
     }
 }

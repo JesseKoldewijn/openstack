@@ -1245,3 +1245,240 @@ async fn test_non_versioned_large_put_overwrite_keeps_data() {
     let got = resp.body.into_bytes().await.unwrap();
     assert_eq!(&got[..], &second_data[..]);
 }
+
+// ---------------------------------------------------------------------------
+// Bucket notification configuration tests
+// ---------------------------------------------------------------------------
+
+fn make_notification_xml(queue_arn: &str, event: &str) -> Vec<u8> {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <QueueConfiguration>
+    <Id>test-notif</Id>
+    <Queue>{queue_arn}</Queue>
+    <Event>{event}</Event>
+  </QueueConfiguration>
+</NotificationConfiguration>"#
+    )
+    .into_bytes()
+}
+
+fn make_notification_ctx(method: &str, bucket: &str, body: &[u8]) -> RequestContext {
+    let mut q = HashMap::new();
+    q.insert("notification".to_string(), String::new());
+    make_ctx_with_query(method, &format!("/{bucket}"), body, q)
+}
+
+#[tokio::test]
+async fn test_put_and_get_bucket_notification_configuration() {
+    let provider = new_provider().await;
+
+    // Create bucket
+    provider
+        .dispatch(&make_ctx("PUT", "/notif-bucket", b""))
+        .await
+        .unwrap();
+
+    // PUT notification config
+    let xml = make_notification_xml(
+        "arn:aws:sqs:us-east-1:000000000000:my-queue",
+        "s3:ObjectCreated:*",
+    );
+    let put_resp = provider
+        .dispatch(&make_notification_ctx("PUT", "notif-bucket", &xml))
+        .await
+        .unwrap();
+    assert_eq!(
+        put_resp.status_code,
+        200,
+        "PutBucketNotificationConfiguration failed: {}",
+        std::str::from_utf8(put_resp.body.as_bytes()).unwrap()
+    );
+
+    // GET notification config
+    let get_resp = provider
+        .dispatch(&make_notification_ctx("GET", "notif-bucket", b""))
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status_code, 200);
+    let body = std::str::from_utf8(get_resp.body.as_bytes()).unwrap();
+    assert!(
+        body.contains("QueueConfiguration"),
+        "Expected QueueConfiguration in response, got: {body}"
+    );
+    assert!(
+        body.contains("arn:aws:sqs:us-east-1:000000000000:my-queue"),
+        "Expected queue ARN in response, got: {body}"
+    );
+    assert!(
+        body.contains("s3:ObjectCreated:*"),
+        "Expected event in response, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_put_notification_nonexistent_bucket_returns_404() {
+    let provider = new_provider().await;
+
+    let xml = make_notification_xml(
+        "arn:aws:sqs:us-east-1:000000000000:queue",
+        "s3:ObjectCreated:*",
+    );
+    let resp = provider
+        .dispatch(&make_notification_ctx("PUT", "ghost-bucket", &xml))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
+    assert!(
+        body.contains("NoSuchBucket"),
+        "Expected NoSuchBucket error, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_notification_nonexistent_bucket_returns_404() {
+    let provider = new_provider().await;
+
+    // GET notification config on a bucket that was never created must return 404
+    let resp = provider
+        .dispatch(&make_notification_ctx("GET", "never-created-bucket", b""))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        404,
+        "expected 404 for GET notification on nonexistent bucket, got: {}",
+        std::str::from_utf8(resp.body.as_bytes()).unwrap()
+    );
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
+    assert!(
+        body.contains("NoSuchBucket"),
+        "Expected NoSuchBucket error, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_notification_empty_before_configuration() {
+    let provider = new_provider().await;
+
+    provider
+        .dispatch(&make_ctx("PUT", "/empty-notif-bucket", b""))
+        .await
+        .unwrap();
+
+    let get_resp = provider
+        .dispatch(&make_notification_ctx("GET", "empty-notif-bucket", b""))
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status_code, 200);
+    let body = std::str::from_utf8(get_resp.body.as_bytes()).unwrap();
+    assert!(
+        body.contains("NotificationConfiguration"),
+        "Expected empty NotificationConfiguration element, got: {body}"
+    );
+    // Should have no QueueConfiguration, TopicConfiguration, or CloudFunctionConfiguration
+    assert!(
+        !body.contains("QueueConfiguration"),
+        "Expected no queue configs before PUT, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_put_notification_overwrites_previous_config() {
+    let provider = new_provider().await;
+
+    provider
+        .dispatch(&make_ctx("PUT", "/overwrite-notif-bucket", b""))
+        .await
+        .unwrap();
+
+    // First config
+    let xml1 = make_notification_xml(
+        "arn:aws:sqs:us-east-1:000000000000:queue-one",
+        "s3:ObjectCreated:*",
+    );
+    provider
+        .dispatch(&make_notification_ctx(
+            "PUT",
+            "overwrite-notif-bucket",
+            &xml1,
+        ))
+        .await
+        .unwrap();
+
+    // Second config replaces first
+    let xml2 = make_notification_xml(
+        "arn:aws:sqs:us-east-1:000000000000:queue-two",
+        "s3:ObjectRemoved:*",
+    );
+    provider
+        .dispatch(&make_notification_ctx(
+            "PUT",
+            "overwrite-notif-bucket",
+            &xml2,
+        ))
+        .await
+        .unwrap();
+
+    let get_resp = provider
+        .dispatch(&make_notification_ctx("GET", "overwrite-notif-bucket", b""))
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status_code, 200);
+    let body = std::str::from_utf8(get_resp.body.as_bytes()).unwrap();
+    assert!(
+        body.contains("queue-two"),
+        "Expected second queue ARN, got: {body}"
+    );
+    assert!(
+        !body.contains("queue-one"),
+        "Old queue ARN should be gone, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_put_notification_sns_topic_configuration() {
+    let provider = new_provider().await;
+
+    provider
+        .dispatch(&make_ctx("PUT", "/sns-notif-bucket", b""))
+        .await
+        .unwrap();
+
+    let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <TopicConfiguration>
+    <Id>sns-notif</Id>
+    <Topic>arn:aws:sns:us-east-1:000000000000:my-topic</Topic>
+    <Event>s3:ObjectCreated:Put</Event>
+  </TopicConfiguration>
+</NotificationConfiguration>"#;
+
+    let put_resp = provider
+        .dispatch(&make_notification_ctx("PUT", "sns-notif-bucket", xml))
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status_code, 200);
+
+    let get_resp = provider
+        .dispatch(&make_notification_ctx("GET", "sns-notif-bucket", b""))
+        .await
+        .unwrap();
+    assert_eq!(
+        get_resp.status_code,
+        200,
+        "GET notification config failed: {}",
+        std::str::from_utf8(get_resp.body.as_bytes()).unwrap_or("")
+    );
+    let body = std::str::from_utf8(get_resp.body.as_bytes()).unwrap();
+    assert!(
+        body.contains("TopicConfiguration"),
+        "Expected TopicConfiguration, got: {body}"
+    );
+    assert!(
+        body.contains("arn:aws:sns:us-east-1:000000000000:my-topic"),
+        "Expected SNS topic ARN, got: {body}"
+    );
+}

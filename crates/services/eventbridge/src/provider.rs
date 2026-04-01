@@ -5,21 +5,33 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use openstack_service_framework::traits::{
-    DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
+    CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
+    ServiceProvider,
 };
+use openstack_service_framework::xml::url_encode;
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
+use tracing::warn;
 
 use crate::store::{EventBridgeStore, EventBus, EventRule, RuleTarget};
 
 pub struct EventBridgeProvider {
     store: Arc<AccountRegionBundle<EventBridgeStore>>,
+    dispatcher: Option<Arc<dyn CrossServiceDispatcher>>,
 }
 
 impl EventBridgeProvider {
     pub fn new() -> Self {
         Self {
             store: Arc::new(AccountRegionBundle::new()),
+            dispatcher: None,
+        }
+    }
+
+    pub fn new_with_dispatcher(dispatcher: Arc<dyn CrossServiceDispatcher>) -> Self {
+        Self {
+            store: Arc::new(AccountRegionBundle::new()),
+            dispatcher: Some(dispatcher),
         }
     }
 }
@@ -58,29 +70,155 @@ fn json_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     }
 }
 
-fn disabled_service_error(service: &str) -> DispatchResponse {
-    DispatchResponse {
-        status_code: 501,
-        body: ResponseBody::Buffered(Bytes::from(
-            serde_json::to_vec(&json!({
-                // Keep InternalFailure for LocalStack parity on disabled EventBridge PutEvents.
-                "__type": "InternalFailure",
-                "message": format!(
-                    "Service '{service}' is not enabled. Please check your 'SERVICES' configuration variable."
-                ),
-            }))
-            .unwrap(),
-        )),
-        content_type: Cow::Borrowed("application/json"),
-        headers: Vec::new(),
-    }
-}
-
 fn str_param(ctx: &RequestContext, key: &str) -> Option<String> {
     ctx.request_body
         .get(key)
         .and_then(|v| v.as_str())
         .map(String::from)
+}
+
+// ---------------------------------------------------------------------------
+// Event pattern matching
+// ---------------------------------------------------------------------------
+
+/// Returns true if the event matches the rule's event_pattern.
+///
+/// Pattern matching follows the EventBridge pattern specification:
+/// - Each field in the pattern must exist in the event
+/// - Arrays in pattern mean "any of these values" (OR)
+/// - Nested objects recurse
+fn event_matches_pattern(event: &Value, pattern: &Option<Value>) -> bool {
+    let Some(pat) = pattern else {
+        // No pattern = schedule rule, doesn't match PutEvents
+        return false;
+    };
+    matches_value(event, pat)
+}
+
+fn matches_value(event: &Value, pattern: &Value) -> bool {
+    match (event, pattern) {
+        (Value::Object(ev_map), Value::Object(pat_map)) => {
+            for (key, pat_val) in pat_map {
+                let ev_val = ev_map.get(key).unwrap_or(&Value::Null);
+                if !matches_value(ev_val, pat_val) {
+                    return false;
+                }
+            }
+            true
+        }
+        (ev_val, Value::Array(alternatives)) => {
+            // Pattern array = OR: event value must equal one of the alternatives.
+            // When the event value is itself an array, check if any element matches.
+            alternatives.iter().any(|alt| {
+                if let Value::Object(condition) = alt {
+                    // Condition like {"prefix": "foo"} or {"exists": true}
+                    if let Some(prefix) = condition.get("prefix").and_then(|v| v.as_str()) {
+                        return ev_val.as_str().is_some_and(|s| s.starts_with(prefix));
+                    }
+                    if let Some(exists) = condition.get("exists").and_then(|v| v.as_bool()) {
+                        return if exists {
+                            !matches!(ev_val, Value::Null)
+                        } else {
+                            matches!(ev_val, Value::Null)
+                        };
+                    }
+                    // Warn on unrecognised condition keys so users know they won't be evaluated.
+                    let unknown_keys: Vec<&str> = condition.keys().map(String::as_str).collect();
+                    warn!(
+                        keys = ?unknown_keys,
+                        "EventBridge: unrecognised rule condition key(s) — condition will not match"
+                    );
+                    return false;
+                }
+                // If the event value is an array, check if any element matches the alternative
+                if let Value::Array(ev_arr) = ev_val {
+                    return ev_arr.iter().any(|elem| elem == alt);
+                }
+                ev_val == alt
+            })
+        }
+        _ => event == pattern,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simple URL encoding for form-encoded dispatch bodies
+// ---------------------------------------------------------------------------
+
+// simple_url_encode delegates to the shared helper in openstack_service_framework
+#[inline(always)]
+fn simple_url_encode(s: &str) -> String {
+    url_encode(s)
+}
+
+// ---------------------------------------------------------------------------
+// Target dispatch helper
+// ---------------------------------------------------------------------------
+
+async fn dispatch_to_target(
+    dispatcher: &dyn CrossServiceDispatcher,
+    target_arn: &str,
+    account_id: &str,
+    region: &str,
+    input: Value,
+) {
+    // ARN format: arn:aws:<service>:<region>:<account>:<resource>
+    let parts: Vec<&str> = target_arn.split(':').collect();
+    if parts.len() < 6 {
+        warn!(target_arn = %target_arn, "EventBridge: target ARN has fewer than 6 segments, skipping dispatch");
+        return;
+    }
+    let service = parts[2]; // e.g. "sqs", "sns", "lambda"
+
+    let ctx = match service {
+        "sqs" => {
+            // arn:aws:sqs:<region>:<account>:QueueName
+            let queue_name = parts.last().unwrap_or(&"");
+            let message_body = serde_json::to_string(&input).unwrap_or_default();
+            // SQS provider reads from raw_body (form-encoded)
+            let body = format!(
+                "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F{account_id}%2F{queue_name}&MessageBody={}",
+                simple_url_encode(&message_body),
+            );
+            let mut ctx = RequestContext::new("sqs", "SendMessage", region, account_id);
+            ctx.method = "POST".to_string();
+            ctx.path = format!("/{account_id}/{queue_name}");
+            ctx.raw_body = Some(Bytes::from(body.into_bytes()));
+            ctx
+        }
+        "sns" => {
+            // SNS provider reads from raw_body (form-encoded), not request_body JSON.
+            let message = serde_json::to_string(&input).unwrap_or_default();
+            let body = format!(
+                "Action=Publish&TopicArn={}&Message={}",
+                simple_url_encode(target_arn),
+                simple_url_encode(&message),
+            );
+            let mut ctx = RequestContext::new("sns", "Publish", region, account_id);
+            ctx.method = "POST".to_string();
+            ctx.path = "/".to_string();
+            ctx.raw_body = Some(Bytes::from(body.into_bytes()));
+            ctx
+        }
+        "lambda" => {
+            // arn:aws:lambda:<region>:<account>:function:<name>
+            let function_name = parts.last().unwrap_or(&"");
+            let payload = serde_json::to_string(&input).unwrap_or_default();
+            let mut ctx = RequestContext::new("lambda", "Invoke", region, account_id);
+            ctx.method = "POST".to_string();
+            ctx.path = format!("/2015-03-31/functions/{function_name}/invocations");
+            ctx.raw_body = Some(Bytes::from(payload.into_bytes()));
+            ctx
+        }
+        _ => {
+            warn!(service = %service, target_arn = %target_arn, "EventBridge: unsupported target service");
+            return;
+        }
+    };
+
+    if let Err(e) = dispatcher.dispatch_to(&ctx).await {
+        warn!(err = %e, target_arn = %target_arn, "EventBridge: target dispatch failed");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +509,117 @@ impl ServiceProvider for EventBridgeProvider {
             // ----------------------------------------------------------------
             // PutEvents
             // ----------------------------------------------------------------
-            "PutEvents" => Ok(disabled_service_error("events")),
+            "PutEvents" => {
+                let entries = match ctx.request_body.get("Entries").and_then(|v| v.as_array()) {
+                    Some(e) => e.clone(),
+                    None => return Ok(json_error("ValidationError", "Entries is required", 400)),
+                };
+
+                let mut result_entries: Vec<Value> = Vec::new();
+
+                // Gather matching rules + targets up front so we can async-dispatch after
+                let mut dispatch_targets: Vec<(String, String, Value)> = Vec::new(); // (target_arn, target_id, input)
+
+                {
+                    let Some(store) = self.store.get(account_id, region) else {
+                        // No rules registered — accept but no routing
+                        for _ in &entries {
+                            result_entries
+                                .push(json!({ "EventId": uuid::Uuid::new_v4().to_string() }));
+                        }
+                        return Ok(json_ok(json!({
+                            "FailedEntryCount": 0,
+                            "Entries": result_entries,
+                        })));
+                    };
+
+                    for entry in &entries {
+                        let event_id = uuid::Uuid::new_v4().to_string();
+                        result_entries.push(json!({ "EventId": event_id }));
+
+                        // Determine which bus this event targets
+                        let bus_name = entry
+                            .get("EventBusName")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("default")
+                            .to_string();
+                        let source = entry.get("Source").and_then(|v| v.as_str()).unwrap_or("");
+                        let detail_type = entry
+                            .get("DetailType")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        // Detail arrives as a JSON string in PutEvents; parse it so
+                        // rules matching detail.* fields can fire correctly.
+                        let detail = entry
+                            .get("Detail")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or(Value::Object(Default::default()));
+
+                        // Build the full CloudWatch event envelope
+                        let event_envelope = json!({
+                            "id": event_id,
+                            "version": "0",
+                            "account": account_id,
+                            "region": region,
+                            "source": source,
+                            "detail-type": detail_type,
+                            "detail": detail,
+                            "time": Utc::now().to_rfc3339(),
+                        });
+
+                        // Match against enabled rules on this bus (exact bus match only)
+                        for rule in store.rules.values() {
+                            if rule.state != "ENABLED" {
+                                continue;
+                            }
+                            if rule.event_bus_name != bus_name {
+                                continue;
+                            }
+                            if !event_matches_pattern(&event_envelope, &rule.event_pattern) {
+                                continue;
+                            }
+                            for target in rule.targets.values() {
+                                let input = if let Some(literal) = &target.input {
+                                    serde_json::from_str(literal).unwrap_or_else(|_| json!(literal))
+                                } else {
+                                    event_envelope.clone()
+                                };
+                                dispatch_targets.push((
+                                    target.arn.clone(),
+                                    target.id.clone(),
+                                    input,
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Dispatch to targets via cross-service dispatcher (fire-and-forget)
+                if let Some(dispatcher) = &self.dispatcher {
+                    for (target_arn, _target_id, input) in dispatch_targets {
+                        let dispatcher = Arc::clone(dispatcher);
+                        let account_id = account_id.to_string();
+                        let region = region.to_string();
+                        tokio::spawn(async move {
+                            dispatch_to_target(
+                                &*dispatcher,
+                                &target_arn,
+                                &account_id,
+                                &region,
+                                input,
+                            )
+                            .await;
+                        });
+                    }
+                }
+
+                Ok(json_ok(json!({
+                    "FailedEntryCount": 0u32,
+                    "Entries": result_entries,
+                })))
+            }
 
             // ----------------------------------------------------------------
             // DescribeRule

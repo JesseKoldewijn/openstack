@@ -49,8 +49,135 @@ async fn create_stream(p: &KinesisProvider, name: &str, shard_count: u32) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tag operations
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_add_tags_to_stream() {
+    let p = KinesisProvider::new();
+    create_stream(&p, "tag-stream", 1).await;
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "AddTagsToStream",
+            json!({
+                "StreamName": "tag-stream",
+                "Tags": { "env": "prod", "team": "backend" },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+}
+
+#[tokio::test]
+async fn test_list_tags_for_stream() {
+    let p = KinesisProvider::new();
+    create_stream(&p, "list-tag-stream", 1).await;
+
+    p.dispatch(&make_ctx(
+        "AddTagsToStream",
+        json!({ "StreamName": "list-tag-stream", "Tags": { "k1": "v1", "k2": "v2" } }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListTagsForStream",
+            json!({ "StreamName": "list-tag-stream" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    let tags = b["Tags"].as_array().unwrap();
+    assert_eq!(tags.len(), 2);
+    let found_k1 = tags.iter().any(|t| t["Key"] == "k1" && t["Value"] == "v1");
+    let found_k2 = tags.iter().any(|t| t["Key"] == "k2" && t["Value"] == "v2");
+    assert!(found_k1, "k1=v1 tag not found");
+    assert!(found_k2, "k2=v2 tag not found");
+    assert_eq!(b["HasMoreTags"], false);
+}
+
+#[tokio::test]
+async fn test_remove_tags_from_stream() {
+    let p = KinesisProvider::new();
+    create_stream(&p, "rm-tag-stream", 1).await;
+
+    p.dispatch(&make_ctx(
+        "AddTagsToStream",
+        json!({ "StreamName": "rm-tag-stream", "Tags": { "keep": "yes", "remove": "me" } }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "RemoveTagsFromStream",
+            json!({ "StreamName": "rm-tag-stream", "TagKeys": ["remove"] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+
+    let list_resp = p
+        .dispatch(&make_ctx(
+            "ListTagsForStream",
+            json!({ "StreamName": "rm-tag-stream" }),
+        ))
+        .await
+        .unwrap();
+    let tags = body(&list_resp)["Tags"].as_array().unwrap().clone();
+    assert_eq!(tags.len(), 1, "should have 1 tag left, got: {tags:?}");
+    assert_eq!(tags[0]["Key"], "keep");
+}
+
+#[tokio::test]
+async fn test_add_tags_stream_not_found() {
+    let p = KinesisProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "AddTagsToStream",
+            json!({ "StreamName": "nonexistent", "Tags": { "k": "v" } }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn test_add_tags_overwrites_existing_key() {
+    let p = KinesisProvider::new();
+    create_stream(&p, "overwrite-tag-stream", 1).await;
+
+    p.dispatch(&make_ctx(
+        "AddTagsToStream",
+        json!({ "StreamName": "overwrite-tag-stream", "Tags": { "color": "red" } }),
+    ))
+    .await
+    .unwrap();
+
+    p.dispatch(&make_ctx(
+        "AddTagsToStream",
+        json!({ "StreamName": "overwrite-tag-stream", "Tags": { "color": "blue" } }),
+    ))
+    .await
+    .unwrap();
+
+    let list_resp = p
+        .dispatch(&make_ctx(
+            "ListTagsForStream",
+            json!({ "StreamName": "overwrite-tag-stream" }),
+        ))
+        .await
+        .unwrap();
+    let tags = body(&list_resp)["Tags"].as_array().unwrap().clone();
+    assert_eq!(tags.len(), 1, "should have exactly 1 tag after overwrite");
+    assert_eq!(tags[0]["Value"], "blue");
+}
 
 #[tokio::test]
 async fn test_create_and_list_streams() {
@@ -403,4 +530,46 @@ async fn test_describe_stream_summary() {
         "summary-stream"
     );
     assert_eq!(b["StreamDescriptionSummary"]["OpenShardCount"], 2);
+}
+
+#[tokio::test]
+async fn test_list_tags_stream_not_found() {
+    let p = KinesisProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListTagsForStream",
+            json!({ "StreamName": "nonexistent-stream" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing stream, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn test_remove_tags_stream_not_found() {
+    let p = KinesisProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "RemoveTagsFromStream",
+            json!({ "StreamName": "nonexistent-stream", "TagKeys": ["k1"] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing stream, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
 }

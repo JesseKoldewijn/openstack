@@ -5,14 +5,18 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
 use chrono::Utc;
+use hmac::{Hmac, Mac};
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
+use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::store::{KeyState, KmsKey, KmsStore};
+
+type HmacSha256 = Hmac<Sha256>;
 
 pub struct KmsProvider {
     store: Arc<AccountRegionBundle<KmsStore>>,
@@ -475,36 +479,229 @@ impl ServiceProvider for KmsProvider {
             }
 
             "Sign" => {
-                // Stub: return a fake signature
-                let key_id = str_param(ctx, "KeyId").unwrap_or_default();
+                // HMAC-SHA256 deterministic sign: signature = HMAC-SHA256(key_material, message)
+                // This allows Verify to corroborate the signature without external state.
+                let key_id = match str_param(ctx, "KeyId") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error("ValidationException", "KeyId is required", 400));
+                    }
+                };
+                let message_b64 = match str_param(ctx, "Message") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Message is required",
+                            400,
+                        ));
+                    }
+                };
+                let signing_algorithm = match str_param(ctx, "SigningAlgorithm").as_deref() {
+                    Some("HMAC_SHA_256") | Some("HMAC_SHA256") => "HMAC_SHA_256",
+                    Some(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "SigningAlgorithm must be HMAC_SHA_256",
+                            400,
+                        ));
+                    }
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "SigningAlgorithm is required",
+                            400,
+                        ));
+                    }
+                };
+
                 let store = self.store.get(account_id, region);
-                let key_arn = store
-                    .as_ref()
-                    .and_then(|s| s.resolve_key(&key_id))
-                    .map(|k| k.arn.clone())
-                    .unwrap_or_else(|| format!("arn:aws:kms:{region}:{account_id}:key/{key_id}"));
-                let sig = B64.encode(rand_hex(64).as_bytes());
+                let (key_arn, key_material_hex, key_state) =
+                    match store.as_ref().and_then(|s| s.resolve_key(&key_id)) {
+                        Some(k) => (k.arn.clone(), k.key_material.clone(), k.key_state.clone()),
+                        None => {
+                            return Ok(json_error(
+                                "NotFoundException",
+                                &format!("Key '{key_id}' not found"),
+                                400,
+                            ));
+                        }
+                    };
+
+                if key_state != KeyState::Enabled {
+                    return Ok(json_error(
+                        "DisabledException",
+                        "Key is disabled or pending deletion",
+                        400,
+                    ));
+                }
+
+                let key_bytes = match hex::decode(&key_material_hex) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Invalid key material",
+                            400,
+                        ));
+                    }
+                };
+                let message_bytes = match B64.decode(message_b64.as_bytes()) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Message must be valid base64",
+                            400,
+                        ));
+                    }
+                };
+
+                let mut mac = match HmacSha256::new_from_slice(&key_bytes) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "KMSInternalException",
+                            "Failed to initialize HMAC",
+                            500,
+                        ));
+                    }
+                };
+                mac.update(&message_bytes);
+                let sig_bytes = mac.finalize().into_bytes();
+                let sig = B64.encode(sig_bytes);
+
                 Ok(json_ok(json!({
                     "Signature": sig,
-                    "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256",
+                    "SigningAlgorithm": signing_algorithm,
                     "KeyId": key_arn,
                 })))
             }
 
             "Verify" => {
-                // Stub: always return valid
-                let key_id = str_param(ctx, "KeyId").unwrap_or_default();
+                // Re-compute HMAC and compare to the provided signature.
+                let key_id = match str_param(ctx, "KeyId") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error("ValidationException", "KeyId is required", 400));
+                    }
+                };
+                let message_b64 = match str_param(ctx, "Message") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Message is required",
+                            400,
+                        ));
+                    }
+                };
+                let provided_sig_b64 = match str_param(ctx, "Signature") {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Signature is required",
+                            400,
+                        ));
+                    }
+                };
+                let signing_algorithm = match str_param(ctx, "SigningAlgorithm").as_deref() {
+                    Some("HMAC_SHA_256") | Some("HMAC_SHA256") => "HMAC_SHA_256",
+                    Some(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "SigningAlgorithm must be HMAC_SHA_256",
+                            400,
+                        ));
+                    }
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "SigningAlgorithm is required",
+                            400,
+                        ));
+                    }
+                };
+
                 let store = self.store.get(account_id, region);
-                let key_arn = store
-                    .as_ref()
-                    .and_then(|s| s.resolve_key(&key_id))
-                    .map(|k| k.arn.clone())
-                    .unwrap_or_else(|| format!("arn:aws:kms:{region}:{account_id}:key/{key_id}"));
-                Ok(json_ok(json!({
-                    "KeyId": key_arn,
-                    "SignatureValid": true,
-                    "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256",
-                })))
+                let (key_arn, key_material_hex, key_state) =
+                    match store.as_ref().and_then(|s| s.resolve_key(&key_id)) {
+                        Some(k) => (k.arn.clone(), k.key_material.clone(), k.key_state.clone()),
+                        None => {
+                            return Ok(json_error(
+                                "NotFoundException",
+                                &format!("Key '{key_id}' not found"),
+                                400,
+                            ));
+                        }
+                    };
+
+                if key_state != KeyState::Enabled {
+                    return Ok(json_error(
+                        "DisabledException",
+                        "Key is disabled or pending deletion",
+                        400,
+                    ));
+                }
+
+                let key_bytes = match hex::decode(&key_material_hex) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Invalid key material",
+                            400,
+                        ));
+                    }
+                };
+                let message_bytes = match B64.decode(message_b64.as_bytes()) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Message must be valid base64",
+                            400,
+                        ));
+                    }
+                };
+                let provided_sig = match B64.decode(provided_sig_b64.as_bytes()) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Signature must be valid base64",
+                            400,
+                        ));
+                    }
+                };
+
+                let mut mac = match HmacSha256::new_from_slice(&key_bytes) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        return Ok(json_error(
+                            "KMSInternalException",
+                            "Failed to initialize HMAC",
+                            500,
+                        ));
+                    }
+                };
+                mac.update(&message_bytes);
+                let valid = mac.verify_slice(&provided_sig).is_ok();
+
+                if valid {
+                    Ok(json_ok(json!({
+                        "KeyId": key_arn,
+                        "SignatureValid": true,
+                        "SigningAlgorithm": signing_algorithm,
+                    })))
+                } else {
+                    Ok(json_error(
+                        "KMSInvalidSignatureException",
+                        "The request was rejected because the specified signing algorithm is not supported for the given key type, or the signature does not match the message.",
+                        400,
+                    ))
+                }
             }
 
             _ => Ok(json_error(

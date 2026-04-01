@@ -594,9 +594,18 @@ fn register_services(
     let mut persistable_stores: Vec<std::sync::Arc<dyn openstack_state::PersistableStore>> =
         Vec::new();
 
+    // Build a cross-service dispatcher backed by this manager.
+    // EventBridge, S3, and SNS use it to fan out to SQS/SNS/Lambda.
+    let dispatcher: std::sync::Arc<
+        dyn openstack_service_framework::traits::CrossServiceDispatcher,
+    > = std::sync::Arc::new(manager.clone());
+
     // S3 is special: it has a persistable store that shares state with the provider
     if services.is_enabled("s3") {
-        let s3_provider = openstack_s3::S3Provider::new(&config.directories.s3_objects);
+        let s3_provider = openstack_s3::S3Provider::new_with_dispatcher(
+            &config.directories.s3_objects,
+            std::sync::Arc::clone(&dispatcher),
+        );
         persistable_stores.push(s3_provider.persistable_store());
         manager.register("s3", s3_provider);
     }
@@ -610,7 +619,10 @@ fn register_services(
     }
 
     register!("sqs", openstack_sqs::SqsProvider::new());
-    register!("sns", openstack_sns::SnsProvider::new());
+    register!(
+        "sns",
+        openstack_sns::SnsProvider::new_with_dispatcher(std::sync::Arc::clone(&dispatcher))
+    );
     register!("dynamodb", openstack_dynamodb::DynamoDbProvider::new());
     register!("lambda", openstack_lambda::LambdaProvider::new());
     register!("iam", openstack_iam::IamProvider::new());
@@ -626,7 +638,12 @@ fn register_services(
     );
     register!("kinesis", openstack_kinesis::KinesisProvider::new());
     register!("firehose", openstack_firehose::FirehoseProvider::new());
-    register!("events", openstack_eventbridge::EventBridgeProvider::new());
+    register!(
+        "events",
+        openstack_eventbridge::EventBridgeProvider::new_with_dispatcher(std::sync::Arc::clone(
+            &dispatcher
+        ))
+    );
     register!(
         "states",
         openstack_stepfunctions::StepFunctionsProvider::new()

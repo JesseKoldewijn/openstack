@@ -227,7 +227,7 @@ async fn test_batch_get_image_by_tag() {
 }
 
 #[tokio::test]
-async fn test_describe_images_returns_localstack_unsupported_shape() {
+async fn test_describe_images_unknown_repo_returns_empty() {
     let p = EcrProvider::new();
     let resp = p
         .dispatch(&make_ctx(
@@ -236,12 +236,263 @@ async fn test_describe_images_returns_localstack_unsupported_shape() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 501, "{}", body_str(&resp));
-    assert_eq!(resp.content_type, "application/json");
-    let payload = body_json(&resp);
-    assert_eq!(payload["__type"], "InternalFailure");
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body_json(&resp);
+    assert_eq!(b["imageDetails"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_describe_images_lists_all_images() {
+    let p = EcrProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "desc-imgs-repo" }),
+    ))
+    .await
+    .unwrap();
+
+    // Push two images
+    for tag in &["v1.0", "v2.0"] {
+        p.dispatch(&make_ctx(
+            "PutImage",
+            json!({
+                "repositoryName": "desc-imgs-repo",
+                "imageManifest": format!(r#"{{"schemaVersion":2,"tag":"{}"}}"#, tag),
+                "imageTag": tag,
+            }),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeImages",
+            json!({ "repositoryName": "desc-imgs-repo" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body_json(&resp);
+    let details = b["imageDetails"].as_array().unwrap();
     assert_eq!(
-        payload["message"],
-        "API for service 'ecr' not yet implemented or pro feature - please check https://docs.localstack.cloud/references/coverage/ for further information"
+        details.len(),
+        2,
+        "expected 2 image details, got {details:?}"
+    );
+    for d in details {
+        assert!(d["imageDigest"].as_str().unwrap().starts_with("sha256:"));
+        assert_eq!(d["repositoryName"], "desc-imgs-repo");
+        let tags = d["imageTags"].as_array().unwrap();
+        assert_eq!(tags.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_describe_images_filter_by_digest() {
+    let p = EcrProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "filter-repo" }),
+    ))
+    .await
+    .unwrap();
+
+    let put_resp = p
+        .dispatch(&make_ctx(
+            "PutImage",
+            json!({
+                "repositoryName": "filter-repo",
+                "imageManifest": r#"{"schemaVersion":2}"#,
+                "imageTag": "target",
+            }),
+        ))
+        .await
+        .unwrap();
+    let digest = body_json(&put_resp)["image"]["imageId"]["imageDigest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Push a second image we should NOT see
+    p.dispatch(&make_ctx(
+        "PutImage",
+        json!({
+            "repositoryName": "filter-repo",
+            "imageManifest": r#"{"schemaVersion":2,"other":true}"#,
+            "imageTag": "other",
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeImages",
+            json!({
+                "repositoryName": "filter-repo",
+                "imageIds": [{ "imageDigest": digest }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let details = body_json(&resp)["imageDetails"].as_array().unwrap().clone();
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["imageDigest"], digest);
+}
+
+#[tokio::test]
+async fn test_describe_images_missing_repository_name_fails() {
+    let p = EcrProvider::new();
+    // DescribeImages without repositoryName must be rejected with a 400.
+    let resp = p
+        .dispatch(&make_ctx("DescribeImages", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing repositoryName, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body_json(&resp);
+    assert_eq!(
+        b["__type"],
+        "InvalidParameterException",
+        "expected InvalidParameterException, got: {}",
+        body_str(&resp)
+    );
+    assert_eq!(
+        b["message"], "repositoryName required",
+        "expected 'repositoryName required' message"
+    );
+}
+
+#[tokio::test]
+async fn test_batch_delete_image_by_digest() {
+    let p = EcrProvider::new();
+    // Create repo and push an image
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "delete-test" }),
+    ))
+    .await
+    .unwrap();
+    let push_resp = p
+        .dispatch(&make_ctx(
+            "PutImage",
+            json!({ "repositoryName": "delete-test", "imageManifest": "{}", "imageTag": "v1.0" }),
+        ))
+        .await
+        .unwrap();
+    let digest = serde_json::from_str::<Value>(&body_str(&push_resp)).unwrap()["image"]["imageId"]
+        ["imageDigest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Delete by digest
+    let del_resp = p
+        .dispatch(&make_ctx(
+            "BatchDeleteImage",
+            json!({ "repositoryName": "delete-test", "imageIds": [{ "imageDigest": digest }] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status_code, 200);
+    let body: Value = serde_json::from_str(&body_str(&del_resp)).unwrap();
+    assert_eq!(body["failures"].as_array().unwrap().len(), 0);
+    assert_eq!(body["imageIds"].as_array().unwrap().len(), 1);
+
+    // Confirm image is gone
+    let list_resp = p
+        .dispatch(&make_ctx(
+            "ListImages",
+            json!({ "repositoryName": "delete-test" }),
+        ))
+        .await
+        .unwrap();
+    let list_body: Value = serde_json::from_str(&body_str(&list_resp)).unwrap();
+    assert_eq!(list_body["imageIds"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_batch_delete_image_by_tag() {
+    let p = EcrProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "tag-del-test" }),
+    ))
+    .await
+    .unwrap();
+    p.dispatch(&make_ctx(
+        "PutImage",
+        json!({ "repositoryName": "tag-del-test", "imageManifest": "{}", "imageTag": "latest" }),
+    ))
+    .await
+    .unwrap();
+
+    let del_resp = p
+        .dispatch(&make_ctx(
+            "BatchDeleteImage",
+            json!({ "repositoryName": "tag-del-test", "imageIds": [{ "imageTag": "latest" }] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status_code, 200);
+    let body: Value = serde_json::from_str(&body_str(&del_resp)).unwrap();
+    assert_eq!(body["failures"].as_array().unwrap().len(), 0);
+    assert_eq!(body["imageIds"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_batch_delete_image_not_found_returns_failure() {
+    let p = EcrProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateRepository",
+        json!({ "repositoryName": "notfound-test" }),
+    ))
+    .await
+    .unwrap();
+
+    let del_resp = p
+        .dispatch(&make_ctx(
+            "BatchDeleteImage",
+            json!({ "repositoryName": "notfound-test", "imageIds": [{ "imageDigest": "sha256:nonexistent" }] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status_code, 200);
+    let body: Value = serde_json::from_str(&body_str(&del_resp)).unwrap();
+    assert_eq!(body["failures"].as_array().unwrap().len(), 1);
+    assert_eq!(body["failures"][0]["failureCode"], "ImageNotFoundException");
+}
+
+#[tokio::test]
+async fn test_batch_delete_image_missing_repo_returns_400() {
+    let p = EcrProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("BatchDeleteImage", json!({ "imageIds": [] })))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing repositoryName in BatchDeleteImage, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body_json(&resp);
+    assert_eq!(
+        b["__type"],
+        "InvalidParameterException",
+        "expected InvalidParameterException, got: {}",
+        body_str(&resp)
+    );
+    assert_eq!(
+        b["message"], "repositoryName required",
+        "expected 'repositoryName required' message"
     );
 }

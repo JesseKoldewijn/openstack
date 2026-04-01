@@ -554,8 +554,243 @@ async fn test_list_aliases() {
 }
 
 // ---------------------------------------------------------------------------
-// Docker integration tests (require Docker — skipped in CI unless --include-ignored)
+// AddPermission / GetPolicy / RemovePermission
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_add_permission_happy_path() {
+    let p = LambdaProvider::new();
+    create_function(&p, "perm-func").await;
+
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "AddPermission",
+            json!({
+                "StatementId": "allow-sns",
+                "Action": "lambda:InvokeFunction",
+                "Principal": "sns.amazonaws.com",
+                "SourceArn": "arn:aws:sns:us-east-1:000000000000:my-topic",
+            }),
+            "/2015-03-31/functions/perm-func/policy",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    let stmt_str = b["Statement"]
+        .as_str()
+        .expect("Statement must be a JSON string");
+    let stmt: Value = serde_json::from_str(stmt_str).expect("Statement must be valid JSON");
+    assert_eq!(stmt["Sid"], "allow-sns");
+    assert_eq!(stmt["Effect"], "Allow");
+}
+
+#[tokio::test]
+async fn test_add_permission_function_not_found() {
+    let p = LambdaProvider::new();
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "AddPermission",
+            json!({
+                "StatementId": "s1",
+                "Action": "lambda:InvokeFunction",
+                "Principal": "apigateway.amazonaws.com",
+            }),
+            "/2015-03-31/functions/no-such-fn/policy",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    assert_eq!(body(&resp)["__type"], "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn test_get_policy_happy_path() {
+    let p = LambdaProvider::new();
+    create_function(&p, "get-policy-func").await;
+
+    // Add a permission first
+    p.dispatch(&make_ctx_with_path(
+        "AddPermission",
+        json!({
+            "StatementId": "stmt-a",
+            "Action": "lambda:InvokeFunction",
+            "Principal": "events.amazonaws.com",
+        }),
+        "/2015-03-31/functions/get-policy-func/policy",
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "GetPolicy",
+            json!({}),
+            "/2015-03-31/functions/get-policy-func/policy",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    let policy_str = b["Policy"].as_str().expect("Policy must be a JSON string");
+    let policy: Value = serde_json::from_str(policy_str).expect("Policy must be valid JSON");
+    assert_eq!(policy["Version"], "2012-10-17");
+    let stmts = policy["Statement"].as_array().unwrap();
+    assert_eq!(stmts.len(), 1);
+    assert_eq!(stmts[0]["Sid"], "stmt-a");
+}
+
+#[tokio::test]
+async fn test_get_policy_no_policy_returns_404() {
+    let p = LambdaProvider::new();
+    create_function(&p, "no-policy-func").await;
+
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "GetPolicy",
+            json!({}),
+            "/2015-03-31/functions/no-policy-func/policy",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    let b = body(&resp);
+    assert_eq!(
+        b["__type"], "ResourceNotFoundException",
+        "expected ResourceNotFoundException error type, got: {}",
+        b["__type"]
+    );
+    assert!(
+        b["Message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("policy"),
+        "expected no-policy message, got: {}",
+        b["Message"]
+    );
+}
+
+#[tokio::test]
+async fn test_remove_permission() {
+    let p = LambdaProvider::new();
+    create_function(&p, "rm-perm-func").await;
+
+    // Add two permissions
+    for sid in &["s1", "s2"] {
+        p.dispatch(&make_ctx_with_path(
+            "AddPermission",
+            json!({
+                "StatementId": sid,
+                "Action": "lambda:InvokeFunction",
+                "Principal": "s3.amazonaws.com",
+            }),
+            "/2015-03-31/functions/rm-perm-func/policy",
+        ))
+        .await
+        .unwrap();
+    }
+
+    // Remove s1
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "RemovePermission",
+            json!({}),
+            "/2015-03-31/functions/rm-perm-func/policy/s1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 204, "{}", body_str(&resp));
+
+    // GetPolicy should now have only s2
+    let get_resp = p
+        .dispatch(&make_ctx_with_path(
+            "GetPolicy",
+            json!({}),
+            "/2015-03-31/functions/rm-perm-func/policy",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status_code, 200);
+    let policy: Value = serde_json::from_str(body(&get_resp)["Policy"].as_str().unwrap()).unwrap();
+    let stmts = policy["Statement"].as_array().unwrap();
+    assert_eq!(stmts.len(), 1, "only s2 should remain");
+    assert_eq!(stmts[0]["Sid"], "s2");
+}
+
+#[tokio::test]
+async fn test_remove_permission_missing_statement() {
+    let p = LambdaProvider::new();
+    create_function(&p, "rm-missing-func").await;
+
+    // Try to remove a statement that doesn't exist
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "RemovePermission",
+            json!({}),
+            "/2015-03-31/functions/rm-missing-func/policy/nonexistent-sid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        404,
+        "expected 404 for missing statement, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(
+        b["__type"], "ResourceNotFoundException",
+        "expected ResourceNotFoundException, got: {}",
+        b["__type"]
+    );
+}
+
+#[tokio::test]
+async fn test_add_permission_overwrites_same_sid() {
+    let p = LambdaProvider::new();
+    create_function(&p, "overwrite-sid-func").await;
+
+    // Add same Sid twice with different principals
+    for principal in &["sns.amazonaws.com", "sqs.amazonaws.com"] {
+        p.dispatch(&make_ctx_with_path(
+            "AddPermission",
+            json!({
+                "StatementId": "my-sid",
+                "Action": "lambda:InvokeFunction",
+                "Principal": principal,
+            }),
+            "/2015-03-31/functions/overwrite-sid-func/policy",
+        ))
+        .await
+        .unwrap();
+    }
+
+    let get_resp = p
+        .dispatch(&make_ctx_with_path(
+            "GetPolicy",
+            json!({}),
+            "/2015-03-31/functions/overwrite-sid-func/policy",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        get_resp.status_code,
+        200,
+        "GetPolicy failed: {}",
+        body_str(&get_resp)
+    );
+    let policy: Value = serde_json::from_str(body(&get_resp)["Policy"].as_str().unwrap()).unwrap();
+    let stmts = policy["Statement"].as_array().unwrap();
+    // Sid must be deduplicated — only the latest should remain
+    assert_eq!(stmts.len(), 1, "duplicate Sid must be overwritten");
+    // The surviving statement must have the second principal
+    assert_eq!(
+        stmts[0]["Principal"]["Service"], "sqs.amazonaws.com",
+        "surviving statement should have the second (overwriting) principal"
+    );
+}
 
 /// Create a minimal Python Lambda zip with a simple handler.
 #[allow(dead_code)]
@@ -730,4 +965,65 @@ def handler(event, context):
         resp.status_code,
         body_str(&resp)
     );
+}
+
+#[tokio::test]
+async fn test_remove_permission_function_not_found() {
+    let p = LambdaProvider::new();
+    // RemovePermission on a function that does not exist must return 404.
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "RemovePermission",
+            json!({}),
+            "/2015-03-31/functions/ghost-func/policy/some-sid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        404,
+        "expected 404 for missing function, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn test_remove_permission_statement_not_found() {
+    let p = LambdaProvider::new();
+    create_function(&p, "rm-missing-sid-func").await;
+
+    // Add a single permission first
+    p.dispatch(&make_ctx_with_path(
+        "AddPermission",
+        json!({
+            "StatementId": "real-sid",
+            "Action": "lambda:InvokeFunction",
+            "Principal": "s3.amazonaws.com",
+        }),
+        "/2015-03-31/functions/rm-missing-sid-func/policy",
+    ))
+    .await
+    .unwrap();
+
+    // RemovePermission with a non-existent StatementId must return 404.
+    let resp = p
+        .dispatch(&make_ctx_with_path(
+            "RemovePermission",
+            json!({}),
+            "/2015-03-31/functions/rm-missing-sid-func/policy/ghost-sid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        404,
+        "expected 404 for missing statement, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
 }

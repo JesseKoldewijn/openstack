@@ -243,3 +243,177 @@ async fn test_describe_key_with_full_arn_not_found_message_not_double_wrapped() 
         "Key 'arn:aws:kms:us-east-1:000000000000:key/nonexistent' does not exist"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sign / Verify (HMAC-SHA256 based)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_sign_returns_signature() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    let p = KmsProvider::new();
+    let key_id = create_key(&p).await;
+
+    let message = B64.encode(b"hello world");
+    let resp = p
+        .dispatch(&make_ctx(
+            "Sign",
+            json!({
+                "KeyId": key_id,
+                "Message": message,
+                "MessageType": "RAW",
+                "SigningAlgorithm": "HMAC_SHA256",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert!(b["Signature"].as_str().is_some(), "Signature field missing");
+    // KeyId in response is the full ARN
+    let key_id_str = b["KeyId"].as_str().unwrap();
+    assert!(
+        key_id_str.contains(&key_id),
+        "Expected KeyId ARN to contain {key_id}, got {key_id_str}"
+    );
+    assert_eq!(b["SigningAlgorithm"], "HMAC_SHA_256");
+}
+
+#[tokio::test]
+async fn test_verify_valid_signature() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    let p = KmsProvider::new();
+    let key_id = create_key(&p).await;
+
+    let message = B64.encode(b"sign me please");
+
+    // Sign first
+    let sign_resp = p
+        .dispatch(&make_ctx(
+            "Sign",
+            json!({
+                "KeyId": key_id,
+                "Message": message,
+                "MessageType": "RAW",
+                "SigningAlgorithm": "HMAC_SHA256",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sign_resp.status_code, 200, "{}", body_str(&sign_resp));
+    let signature = body(&sign_resp)["Signature"].as_str().unwrap().to_string();
+
+    // Verify with correct signature
+    let resp = p
+        .dispatch(&make_ctx(
+            "Verify",
+            json!({
+                "KeyId": key_id,
+                "Message": message,
+                "Signature": signature,
+                "MessageType": "RAW",
+                "SigningAlgorithm": "HMAC_SHA256",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert_eq!(b["SignatureValid"], true);
+    // KeyId in response is the full ARN
+    let key_id_str = b["KeyId"].as_str().unwrap();
+    assert!(
+        key_id_str.contains(&key_id),
+        "Expected KeyId ARN to contain {key_id}, got {key_id_str}"
+    );
+}
+
+#[tokio::test]
+async fn test_verify_invalid_signature() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    let p = KmsProvider::new();
+    let key_id = create_key(&p).await;
+
+    let message = B64.encode(b"some message");
+    let bad_signature = B64.encode(b"definitely-not-the-real-signature");
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "Verify",
+            json!({
+                "KeyId": key_id,
+                "Message": message,
+                "Signature": bad_signature,
+                "MessageType": "RAW",
+                "SigningAlgorithm": "HMAC_SHA256",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert_eq!(b["__type"], "KMSInvalidSignatureException");
+}
+
+#[tokio::test]
+async fn test_sign_key_not_found() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    let p = KmsProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "Sign",
+            json!({
+                "KeyId": "nonexistent-key",
+                "Message": B64.encode(b"msg"),
+                "MessageType": "RAW",
+                "SigningAlgorithm": "HMAC_SHA256",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    assert_eq!(body(&resp)["__type"], "NotFoundException");
+}
+
+#[tokio::test]
+async fn test_sign_verify_deterministic() {
+    // Signing the same message with the same key must produce the same signature.
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    let p = KmsProvider::new();
+    let key_id = create_key(&p).await;
+    let message = B64.encode(b"deterministic");
+
+    let sig1 = {
+        let r = p
+            .dispatch(&make_ctx(
+                "Sign",
+                json!({
+                    "KeyId": key_id,
+                    "Message": message,
+                    "MessageType": "RAW",
+                    "SigningAlgorithm": "HMAC_SHA256",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status_code, 200, "Sign failed: {}", body_str(&r));
+        body(&r)["Signature"].as_str().unwrap().to_string()
+    };
+    let sig2 = {
+        let r = p
+            .dispatch(&make_ctx(
+                "Sign",
+                json!({
+                    "KeyId": key_id,
+                    "Message": message,
+                    "MessageType": "RAW",
+                    "SigningAlgorithm": "HMAC_SHA256",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status_code, 200, "Sign failed: {}", body_str(&r));
+        body(&r)["Signature"].as_str().unwrap().to_string()
+    };
+    assert_eq!(sig1, sig2, "HMAC-based Sign must be deterministic");
+}

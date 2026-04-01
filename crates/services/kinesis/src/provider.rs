@@ -791,16 +791,126 @@ impl ServiceProvider for KinesisProvider {
             // Tagging
             // ---------------------------------------------------------------
             "AddTagsToStream" => {
-                // No-op — we don't store tags on streams in this impl
+                let stream_name = match str_param(ctx, "StreamName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidArgumentException",
+                            "StreamName is required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                let stream = match store.streams.get_mut(stream_name) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Stream {stream_name} not found"),
+                            400,
+                        ));
+                    }
+                };
+                if let Some(tags_obj) = ctx.request_body.get("Tags").and_then(|v| v.as_object()) {
+                    // Compute how many net-new keys would be added (overwrites don't increase count)
+                    let new_key_count = tags_obj
+                        .keys()
+                        .filter(|k| !stream.tags.contains_key(*k))
+                        .count();
+                    if stream.tags.len() + new_key_count > 50 {
+                        return Ok(json_error(
+                            "InvalidArgumentException",
+                            "Cannot have more than 50 tags for a stream",
+                            400,
+                        ));
+                    }
+                    // All-or-nothing: only mutate after the limit check passes
+                    for (k, v) in tags_obj {
+                        if let Some(val) = v.as_str() {
+                            stream.tags.insert(k.clone(), val.to_string());
+                        }
+                    }
+                }
                 Ok(json_ok(json!({})))
             }
 
-            "ListTagsForStream" => Ok(json_ok(json!({
-                "Tags": [],
-                "HasMoreTags": false,
-            }))),
+            "ListTagsForStream" => {
+                let stream_name = match str_param(ctx, "StreamName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidArgumentException",
+                            "StreamName is required",
+                            400,
+                        ));
+                    }
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Stream {stream_name} not found"),
+                        400,
+                    ));
+                };
+                let stream = match store.streams.get(stream_name) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Stream {stream_name} not found"),
+                            400,
+                        ));
+                    }
+                };
+                let tags: Vec<Value> = stream
+                    .tags
+                    .iter()
+                    .map(|(k, v)| json!({ "Key": k, "Value": v }))
+                    .collect();
+                Ok(json_ok(json!({ "Tags": tags, "HasMoreTags": false })))
+            }
 
-            "RemoveTagsFromStream" => Ok(json_ok(json!({}))),
+            "RemoveTagsFromStream" => {
+                let stream_name = match str_param(ctx, "StreamName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidArgumentException",
+                            "StreamName is required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = match self.store.get_mut(account_id, region) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Stream {stream_name} not found"),
+                            400,
+                        ));
+                    }
+                };
+                let stream = match store.streams.get_mut(stream_name) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ResourceNotFoundException",
+                            &format!("Stream {stream_name} not found"),
+                            400,
+                        ));
+                    }
+                };
+                if let Some(keys_arr) = ctx.request_body.get("TagKeys").and_then(|v| v.as_array()) {
+                    for k in keys_arr {
+                        if let Some(key) = k.as_str() {
+                            stream.tags.remove(key);
+                        }
+                    }
+                }
+                Ok(json_ok(json!({})))
+            }
 
             // ---------------------------------------------------------------
             // Fallback

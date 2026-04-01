@@ -1,9 +1,15 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use openstack_eventbridge::EventBridgeProvider;
-use openstack_service_framework::traits::{DispatchResponse, RequestContext, ServiceProvider};
+use openstack_service_framework::traits::{
+    CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
+    ServiceProvider,
+};
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -203,7 +209,7 @@ async fn test_remove_targets() {
 }
 
 #[tokio::test]
-async fn test_put_events_returns_service_disabled_error() {
+async fn test_put_events_succeeds() {
     let p = EventBridgeProvider::new();
     let resp = p
         .dispatch(&make_ctx(
@@ -220,14 +226,120 @@ async fn test_put_events_returns_service_disabled_error() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status_code, 501);
-    assert_eq!(resp.content_type, "application/json");
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
     let b = body(&resp);
-    assert_eq!(b["__type"], "InternalFailure");
-    assert_eq!(
-        b["message"],
-        "Service 'events' is not enabled. Please check your 'SERVICES' configuration variable."
-    );
+    assert_eq!(b["FailedEntryCount"], 0);
+    let entries = b["Entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0]["EventId"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_put_events_multiple_entries() {
+    let p = EventBridgeProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    { "Source": "src.a", "DetailType": "TypeA", "Detail": "{}" },
+                    { "Source": "src.b", "DetailType": "TypeB", "Detail": "{}" },
+                    { "Source": "src.c", "DetailType": "TypeC", "Detail": "{}" },
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert_eq!(b["FailedEntryCount"], 0);
+    assert_eq!(b["Entries"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn test_put_events_routes_to_matching_rule_targets() {
+    let p = EventBridgeProvider::new();
+
+    // Create a rule that matches events from "myapp.backend"
+    p.dispatch(&make_ctx(
+        "PutRule",
+        json!({
+            "Name": "backend-rule",
+            "EventPattern": r#"{"source":["myapp.backend"]}"#,
+            "State": "ENABLED",
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // Add an SQS target
+    p.dispatch(&make_ctx(
+        "PutTargets",
+        json!({
+            "Rule": "backend-rule",
+            "Targets": [
+                { "Id": "t1", "Arn": "arn:aws:sqs:us-east-1:000000000000:my-queue" }
+            ]
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // PutEvents with a matching source
+    let resp = p
+        .dispatch(&make_ctx(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    {
+                        "Source": "myapp.backend",
+                        "DetailType": "OrderPlaced",
+                        "Detail": r#"{"orderId":"42"}"#,
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    // Routing attempted — no failed entries (dispatch target may or may not exist)
+    assert_eq!(b["FailedEntryCount"], 0);
+}
+
+#[tokio::test]
+async fn test_put_events_non_matching_event_does_not_fail() {
+    let p = EventBridgeProvider::new();
+
+    p.dispatch(&make_ctx(
+        "PutRule",
+        json!({
+            "Name": "strict-rule",
+            "EventPattern": r#"{"source":["only.this.source"]}"#,
+            "State": "ENABLED",
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // Event from a different source — rule should not match, but PutEvents still succeeds
+    let resp = p
+        .dispatch(&make_ctx(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    {
+                        "Source": "other.source",
+                        "DetailType": "Irrelevant",
+                        "Detail": "{}",
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    assert_eq!(body(&resp)["FailedEntryCount"], 0);
 }
 
 #[tokio::test]
@@ -282,5 +394,120 @@ async fn test_delete_rule() {
             .unwrap()
             .iter()
             .any(|r| r["Name"] == "del-rule")
+    );
+}
+
+#[tokio::test]
+async fn test_put_events_missing_entries_fails() {
+    let p = EventBridgeProvider::new();
+    // PutEvents without Entries must be rejected with 400.
+    let resp = p.dispatch(&make_ctx("PutEvents", json!({}))).await.unwrap();
+    assert_eq!(
+        resp.status_code,
+        400,
+        "expected 400 for missing Entries, got {}: {}",
+        resp.status_code,
+        body_str(&resp)
+    );
+    let b = body(&resp);
+    assert_eq!(
+        b["__type"],
+        "ValidationError",
+        "expected ValidationError error type, got: {}",
+        body_str(&resp)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Mock dispatcher for cross-service dispatch testing
+// ---------------------------------------------------------------------------
+
+struct MockDispatcher {
+    dispatched_ops: Arc<Mutex<Vec<String>>>,
+    notify: Arc<Notify>,
+}
+
+#[async_trait]
+impl CrossServiceDispatcher for MockDispatcher {
+    async fn dispatch_to(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
+        self.dispatched_ops
+            .lock()
+            .unwrap()
+            .push(ctx.operation.clone());
+        self.notify.notify_one();
+        Ok(DispatchResponse {
+            status_code: 200,
+            body: ResponseBody::Buffered(Bytes::from(b"{}".as_ref())),
+            content_type: std::borrow::Cow::Borrowed("application/json"),
+            headers: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_put_events_dispatches_to_sqs_target_via_mock() {
+    let dispatched_ops: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let notify = Arc::new(Notify::new());
+    let mock = MockDispatcher {
+        dispatched_ops: Arc::clone(&dispatched_ops),
+        notify: Arc::clone(&notify),
+    };
+    let p = EventBridgeProvider::new_with_dispatcher(Arc::new(mock));
+
+    // Rule matching events from "test.service"
+    p.dispatch(&make_ctx(
+        "PutRule",
+        json!({
+            "Name": "mock-rule",
+            "EventPattern": r#"{"source":["test.service"]}"#,
+            "State": "ENABLED",
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // SQS target
+    p.dispatch(&make_ctx(
+        "PutTargets",
+        json!({
+            "Rule": "mock-rule",
+            "Targets": [
+                { "Id": "sqs-target", "Arn": "arn:aws:sqs:us-east-1:000000000000:test-queue" }
+            ]
+        }),
+    ))
+    .await
+    .unwrap();
+
+    // Emit a matching event
+    let resp = p
+        .dispatch(&make_ctx(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    {
+                        "Source": "test.service",
+                        "DetailType": "TestEvent",
+                        "Detail": r#"{"key":"value"}"#,
+                    }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    assert_eq!(body(&resp)["FailedEntryCount"], 0);
+
+    // Wait for the spawned dispatch task to complete (deterministic, no sleep)
+    tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+        .await
+        .expect("dispatch task did not complete within 2s");
+
+    let ops = dispatched_ops.lock().unwrap();
+    assert!(
+        ops.iter().any(|op| op == "SendMessage"),
+        "expected a SendMessage dispatch to SQS target, got: {:?}",
+        *ops
     );
 }
