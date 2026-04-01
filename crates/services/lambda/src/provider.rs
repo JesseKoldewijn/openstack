@@ -1207,11 +1207,32 @@ impl ServiceProvider for LambdaProvider {
                     .ok_or_else(|| {
                         DispatchError::NotImplemented("FunctionName required".to_string())
                     })?;
-                let sid =
-                    str_field(body, "StatementId").unwrap_or_else(|| Uuid::new_v4().to_string());
-                let action = str_field(body, "Action")
-                    .unwrap_or_else(|| "lambda:InvokeFunction".to_string());
-                let principal = str_field(body, "Principal").unwrap_or_default();
+                let sid = match str_field(body, "StatementId").filter(|s| !s.is_empty()) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "StatementId is required",
+                            400,
+                        ));
+                    }
+                };
+                let action = match str_field(body, "Action").filter(|s| !s.is_empty()) {
+                    Some(a) => a,
+                    None => {
+                        return Ok(json_error("ValidationException", "Action is required", 400));
+                    }
+                };
+                let principal = match str_field(body, "Principal").filter(|s| !s.is_empty()) {
+                    Some(p) => p,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Principal is required",
+                            400,
+                        ));
+                    }
+                };
                 let source_arn = str_field(body, "SourceArn");
 
                 let mut store = self.store.get_or_create(account_id, region);

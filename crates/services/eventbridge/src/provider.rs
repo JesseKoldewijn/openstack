@@ -8,6 +8,7 @@ use openstack_service_framework::traits::{
     CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
     ServiceProvider,
 };
+use openstack_service_framework::xml::url_encode;
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
 use tracing::warn;
@@ -120,6 +121,13 @@ fn matches_value(event: &Value, pattern: &Value) -> bool {
                             matches!(ev_val, Value::Null)
                         };
                     }
+                    // Warn on unrecognised condition keys so users know they won't be evaluated.
+                    let unknown_keys: Vec<&str> = condition.keys().map(String::as_str).collect();
+                    warn!(
+                        keys = ?unknown_keys,
+                        "EventBridge: unrecognised rule condition key(s) — condition will not match"
+                    );
+                    return false;
                 }
                 ev_val == alt
             })
@@ -132,29 +140,10 @@ fn matches_value(event: &Value, pattern: &Value) -> bool {
 // Simple URL encoding for form-encoded dispatch bodies
 // ---------------------------------------------------------------------------
 
+// simple_url_encode delegates to the shared helper in openstack_service_framework
+#[inline(always)]
 fn simple_url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char);
-            }
-            _ => {
-                out.push('%');
-                out.push(
-                    char::from_digit((b >> 4) as u32, 16)
-                        .unwrap_or('0')
-                        .to_ascii_uppercase(),
-                );
-                out.push(
-                    char::from_digit((b & 0xf) as u32, 16)
-                        .unwrap_or('0')
-                        .to_ascii_uppercase(),
-                );
-            }
-        }
-    }
-    out
+    url_encode(s)
 }
 
 // ---------------------------------------------------------------------------

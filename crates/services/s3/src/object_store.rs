@@ -305,7 +305,7 @@ impl ObjectFileStore {
         const READ_BUF: usize = 512 * 1024; // 512 KiB
         let write_buf: usize = match content_length {
             Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
-            Some(len) if len > 50 * 1024 * 1024 => 8 * 1024 * 1024,   //  8 MiB for > 50 MiB
+            Some(len) if len >= 50 * 1024 * 1024 => 8 * 1024 * 1024,  //  8 MiB for >= 50 MiB
             Some(len) if len > 4 * 1024 * 1024 => 4 * 1024 * 1024,    //  4 MiB for > 4 MiB
             _ => 2 * 1024 * 1024,                                     //  2 MiB default
         };

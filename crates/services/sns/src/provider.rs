@@ -8,6 +8,7 @@ use openstack_service_framework::traits::{
     CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
     ServiceProvider,
 };
+use openstack_service_framework::xml::url_encode;
 use openstack_state::AccountRegionBundle;
 use tracing::{debug, warn};
 
@@ -103,29 +104,11 @@ fn escape_xml(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+// url_encode_value is now provided by openstack_service_framework::xml::url_encode
+// keeping a local alias for readability
+#[inline(always)]
 fn url_encode_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char);
-            }
-            _ => {
-                out.push('%');
-                out.push(
-                    char::from_digit((b >> 4) as u32, 16)
-                        .unwrap_or('0')
-                        .to_ascii_uppercase(),
-                );
-                out.push(
-                    char::from_digit((b & 0xf) as u32, 16)
-                        .unwrap_or('0')
-                        .to_ascii_uppercase(),
-                );
-            }
-        }
-    }
-    out
+    url_encode(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -782,21 +765,37 @@ impl ServiceProvider for SnsProvider {
             }
             // Write ops — acquire exclusive (write) lock
             other => {
-                let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                 match other {
-                    "CreateTopic" => handle_create_topic(&mut store, ctx, &params),
-                    "DeleteTopic" => handle_delete_topic(&mut store, &params),
-                    "SetTopicAttributes" => handle_set_topic_attributes(&mut store, &params),
-                    "Subscribe" => handle_subscribe(&mut store, ctx, &params),
-                    "Unsubscribe" => handle_unsubscribe(&mut store, &params),
-                    "SetSubscriptionAttributes" => {
-                        handle_set_subscription_attributes(&mut store, &params)
+                    "Publish" => {
+                        // Extract all data needed for publish under the write lock,
+                        // then drop the guard before awaiting fan-out to avoid holding
+                        // the write lock across async dispatch (deadlock risk if a
+                        // dispatched service calls back into SNS).
+                        let result = {
+                            let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                            handle_publish(&mut store, &params, &self.dispatcher, ctx).await
+                        };
+                        result
                     }
-                    "Publish" => handle_publish(&mut store, &params, &self.dispatcher, ctx).await,
-                    "PublishBatch" => handle_publish_batch(&mut store, &params),
                     _ => {
-                        warn!(service = "sns", action = %other, "SNS action not implemented");
-                        return Err(DispatchError::NotImplemented(other.to_string()));
+                        let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                        match other {
+                            "CreateTopic" => handle_create_topic(&mut store, ctx, &params),
+                            "DeleteTopic" => handle_delete_topic(&mut store, &params),
+                            "SetTopicAttributes" => {
+                                handle_set_topic_attributes(&mut store, &params)
+                            }
+                            "Subscribe" => handle_subscribe(&mut store, ctx, &params),
+                            "Unsubscribe" => handle_unsubscribe(&mut store, &params),
+                            "SetSubscriptionAttributes" => {
+                                handle_set_subscription_attributes(&mut store, &params)
+                            }
+                            "PublishBatch" => handle_publish_batch(&mut store, &params),
+                            _ => {
+                                warn!(service = "sns", action = %other, "SNS action not implemented");
+                                return Err(DispatchError::NotImplemented(other.to_string()));
+                            }
+                        }
                     }
                 }
             }

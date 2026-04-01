@@ -813,14 +813,20 @@ impl ServiceProvider for KinesisProvider {
                     }
                 };
                 if let Some(tags_obj) = ctx.request_body.get("Tags").and_then(|v| v.as_object()) {
+                    // Compute how many net-new keys would be added (overwrites don't increase count)
+                    let new_key_count = tags_obj
+                        .keys()
+                        .filter(|k| !stream.tags.contains_key(*k))
+                        .count();
+                    if stream.tags.len() + new_key_count > 50 {
+                        return Ok(json_error(
+                            "InvalidArgumentException",
+                            "Cannot have more than 50 tags for a stream",
+                            400,
+                        ));
+                    }
+                    // All-or-nothing: only mutate after the limit check passes
                     for (k, v) in tags_obj {
-                        if stream.tags.len() >= 50 && !stream.tags.contains_key(k) {
-                            return Ok(json_error(
-                                "InvalidArgumentException",
-                                "Cannot have more than 50 tags for a stream",
-                                400,
-                            ));
-                        }
                         if let Some(val) = v.as_str() {
                             stream.tags.insert(k.clone(), val.to_string());
                         }

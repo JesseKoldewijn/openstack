@@ -7,6 +7,7 @@ use chrono::Utc;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use uuid::Uuid;
 
 pub struct StsProvider;
@@ -181,12 +182,7 @@ impl ServiceProvider for StsProvider {
                     }
                 };
                 // XML-escape the decoded JSON before embedding it in XML.
-                let escaped = decoded
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;")
-                    .replace('"', "&quot;");
-                let inner = format!("<DecodedMessage>{escaped}</DecodedMessage>");
+                let inner = format!("<DecodedMessage>{}</DecodedMessage>", xml_escape(&decoded));
                 Ok(xml_resp("DecodeAuthorizationMessage", &rid, &inner))
             }
 

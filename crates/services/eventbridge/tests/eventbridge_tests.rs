@@ -9,6 +9,7 @@ use openstack_service_framework::traits::{
     ServiceProvider,
 };
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 fn make_ctx(operation: &str, body: Value) -> RequestContext {
     RequestContext {
@@ -408,6 +409,13 @@ async fn test_put_events_missing_entries_fails() {
         resp.status_code,
         body_str(&resp)
     );
+    let b = body(&resp);
+    assert_eq!(
+        b["__type"],
+        "ValidationError",
+        "expected ValidationError error type, got: {}",
+        body_str(&resp)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +424,7 @@ async fn test_put_events_missing_entries_fails() {
 
 struct MockDispatcher {
     dispatched_ops: Arc<Mutex<Vec<String>>>,
+    notify: Arc<Notify>,
 }
 
 #[async_trait]
@@ -425,6 +434,7 @@ impl CrossServiceDispatcher for MockDispatcher {
             .lock()
             .unwrap()
             .push(ctx.operation.clone());
+        self.notify.notify_one();
         Ok(DispatchResponse {
             status_code: 200,
             body: ResponseBody::Buffered(Bytes::from(b"{}".as_ref())),
@@ -437,8 +447,10 @@ impl CrossServiceDispatcher for MockDispatcher {
 #[tokio::test]
 async fn test_put_events_dispatches_to_sqs_target_via_mock() {
     let dispatched_ops: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let notify = Arc::new(Notify::new());
     let mock = MockDispatcher {
         dispatched_ops: Arc::clone(&dispatched_ops),
+        notify: Arc::clone(&notify),
     };
     let p = EventBridgeProvider::new_with_dispatcher(Arc::new(mock));
 
@@ -487,8 +499,10 @@ async fn test_put_events_dispatches_to_sqs_target_via_mock() {
     assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
     assert_eq!(body(&resp)["FailedEntryCount"], 0);
 
-    // Give the spawned dispatch task time to run
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Wait for the spawned dispatch task to complete (deterministic, no sleep)
+    tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+        .await
+        .expect("dispatch task did not complete within 2s");
 
     let ops = dispatched_ops.lock().unwrap();
     assert!(

@@ -160,4 +160,9 @@ async fn test_decode_authorization_message_invalid_base64_returns_error() {
         "expected error on invalid base64: {}",
         body_str(&resp)
     );
+    assert!(
+        body_str(&resp).contains("InvalidAuthorizationMessage"),
+        "response must contain InvalidAuthorizationMessage error: {}",
+        body_str(&resp)
+    );
 }

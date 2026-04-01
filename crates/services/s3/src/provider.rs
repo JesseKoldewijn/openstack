@@ -14,7 +14,7 @@ use openstack_service_framework::traits::{
     CrossServiceDispatcher, DispatchError, DispatchResponse, RequestContext, ResponseBody,
     ServiceProvider,
 };
-use openstack_service_framework::xml::xml_escape;
+use openstack_service_framework::xml::{url_encode, xml_escape};
 use openstack_state::AccountRegionBundle;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
@@ -2457,7 +2457,16 @@ fn handle_put_bucket_notification(store: &mut S3Store, ctx: &RequestContext) -> 
         return s3_error("NoSuchBucket", "The specified bucket does not exist", 404);
     }
 
-    let body = std::str::from_utf8(ctx.raw_body_bytes()).unwrap_or("");
+    let body = match std::str::from_utf8(ctx.raw_body_bytes()) {
+        Ok(s) => s,
+        Err(_) => {
+            return s3_error(
+                "MalformedXML",
+                "The XML you provided was not valid UTF-8",
+                400,
+            );
+        }
+    };
     let mut configs: Vec<crate::store::NotificationConfig> = Vec::new();
 
     // Parse QueueConfiguration entries (SQS)
@@ -2676,7 +2685,7 @@ fn build_notification_dispatch_ctx_owned(
                 .to_string();
             let body = format!(
                 "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F{account_id}%2F{queue_name}&MessageBody={}",
-                urlencoding::encode(std::str::from_utf8(&payload).unwrap_or(""))
+                url_encode(std::str::from_utf8(&payload).unwrap_or(""))
             );
             let mut ctx = RequestContext::new("sqs", "SendMessage", region, account_id);
             ctx.method = "POST".to_string();
@@ -2687,8 +2696,8 @@ fn build_notification_dispatch_ctx_owned(
         "sns" => {
             let body = format!(
                 "Action=Publish&TopicArn={}&Message={}",
-                urlencoding::encode(dest_arn),
-                urlencoding::encode(std::str::from_utf8(&payload).unwrap_or(""))
+                url_encode(dest_arn),
+                url_encode(std::str::from_utf8(&payload).unwrap_or(""))
             );
             let mut ctx = RequestContext::new("sns", "Publish", region, account_id);
             ctx.method = "POST".to_string();
@@ -2719,33 +2728,6 @@ fn build_notification_dispatch_ctx_owned(
 }
 
 // URL encoding helper for notification dispatch payloads
-mod urlencoding {
-    pub fn encode(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        for b in s.as_bytes() {
-            match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(*b as char);
-                }
-                _ => {
-                    out.push('%');
-                    out.push(
-                        char::from_digit((b >> 4) as u32, 16)
-                            .unwrap_or('0')
-                            .to_ascii_uppercase(),
-                    );
-                    out.push(
-                        char::from_digit((b & 0xf) as u32, 16)
-                            .unwrap_or('0')
-                            .to_ascii_uppercase(),
-                    );
-                }
-            }
-        }
-        out
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------

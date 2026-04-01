@@ -329,8 +329,14 @@ impl ServiceProvider for EcrProvider {
                     let digest = id.get("imageDigest").and_then(|v| v.as_str());
 
                     // Resolve digest via index — O(1) for both tag and digest lookups.
+                    // Scope to repo_name to prevent cross-repo deletions.
                     let target_digest = if let Some(d) = digest {
-                        if store.images.contains_key(d) {
+                        // Verify the digest exists AND belongs to this repo
+                        if store
+                            .images
+                            .get(d)
+                            .is_some_and(|img| img.repository_name == repo_name)
+                        {
                             Some(d.to_string())
                         } else {
                             None
