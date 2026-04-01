@@ -311,6 +311,14 @@ impl ServiceProvider for EcrProvider {
                     }
                 };
                 let mut store = self.store.get_or_create(account_id, region);
+                // Verify the repository exists before the empty fast-path.
+                if !store.repositories.contains_key(repo_name.as_str()) {
+                    return Ok(json_error(
+                        "RepositoryNotFoundException",
+                        &format!("The repository with name '{repo_name}' does not exist"),
+                        400,
+                    ));
+                }
                 let image_ids = ctx
                     .request_body
                     .get("imageIds")

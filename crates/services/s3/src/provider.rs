@@ -2661,7 +2661,7 @@ async fn emit_s3_notification(
             payload_bytes,
         );
         if let Err(e) = dispatcher.dispatch_to(&dispatch_ctx).await {
-            debug!(err = %e, destination = %nc.destination_arn, event = %event_name, "S3 notification dispatch failed");
+            warn!(err = %e, destination = %nc.destination_arn, event = %event_name, "S3 notification dispatch failed");
         }
     }
 }
@@ -2727,7 +2727,6 @@ fn build_notification_dispatch_ctx_owned(
     }
 }
 
-// URL encoding helper for notification dispatch payloads
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------

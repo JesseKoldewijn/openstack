@@ -495,6 +495,7 @@ async fn handle_publish(
     dispatcher: &Option<Arc<dyn CrossServiceDispatcher>>,
     ctx: &RequestContext,
 ) -> DispatchResponse {
+    // --- Synchronous phase: validate and collect all data under the store borrow ---
     let topic_arn = match params.get("TopicArn") {
         Some(a) => a.clone(),
         None => return sns_error("InvalidParameter", "TopicArn is required", 400),
@@ -511,7 +512,7 @@ async fn handle_publish(
     let message_id = uuid::Uuid::new_v4().to_string();
     let message_attributes = extract_message_attributes(params);
 
-    // Collect subscriptions and delivery info before mutating store
+    // Collect subscriptions while the store borrow is active — no awaits here.
     let delivery_tasks: Vec<(String, String, String, bool, Option<FilterPolicy>)> = store
         .list_subscriptions_by_topic(&topic_arn)
         .into_iter()
@@ -526,12 +527,65 @@ async fn handle_publish(
         })
         .collect();
 
-    // Extract dispatcher into owned value to avoid holding store borrow across .await
+    // Clone all data needed for the async phase so the store borrow (and thus
+    // the write guard in the caller) can be dropped before any .await.
     let dispatcher = dispatcher.clone();
     let region = ctx.region.clone();
     let account_id = ctx.account_id.clone();
 
-    // Deliver to each subscriber
+    // Build the success response now while we still have topic_arn / message_id.
+    let response = sns_publish_ok(&message_id);
+
+    // --- Async phase: fan-out delivery. Store borrow is no longer needed. ---
+    let payload = PublishPayload {
+        delivery_tasks,
+        message,
+        subject,
+        topic_arn,
+        message_id,
+        message_attributes,
+        dispatcher,
+        region,
+        account_id,
+    };
+    dispatch_publish_deliveries(payload).await;
+
+    response
+}
+
+struct PublishPayload {
+    delivery_tasks: Vec<(String, String, String, bool, Option<FilterPolicy>)>,
+    message: String,
+    subject: String,
+    topic_arn: String,
+    message_id: String,
+    message_attributes: HashMap<String, MessageAttribute>,
+    dispatcher: Option<Arc<dyn CrossServiceDispatcher>>,
+    region: String,
+    account_id: String,
+}
+
+/// Build the XML success response for a Publish call.
+fn sns_publish_ok(message_id: &str) -> DispatchResponse {
+    let rid = new_request_id();
+    let inner = format!("<MessageId>{message_id}</MessageId>");
+    xml_wrap("Publish", &rid, &inner)
+}
+
+/// Fan-out delivery to all subscribers — called after the store guard is released.
+async fn dispatch_publish_deliveries(payload: PublishPayload) {
+    let PublishPayload {
+        delivery_tasks,
+        message,
+        subject,
+        topic_arn,
+        message_id,
+        message_attributes,
+        dispatcher,
+        region,
+        account_id,
+    } = payload;
+
     for (_sub_arn, protocol_str, endpoint, raw_delivery, filter_policy) in delivery_tasks {
         // Apply filter policy
         if let Some(ref fp) = filter_policy
@@ -614,12 +668,6 @@ async fn handle_publish(
             }
         }
     }
-
-    xml_wrap(
-        "Publish",
-        &new_request_id(),
-        &format!("<MessageId>{}</MessageId>", escape_xml(&message_id)),
-    )
 }
 
 fn handle_publish_batch(
@@ -767,15 +815,11 @@ impl ServiceProvider for SnsProvider {
             other => {
                 match other {
                     "Publish" => {
-                        // Extract all data needed for publish under the write lock,
-                        // then drop the guard before awaiting fan-out to avoid holding
-                        // the write lock across async dispatch (deadlock risk if a
-                        // dispatched service calls back into SNS).
-
-                        {
-                            let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
-                            handle_publish(&mut store, &params, &self.dispatcher, ctx).await
-                        }
+                        // handle_publish collects all data from the store synchronously,
+                        // then fans out asynchronously. The store guard (write lock) is
+                        // released before any .await inside handle_publish.
+                        let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
+                        handle_publish(&mut store, &params, &self.dispatcher, ctx).await
                     }
                     _ => {
                         let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);

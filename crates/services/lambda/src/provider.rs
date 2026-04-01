@@ -1202,11 +1202,15 @@ impl ServiceProvider for LambdaProvider {
             // AddPermission / GetPolicy / RemovePermission
             // ----------------------------------------------------------------
             "AddPermission" => {
-                let function_name = function_name_from_path(path)
-                    .or_else(|| str_field(body, "FunctionName"))
-                    .ok_or_else(|| {
-                        DispatchError::NotImplemented("FunctionName required".to_string())
-                    })?;
+                let Some(function_name) =
+                    function_name_from_path(path).or_else(|| str_field(body, "FunctionName"))
+                else {
+                    return Ok(json_error(
+                        "ValidationException",
+                        "FunctionName is required",
+                        400,
+                    ));
+                };
                 let sid = match str_field(body, "StatementId").filter(|s| !s.is_empty()) {
                     Some(s) => s,
                     None => {
@@ -1264,11 +1268,15 @@ impl ServiceProvider for LambdaProvider {
             }
 
             "GetPolicy" => {
-                let function_name = function_name_from_path(path)
-                    .or_else(|| str_field(body, "FunctionName"))
-                    .ok_or_else(|| {
-                        DispatchError::NotImplemented("FunctionName required".to_string())
-                    })?;
+                let Some(function_name) =
+                    function_name_from_path(path).or_else(|| str_field(body, "FunctionName"))
+                else {
+                    return Ok(json_error(
+                        "ValidationException",
+                        "FunctionName is required",
+                        400,
+                    ));
+                };
                 let Some(store) = self.store.get(account_id, region) else {
                     return Ok(json_error(
                         "ResourceNotFoundException",
@@ -1312,11 +1320,15 @@ impl ServiceProvider for LambdaProvider {
             }
 
             "RemovePermission" => {
-                let function_name = function_name_from_path(path)
-                    .or_else(|| str_field(body, "FunctionName"))
-                    .ok_or_else(|| {
-                        DispatchError::NotImplemented("FunctionName required".to_string())
-                    })?;
+                let Some(function_name) =
+                    function_name_from_path(path).or_else(|| str_field(body, "FunctionName"))
+                else {
+                    return Ok(json_error(
+                        "ValidationException",
+                        "FunctionName is required",
+                        400,
+                    ));
+                };
                 // StatementId is the last path segment: /policy/{StatementId}
                 let sid = path
                     .trim_matches('/')
