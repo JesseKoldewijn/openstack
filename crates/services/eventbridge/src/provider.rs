@@ -107,10 +107,11 @@ fn matches_value(event: &Value, pattern: &Value) -> bool {
             true
         }
         (ev_val, Value::Array(alternatives)) => {
-            // Pattern array = OR: event value must equal one of the alternatives
+            // Pattern array = OR: event value must equal one of the alternatives.
+            // When the event value is itself an array, check if any element matches.
             alternatives.iter().any(|alt| {
                 if let Value::Object(condition) = alt {
-                    // Condition like {"prefix": "foo"}
+                    // Condition like {"prefix": "foo"} or {"exists": true}
                     if let Some(prefix) = condition.get("prefix").and_then(|v| v.as_str()) {
                         return ev_val.as_str().is_some_and(|s| s.starts_with(prefix));
                     }
@@ -128,6 +129,10 @@ fn matches_value(event: &Value, pattern: &Value) -> bool {
                         "EventBridge: unrecognised rule condition key(s) — condition will not match"
                     );
                     return false;
+                }
+                // If the event value is an array, check if any element matches the alternative
+                if let Value::Array(ev_arr) = ev_val {
+                    return ev_arr.iter().any(|elem| elem == alt);
                 }
                 ev_val == alt
             })

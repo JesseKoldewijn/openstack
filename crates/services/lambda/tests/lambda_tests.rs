@@ -775,6 +775,12 @@ async fn test_add_permission_overwrites_same_sid() {
         ))
         .await
         .unwrap();
+    assert_eq!(
+        get_resp.status_code,
+        200,
+        "GetPolicy failed: {}",
+        body_str(&get_resp)
+    );
     let policy: Value = serde_json::from_str(body(&get_resp)["Policy"].as_str().unwrap()).unwrap();
     let stmts = policy["Statement"].as_array().unwrap();
     // Sid must be deduplicated — only the latest should remain

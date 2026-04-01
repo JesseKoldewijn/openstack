@@ -272,8 +272,16 @@ impl ServiceProvider for EcrProvider {
                     let digest = id.get("imageDigest").and_then(|v| v.as_str());
 
                     // Resolve to a digest using the index — O(1) per lookup.
+                    // When both digest and tag are provided, both must match the
+                    // same image (unified imageId semantics).
                     let resolved = if let Some(d) = digest {
-                        store.images.get(d)
+                        let img = store.images.get(d);
+                        // If a tag is also specified, verify it belongs to the same image.
+                        if let Some(t) = tag {
+                            img.filter(|img| img.image_tags.iter().any(|it| it == t))
+                        } else {
+                            img
+                        }
                     } else if let Some(t) = tag {
                         store
                             .digest_for_tag(&repo_name, t)
@@ -398,30 +406,26 @@ impl ServiceProvider for EcrProvider {
                 let Some(store) = self.store.get(account_id, region) else {
                     return Ok(json_ok(json!({ "imageDetails": [] })));
                 };
-                let filter_digests: Vec<String> = ctx
+
+                // Build a list of imageId filter entries.  Each entry may specify
+                // imageDigest, imageTag, or both.  When both are present, an image
+                // must satisfy BOTH constraints (unified imageId semantics).
+                let id_filters: Vec<(Option<String>, Option<String>)> = ctx
                     .request_body
                     .get("imageIds")
                     .and_then(|v| v.as_array())
                     .map(|arr| {
                         arr.iter()
-                            .filter_map(|id| {
-                                id.get("imageDigest")
-                                    .and_then(|d| d.as_str())
-                                    .map(String::from)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let filter_tags: Vec<String> = ctx
-                    .request_body
-                    .get("imageIds")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|id| {
-                                id.get("imageTag")
-                                    .and_then(|t| t.as_str())
-                                    .map(String::from)
+                            .map(|id| {
+                                let d = id
+                                    .get("imageDigest")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                let t = id
+                                    .get("imageTag")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                (d, t)
                             })
                             .collect()
                     })
@@ -430,13 +434,25 @@ impl ServiceProvider for EcrProvider {
                 let image_details: Vec<Value> = store
                     .images_for_repo(&repo_name)
                     .filter(|img| {
-                        if filter_digests.is_empty() && filter_tags.is_empty() {
+                        if id_filters.is_empty() {
                             return true;
                         }
-                        if filter_digests.contains(&img.image_digest) {
-                            return true;
-                        }
-                        img.image_tags.iter().any(|t| filter_tags.contains(t))
+                        // An image matches if it satisfies at least one filter entry.
+                        id_filters.iter().any(|(filter_digest, filter_tag)| {
+                            let digest_ok = match filter_digest {
+                                Some(d) => img.image_digest == *d,
+                                None => true,
+                            };
+                            let tag_ok = match filter_tag {
+                                Some(t) => img.image_tags.iter().any(|it| it == t),
+                                None => true,
+                            };
+                            // At least one constraint must be specified, and all
+                            // specified constraints must match.
+                            (filter_digest.is_some() || filter_tag.is_some())
+                                && digest_ok
+                                && tag_ok
+                        })
                     })
                     .map(|img| {
                         json!({

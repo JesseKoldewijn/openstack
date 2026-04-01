@@ -2629,14 +2629,20 @@ async fn emit_s3_notification(
             continue;
         }
 
-        // Build the S3 event notification JSON payload
+        // Build the S3 event notification JSON payload.
+        // AWS S3 Record.eventName strips the "s3:" prefix (e.g. "ObjectCreated:Put").
+        let record_event_name = event_name
+            .strip_prefix("s3:")
+            .unwrap_or(event_name)
+            .replace(":*", ":Put");
+
         let payload = serde_json::json!({
             "Records": [{
                 "eventVersion": "2.1",
                 "eventSource": "aws:s3",
                 "awsRegion": region,
                 "eventTime": chrono::Utc::now().to_rfc3339(),
-                "eventName": event_name,
+                "eventName": record_event_name,
                 "s3": {
                     "s3SchemaVersion": "1.0",
                     "bucket": {

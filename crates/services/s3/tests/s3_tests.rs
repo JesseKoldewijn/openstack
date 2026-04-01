@@ -1338,6 +1338,28 @@ async fn test_put_notification_nonexistent_bucket_returns_404() {
 }
 
 #[tokio::test]
+async fn test_get_notification_nonexistent_bucket_returns_404() {
+    let provider = new_provider().await;
+
+    // GET notification config on a bucket that was never created must return 404
+    let resp = provider
+        .dispatch(&make_notification_ctx("GET", "never-created-bucket", b""))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status_code,
+        404,
+        "expected 404 for GET notification on nonexistent bucket, got: {}",
+        std::str::from_utf8(resp.body.as_bytes()).unwrap()
+    );
+    let body = std::str::from_utf8(resp.body.as_bytes()).unwrap();
+    assert!(
+        body.contains("NoSuchBucket"),
+        "Expected NoSuchBucket error, got: {body}"
+    );
+}
+
+#[tokio::test]
 async fn test_get_notification_empty_before_configuration() {
     let provider = new_provider().await;
 

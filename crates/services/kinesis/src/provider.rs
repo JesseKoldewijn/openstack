@@ -887,7 +887,7 @@ impl ServiceProvider for KinesisProvider {
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
-                            "Stream not found",
+                            &format!("Stream {stream_name} not found"),
                             400,
                         ));
                     }
@@ -897,7 +897,7 @@ impl ServiceProvider for KinesisProvider {
                     None => {
                         return Ok(json_error(
                             "ResourceNotFoundException",
-                            "Stream not found",
+                            &format!("Stream {stream_name} not found"),
                             400,
                         ));
                     }

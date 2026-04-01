@@ -58,17 +58,32 @@ pub struct EcrStore {
 
 impl EcrStore {
     /// Insert an image into the primary store and both secondary indexes.
+    ///
+    /// If any of the new image's tags already point to a different image (via
+    /// `tag_index`), those tags are removed from the old image's `image_tags`
+    /// vec so that the primary store stays consistent with the tag index.
     pub fn insert_image(&mut self, digest: String, image: Image) {
         let repo = image.repository_name.clone();
         let tags = image.image_tags.clone();
 
+        // For each tag being assigned, remove it from any previous owner image.
+        for tag in &tags {
+            let key = (repo.clone(), tag.clone());
+            if let Some(old_digest) = self.tag_index.get(&key).cloned()
+                && old_digest != digest
+                && let Some(old_image) = self.images.get_mut(&old_digest)
+            {
+                old_image.image_tags.retain(|t| t != tag);
+            }
+        }
+
         self.images.insert(digest.clone(), image);
 
-        // repo_index
-        self.repo_index
-            .entry(repo.clone())
-            .or_default()
-            .push(digest.clone());
+        // repo_index — only push if this digest is not already present
+        let repo_digests = self.repo_index.entry(repo.clone()).or_default();
+        if !repo_digests.contains(&digest) {
+            repo_digests.push(digest.clone());
+        }
 
         // tag_index
         for tag in tags {
