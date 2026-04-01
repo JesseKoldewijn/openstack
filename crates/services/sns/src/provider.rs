@@ -771,11 +771,11 @@ impl ServiceProvider for SnsProvider {
                         // then drop the guard before awaiting fan-out to avoid holding
                         // the write lock across async dispatch (deadlock risk if a
                         // dispatched service calls back into SNS).
-                        let result = {
+
+                        {
                             let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
                             handle_publish(&mut store, &params, &self.dispatcher, ctx).await
-                        };
-                        result
+                        }
                     }
                     _ => {
                         let mut store = self.store.get_or_create(&ctx.account_id, &ctx.region);
