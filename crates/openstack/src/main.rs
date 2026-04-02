@@ -21,8 +21,8 @@ const DAEMON_CHILD_ENV: &str = "OPENSTACK_DAEMON_CHILD";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliCommand {
-    RunForeground,
-    Start { daemon: bool },
+    RunForeground { studio: bool },
+    Start { daemon: bool, studio: bool },
     Stop,
     Status,
     Restart,
@@ -70,12 +70,12 @@ async fn main() -> Result<()> {
     openstack_config::logging::init(&config);
 
     match command {
-        CliCommand::RunForeground => run_server(config).await,
-        CliCommand::Start { daemon } => {
+        CliCommand::RunForeground { studio } => run_server(config, studio).await,
+        CliCommand::Start { daemon, studio } => {
             if daemon {
                 daemon_start(&config).await
             } else {
-                run_server(config).await
+                run_server(config, studio).await
             }
         }
         CliCommand::Stop => daemon_stop(&config).await,
@@ -87,28 +87,29 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_server(config: openstack_config::Config) -> Result<()> {
+async fn run_server(config: openstack_config::Config, studio: bool) -> Result<()> {
     info!("Starting openstack v{}", env!("CARGO_PKG_VERSION"));
     info!("Gateway listening on: {:?}", config.gateway_listen);
+    if studio {
+        info!("Studio UI subsystem enabled (transaction log + operation catalog active)");
+    }
 
-    // Initialize the service plugin manager
     let plugin_manager = openstack_service_framework::ServicePluginManager::new(config.clone());
-
-    // Register all built-in service providers and collect persistable stores
     let persistable_stores = register_services(&plugin_manager, &config);
 
-    // Initialize state and register persistable stores before loading
     let state_manager = openstack_state::StateManager::new(config.clone());
     for store in persistable_stores {
         state_manager.register_store(store).await;
     }
     state_manager.load_on_startup().await?;
 
-    // Clean up orphaned spool temp files from previous crashes
     cleanup_spool_dir(&config.directories.spool).await;
 
-    // Start internal API server and gateway
-    let gateway = openstack_gateway::Gateway::new(config.clone(), plugin_manager.clone());
+    let gateway = if studio || config.debug {
+        openstack_gateway::Gateway::new_with_studio(config.clone(), plugin_manager.clone())
+    } else {
+        openstack_gateway::Gateway::new(config.clone(), plugin_manager.clone())
+    };
 
     // Start DNS server if configured
     let dns_handle = if config.dns_enabled() {
@@ -132,7 +133,9 @@ async fn run_server(config: openstack_config::Config) -> Result<()> {
 
 fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
     if args.is_empty() {
-        return Ok(CliCommand::RunForeground);
+        // Inherit studio mode from env var when running with no args.
+        let studio = std::env::var("STUDIO").is_ok_and(|v| v == "1" || v == "true");
+        return Ok(CliCommand::RunForeground { studio });
     }
 
     match args[0].as_str() {
@@ -140,12 +143,13 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
         "-V" | "--version" => Ok(CliCommand::Version),
         "start" => {
             let daemon = args.iter().skip(1).any(|a| a == "--daemon");
+            let studio = args.iter().skip(1).any(|a| a == "--studio");
             for arg in args.iter().skip(1) {
-                if arg != "--daemon" {
+                if arg != "--daemon" && arg != "--studio" {
                     return Err(anyhow!("Unknown start option: {arg}"));
                 }
             }
-            Ok(CliCommand::Start { daemon })
+            Ok(CliCommand::Start { daemon, studio })
         }
         "stop" => Ok(CliCommand::Stop),
         "status" => Ok(CliCommand::Status),
@@ -177,7 +181,9 @@ fn print_help() {
     println!("Usage: openstack [command] [options]");
     println!();
     println!("Commands:");
-    println!("  start [--daemon]   Start openstack (foreground by default)");
+    println!("  start [--daemon] [--studio]  Start openstack (foreground by default)");
+    println!("                               --studio enables Studio UI transaction log");
+    println!("                               (also enabled via STUDIO=1 env var)");
     println!("  stop               Stop managed daemon instance");
     println!("  status             Show managed daemon status");
     println!("  restart            Restart managed daemon instance");
@@ -682,7 +688,10 @@ mod tests {
 
     #[test]
     fn parse_command_defaults_to_foreground() {
-        assert_eq!(parse_cli_command(&[]).unwrap(), CliCommand::RunForeground);
+        assert_eq!(
+            parse_cli_command(&[]).unwrap(),
+            CliCommand::RunForeground { studio: false }
+        );
     }
 
     #[test]
@@ -690,7 +699,10 @@ mod tests {
         let args = vec!["start".to_string(), "--daemon".to_string()];
         assert_eq!(
             parse_cli_command(&args).unwrap(),
-            CliCommand::Start { daemon: true }
+            CliCommand::Start {
+                daemon: true,
+                studio: false
+            }
         );
     }
 

@@ -1,9 +1,10 @@
+use std::collections::VecDeque;
+
 /// Global transaction log for the Studio runtime.
 ///
 /// Captures every HTTP request/response pair that flows through the gateway
 /// so the Transactions tab can show a chronological, cross-service audit trail.
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 
 // ---------------------------------------------------------------------------
 // Transaction record
@@ -129,8 +130,7 @@ impl TransactionRecord {
     ) -> Self {
         self.status = status;
         self.outcome = TransactionOutcome::from_status(status);
-        self.response_body_preview =
-            Some(truncate(response_body.as_ref(), Self::MAX_BODY_PREVIEW));
+        self.response_body_preview = Some(truncate(response_body.as_ref(), Self::MAX_BODY_PREVIEW));
         self.duration_ms = Some(duration_ms);
         self
     }
@@ -212,13 +212,11 @@ impl TransactionLog {
     }
 
     /// Filter by outcome.
-    pub fn by_outcome<'a>(
-        &'a self,
+    pub fn by_outcome(
+        &self,
         outcome: TransactionOutcome,
-    ) -> impl Iterator<Item = &'a TransactionRecord> {
-        self.entries
-            .iter()
-            .filter(move |r| r.outcome == outcome)
+    ) -> impl Iterator<Item = &TransactionRecord> {
+        self.entries.iter().filter(move |r| r.outcome == outcome)
     }
 
     /// Number of stored entries.
@@ -305,8 +303,7 @@ mod tests {
     use super::*;
 
     fn make_record(service: &str, status: u16) -> TransactionRecord {
-        TransactionRecord::new(0, service, "POST", "/", 1000)
-            .complete(status, "body", 42)
+        TransactionRecord::new(0, service, "POST", "/", 1000).complete(status, "body", 42)
     }
 
     #[test]

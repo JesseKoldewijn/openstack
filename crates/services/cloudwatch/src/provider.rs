@@ -1015,7 +1015,7 @@ impl ServiceProvider for CloudWatchProvider {
                     "attributes": [{"key": "state", "value": alarm.state_value.clone()}]
                 }));
             }
-            for (name, _) in &store.log_groups {
+            for name in store.log_groups.keys() {
                 log_groups.push(json!({ "id": name, "kind": "log_group", "attributes": [] }));
             }
         }

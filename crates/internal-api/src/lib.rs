@@ -31,8 +31,14 @@ pub struct ApiState {
     pub(crate) guided_service_matrix: std::collections::HashSet<String>,
     pub(crate) guided_manifest_inventory:
         std::collections::HashMap<String, crate::studio::GuidedManifestFile>,
-    /// Live transaction log shared across all Studio handlers.
-    pub(crate) transaction_log: Arc<Mutex<openstack_studio_ui::TransactionLog>>,
+    /// Live transaction log — only allocated when Studio is enabled.
+    ///
+    /// `None` when running in headless/benchmark mode (no `STUDIO=1` env var
+    /// and no `--debug` flag).  All Studio TX endpoints silently return empty
+    /// results when this is `None`, so the binary stays lean by default.
+    pub(crate) transaction_log: Option<Arc<Mutex<openstack_studio_ui::TransactionLog>>>,
+    /// Whether the Studio UI subsystem (TX log, operation catalog) is active.
+    pub studio_enabled: bool,
 }
 
 impl ApiState {
@@ -41,8 +47,34 @@ impl ApiState {
         plugin_manager: ServicePluginManager,
         shutdown_tx: broadcast::Sender<()>,
     ) -> Self {
+        Self::new_with_studio(config, plugin_manager, shutdown_tx, false)
+    }
+
+    /// Create an `ApiState` with the Studio subsystem explicitly enabled or
+    /// disabled.  Pass `studio_enabled = true` when the process was launched
+    /// with `openstack start --studio` or `STUDIO=1`.
+    pub fn new_with_studio(
+        config: Config,
+        plugin_manager: ServicePluginManager,
+        shutdown_tx: broadcast::Sender<()>,
+        studio_enabled: bool,
+    ) -> Self {
+        // Also enable via STUDIO env var or DEBUG mode (matches existing pattern).
+        let studio_active = studio_enabled
+            || config.debug
+            || std::env::var("STUDIO").is_ok_and(|v| v == "1" || v == "true");
+
         let guided_service_matrix = crate::studio::load_service_matrix_services();
         let guided_manifest_inventory = crate::studio::load_manifest_inventory();
+
+        let transaction_log = if studio_active {
+            Some(Arc::new(Mutex::new(
+                openstack_studio_ui::TransactionLog::new(2000),
+            )))
+        } else {
+            None
+        };
+
         Self {
             config,
             plugin_manager,
@@ -51,9 +83,8 @@ impl ApiState {
             shutdown_tx,
             guided_service_matrix,
             guided_manifest_inventory,
-            transaction_log: Arc::new(Mutex::new(
-                openstack_studio_ui::TransactionLog::new(2000),
-            )),
+            transaction_log,
+            studio_enabled: studio_active,
         }
     }
 }

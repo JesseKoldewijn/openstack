@@ -1499,6 +1499,8 @@ pub struct Gateway {
     config: Config,
     plugin_manager: ServicePluginManager,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    /// Whether the Studio UI subsystem (TX log, operation catalog) is active.
+    studio_enabled: bool,
 }
 
 /// Shared application state passed to all axum handlers.
@@ -1508,25 +1510,38 @@ struct AppState {
     plugin_manager: ServicePluginManager,
     cors: Arc<CorsHandler>,
     internal_api_router: Router,
+    studio_enabled: bool,
 }
 
 impl Gateway {
     pub fn new(config: Config, plugin_manager: ServicePluginManager) -> Self {
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(16);
+        // Inherit studio mode from env var or debug flag at construction time.
+        let studio_enabled =
+            config.debug || std::env::var("STUDIO").is_ok_and(|v| v == "1" || v == "true");
         Self {
             config,
             plugin_manager,
             shutdown_tx,
+            studio_enabled,
         }
+    }
+
+    /// Construct a Studio-enabled gateway explicitly (e.g. from `openstack start --studio`).
+    pub fn new_with_studio(config: Config, plugin_manager: ServicePluginManager) -> Self {
+        let mut gw = Self::new(config, plugin_manager);
+        gw.studio_enabled = true;
+        gw
     }
 
     /// Build the axum Router for this gateway (useful for testing).
     fn build_app(&self) -> Router {
         let cors = Arc::new(CorsHandler::new(&self.config));
-        let internal_state = openstack_internal_api::ApiState::new(
+        let internal_state = openstack_internal_api::ApiState::new_with_studio(
             self.config.clone(),
             self.plugin_manager.clone(),
             self.shutdown_tx.clone(),
+            self.studio_enabled,
         );
         let internal_api_router = openstack_internal_api::internal_api_router(internal_state);
         let app_state = AppState {
@@ -1534,6 +1549,7 @@ impl Gateway {
             plugin_manager: self.plugin_manager.clone(),
             cors,
             internal_api_router,
+            studio_enabled: self.studio_enabled,
         };
         Router::new()
             .fallback(handle_request)
@@ -1945,17 +1961,14 @@ async fn handle_request(
         .add_cors_headers(response.headers_mut(), origin_header.as_deref());
 
     // Fire-and-forget: record this transaction to the Studio transaction log.
-    // Clone what we need before moving response out.
-    {
-        let service   = svc_ctx.service.clone();
+    // Skipped entirely when Studio is disabled to avoid spawn overhead on every request.
+    if state.studio_enabled {
+        let service = svc_ctx.service.clone();
         let operation = svc_ctx.operation.clone();
-        let method    = method.to_string();
-        let path_str  = svc_ctx.path.clone();
+        let method = method.to_string();
+        let path_str = svc_ctx.path.clone();
         let status_u16 = status.as_u16();
-        let dur_ms    = latency_ms as u64;
-        let started_ms = request_start
-            .duration_since(std::time::Instant::now().checked_sub(request_start.elapsed()).unwrap_or(std::time::Instant::now()))
-            .as_millis() as u64;
+        let dur_ms = latency_ms as u64;
         let router = state.internal_api_router.clone();
 
         tokio::spawn(async move {
@@ -1966,7 +1979,7 @@ async fn handle_request(
                 "method":    method,
                 "path":      path_str,
                 "status":    status_u16,
-                "startedAtMs": started_ms,
+                "startedAtMs": 0u64,
                 "durationMs":  dur_ms,
                 "fromGuidedFlow": false,
             });

@@ -154,17 +154,26 @@ async fn studio_operations_s3_contains_expected_operations() {
     // Every operation entry must have the required fields
     for op in ops {
         assert!(op["name"].is_string(), "operation.name should be string");
-        assert!(op["method"].is_string(), "operation.method should be string");
+        assert!(
+            op["method"].is_string(),
+            "operation.method should be string"
+        );
         assert!(op["path"].is_string(), "operation.path should be string");
-        assert!(op["has_guided_flow"].is_boolean(), "operation.has_guided_flow should be bool");
+        assert!(
+            op["has_guided_flow"].is_boolean(),
+            "operation.has_guided_flow should be bool"
+        );
     }
     // PutObject must be present
-    let names: Vec<&str> = ops
-        .iter()
-        .filter_map(|o| o["name"].as_str())
-        .collect();
-    assert!(names.contains(&"PutObject"), "PutObject should be in S3 operations");
-    assert!(names.contains(&"GetObject"), "GetObject should be in S3 operations");
+    let names: Vec<&str> = ops.iter().filter_map(|o| o["name"].as_str()).collect();
+    assert!(
+        names.contains(&"PutObject"),
+        "PutObject should be in S3 operations"
+    );
+    assert!(
+        names.contains(&"GetObject"),
+        "GetObject should be in S3 operations"
+    );
 }
 
 #[tokio::test]
@@ -243,7 +252,9 @@ async fn studio_transactions_record_and_retrieve() {
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: Value = serde_json::from_slice(&body_bytes).unwrap();
     assert!(body["id"].as_u64().is_some());
 
@@ -296,7 +307,9 @@ async fn studio_transactions_clear_empties_log() {
         .unwrap();
     let del_resp = router.clone().oneshot(del_req).await.unwrap();
     assert_eq!(del_resp.status(), StatusCode::OK);
-    let del_bytes = axum::body::to_bytes(del_resp.into_body(), usize::MAX).await.unwrap();
+    let del_bytes = axum::body::to_bytes(del_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let del_body: Value = serde_json::from_slice(&del_bytes).unwrap();
     assert_eq!(del_body["cleared"], 1);
 
@@ -320,8 +333,16 @@ async fn studio_runtime_config_contract() {
     assert_eq!(body["credentials"]["access_key_id"], "test");
     assert_eq!(body["credentials"]["secret_access_key"], "test");
     assert!(body["region"].as_str().is_some());
-    assert!(body["polling"]["storage_interval_ms"].as_u64().is_some_and(|v| v > 0));
-    assert!(body["polling"]["transactions_interval_ms"].as_u64().is_some_and(|v| v > 0));
+    assert!(
+        body["polling"]["storage_interval_ms"]
+            .as_u64()
+            .is_some_and(|v| v > 0)
+    );
+    assert!(
+        body["polling"]["transactions_interval_ms"]
+            .as_u64()
+            .is_some_and(|v| v > 0)
+    );
     assert!(body["studio"]["api_base"].as_str().is_some());
     assert!(body["studio"]["spa_base"].as_str().is_some());
 }
@@ -334,8 +355,10 @@ async fn studio_runtime_config_contract() {
 async fn studio_operations_events_alias_resolves_to_eventbridge() {
     let router = internal_api_router(make_state(test_config()));
     // "events" is the manifest slug, "eventbridge" is the provider slug — both should work
-    let (status_events, body_events) = get_json(&router, "/_localstack/studio-api/operations/events").await;
-    let (status_eb, body_eb) = get_json(&router, "/_localstack/studio-api/operations/eventbridge").await;
+    let (status_events, body_events) =
+        get_json(&router, "/_localstack/studio-api/operations/events").await;
+    let (status_eb, body_eb) =
+        get_json(&router, "/_localstack/studio-api/operations/eventbridge").await;
     assert_eq!(status_events, StatusCode::OK);
     assert_eq!(status_eb, StatusCode::OK);
     assert_eq!(body_events["service"], "eventbridge");
@@ -346,12 +369,13 @@ async fn studio_operations_events_alias_resolves_to_eventbridge() {
 #[tokio::test]
 async fn studio_operations_states_alias_resolves_to_stepfunctions() {
     let router = internal_api_router(make_state(test_config()));
-    let (status_states, body_states) = get_json(&router, "/_localstack/studio-api/operations/states").await;
-    let (status_sf, body_sf) = get_json(&router, "/_localstack/studio-api/operations/stepfunctions").await;
+    let (status_states, body_states) =
+        get_json(&router, "/_localstack/studio-api/operations/states").await;
+    let (status_sf, body_sf) =
+        get_json(&router, "/_localstack/studio-api/operations/stepfunctions").await;
     assert_eq!(status_states, StatusCode::OK);
     assert_eq!(status_sf, StatusCode::OK);
     assert_eq!(body_states["service"], "stepfunctions");
     assert_eq!(body_sf["service"], "stepfunctions");
     assert_eq!(body_states["total"], body_sf["total"]);
 }
-

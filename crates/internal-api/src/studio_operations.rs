@@ -38,14 +38,21 @@ pub async fn list_all_operations(State(state): State<ApiState>) -> impl IntoResp
     let catalog = build_catalog(&state);
     let mut services: Vec<serde_json::Value> = catalog
         .all_services()
-        .map(|set| json!({
-            "service": set.service,
-            "total": set.total(),
-            "guided_count": set.guided_count(),
-            "operations": set.operations.iter().map(operation_to_json).collect::<Vec<_>>(),
-        }))
+        .map(|set| {
+            json!({
+                "service": set.service,
+                "total": set.total(),
+                "guided_count": set.guided_count(),
+                "operations": set.operations.iter().map(operation_to_json).collect::<Vec<_>>(),
+            })
+        })
         .collect();
-    services.sort_by(|a, b| a["service"].as_str().unwrap_or("").cmp(b["service"].as_str().unwrap_or("")));
+    services.sort_by(|a, b| {
+        a["service"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["service"].as_str().unwrap_or(""))
+    });
     Json(json!({ "schema_version": "1.0", "services": services }))
 }
 
@@ -64,7 +71,8 @@ pub async fn get_service_operations(
             "total": set.total(),
             "guided_count": set.guided_count(),
             "operations": set.operations.iter().map(operation_to_json).collect::<Vec<_>>(),
-        })).into_response(),
+        }))
+        .into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({
@@ -72,6 +80,7 @@ pub async fn get_service_operations(
                 "service": canonical,
                 "message": format!("No operation catalogue entry for service '{canonical}'"),
             })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }

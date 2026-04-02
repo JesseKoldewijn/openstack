@@ -17,15 +17,15 @@ use std::collections::HashMap;
 /// - `"secretsmanager"` → `"secretsmanager"` (no-op)
 pub fn to_provider_slug(slug: &str) -> &str {
     match slug {
-        "events"         => "eventbridge",
-        "states"         => "stepfunctions",
-        "awsevents"      => "eventbridge",
-        "monitoring"     => "cloudwatch",
-        "logs"           => "cloudwatch",
-        "email"          => "ses",
-        "email-smtp"     => "ses",
+        "events" => "eventbridge",
+        "states" => "stepfunctions",
+        "awsevents" => "eventbridge",
+        "monitoring" => "cloudwatch",
+        "logs" => "cloudwatch",
+        "email" => "ses",
+        "email-smtp" => "ses",
         "elasticmapreduce" => "emr",
-        _                => slug,
+        _ => slug,
     }
 }
 
@@ -36,9 +36,9 @@ pub fn to_provider_slug(slug: &str) -> &str {
 /// The exceptions are documented below.
 pub fn to_manifest_slug(slug: &str) -> &str {
     match slug {
-        "eventbridge"    => "events",
-        "stepfunctions"  => "states",
-        _                => slug,
+        "eventbridge" => "events",
+        "stepfunctions" => "states",
+        _ => slug,
     }
 }
 
@@ -46,13 +46,13 @@ pub fn to_manifest_slug(slug: &str) -> &str {
 /// Useful for building lookup tables in the SPA and API handlers.
 pub fn alias_map() -> HashMap<&'static str, &'static str> {
     let mut m = HashMap::new();
-    m.insert("events",           "eventbridge");
-    m.insert("states",           "stepfunctions");
-    m.insert("awsevents",        "eventbridge");
-    m.insert("monitoring",       "cloudwatch");
-    m.insert("logs",             "cloudwatch");
-    m.insert("email",            "ses");
-    m.insert("email-smtp",       "ses");
+    m.insert("events", "eventbridge");
+    m.insert("states", "stepfunctions");
+    m.insert("awsevents", "eventbridge");
+    m.insert("monitoring", "cloudwatch");
+    m.insert("logs", "cloudwatch");
+    m.insert("email", "ses");
+    m.insert("email-smtp", "ses");
     m
 }
 

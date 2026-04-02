@@ -1,10 +1,11 @@
+use std::collections::HashMap;
+
 /// Runtime storage inspector models.
 ///
 /// Provides typed snapshots of in-memory service state that can be surfaced
 /// in the Studio Storage tab.  Each variant represents the storable resources
 /// of one service.
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Generic resource record

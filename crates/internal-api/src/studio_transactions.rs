@@ -1,10 +1,8 @@
 /// Studio transactions API: real-time cross-service request/response log.
 ///
-/// Routes:
-///   GET  /_localstack/studio-api/transactions
-///   GET  /_localstack/studio-api/transactions/{service}
-///   POST /_localstack/studio-api/transactions/record   (gateway → internal, internal use)
-///   DELETE /_localstack/studio-api/transactions        (clear log)
+/// When Studio is disabled (`ApiState::transaction_log` is `None`) all
+/// read endpoints return empty results and record/clear are silent no-ops.
+/// This keeps the binary lean in headless / benchmark mode.
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -15,18 +13,10 @@ use serde_json::json;
 
 use crate::ApiState;
 
-// ---------------------------------------------------------------------------
-// Query params
-// ---------------------------------------------------------------------------
-
-/// Filter parameters for GET /transactions and GET /transactions/{service}.
 #[derive(Debug, Deserialize)]
 pub struct TransactionQueryParams {
-    /// Filter by outcome: `success`, `client_error`, `server_error`, `pending`.
     pub outcome: Option<String>,
-    /// Maximum number of entries to return (default 200, max 2000).
     pub limit: Option<usize>,
-    /// Include only guided-flow transactions.
     pub guided_only: Option<bool>,
 }
 
@@ -40,11 +30,6 @@ fn parse_outcome(s: &str) -> Option<TransactionOutcome> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Inbound record payload
-// ---------------------------------------------------------------------------
-
-/// Payload posted by the gateway to append a completed transaction.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordTransactionRequest {
@@ -59,10 +44,6 @@ pub struct RecordTransactionRequest {
     pub duration_ms: u64,
     pub from_guided_flow: Option<bool>,
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn record_to_json(r: &openstack_studio_ui::TransactionRecord) -> serde_json::Value {
     json!({
@@ -81,6 +62,10 @@ fn record_to_json(r: &openstack_studio_ui::TransactionRecord) -> serde_json::Val
     })
 }
 
+fn empty_summary() -> serde_json::Value {
+    json!({ "total": 0, "success": 0, "client_error": 0, "server_error": 0, "pending": 0, "avg_duration_ms": null })
+}
+
 fn summary_to_json(log: &openstack_studio_ui::TransactionLog) -> serde_json::Value {
     let s = log.summary();
     json!({
@@ -93,33 +78,31 @@ fn summary_to_json(log: &openstack_studio_ui::TransactionLog) -> serde_json::Val
     })
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
-/// GET /_localstack/studio-api/transactions
-///
-/// Returns the global transaction log, optionally filtered.
 pub async fn list_all_transactions(
     State(state): State<ApiState>,
     Query(params): Query<TransactionQueryParams>,
 ) -> impl IntoResponse {
-    let log = state.transaction_log.lock().await;
+    let Some(log_arc) = &state.transaction_log else {
+        return Json(json!({
+            "schema_version": "1.0",
+            "summary": empty_summary(),
+            "transactions": [],
+            "_studio_disabled": true,
+        }));
+    };
+    let log = log_arc.lock().await;
     let limit = params.limit.unwrap_or(200).min(2000);
     let outcome_filter = params.outcome.as_deref().and_then(parse_outcome);
     let guided_only = params.guided_only.unwrap_or(false);
-
     let records: Vec<serde_json::Value> = log
         .list()
         .filter(|r| {
-            let outcome_ok = outcome_filter.map(|o| r.outcome == o).unwrap_or(true);
-            let guided_ok = !guided_only || r.from_guided_flow;
-            outcome_ok && guided_ok
+            let ok = outcome_filter.map(|o| r.outcome == o).unwrap_or(true);
+            ok && (!guided_only || r.from_guided_flow)
         })
         .take(limit)
         .map(record_to_json)
         .collect();
-
     Json(json!({
         "schema_version": "1.0",
         "summary": summary_to_json(&log),
@@ -127,33 +110,34 @@ pub async fn list_all_transactions(
     }))
 }
 
-/// GET /_localstack/studio-api/transactions/{service}
-///
-/// Returns transactions for a single service, optionally filtered.
 pub async fn list_service_transactions(
     State(state): State<ApiState>,
     Path(service): Path<String>,
     Query(params): Query<TransactionQueryParams>,
 ) -> impl IntoResponse {
     let canonical = to_provider_slug(&service).to_string();
-    let log = state.transaction_log.lock().await;
+    let Some(log_arc) = &state.transaction_log else {
+        return Json(json!({
+            "schema_version": "1.0",
+            "service": canonical,
+            "total": 0,
+            "transactions": [],
+        }));
+    };
+    let log = log_arc.lock().await;
     let limit = params.limit.unwrap_or(200).min(2000);
     let outcome_filter = params.outcome.as_deref().and_then(parse_outcome);
     let guided_only = params.guided_only.unwrap_or(false);
-
     let records: Vec<serde_json::Value> = log
         .for_service(&canonical)
         .filter(|r| {
-            let outcome_ok = outcome_filter.map(|o| r.outcome == o).unwrap_or(true);
-            let guided_ok = !guided_only || r.from_guided_flow;
-            outcome_ok && guided_ok
+            let ok = outcome_filter.map(|o| r.outcome == o).unwrap_or(true);
+            ok && (!guided_only || r.from_guided_flow)
         })
         .take(limit)
         .map(record_to_json)
         .collect();
-
     let total = log.for_service(&canonical).count();
-
     Json(json!({
         "schema_version": "1.0",
         "service": canonical,
@@ -162,15 +146,16 @@ pub async fn list_service_transactions(
     }))
 }
 
-/// POST /_localstack/studio-api/transactions/record
-///
-/// Appends a completed transaction to the log.
-/// Called by the gateway after every handled request (fire-and-forget).
 pub async fn record_transaction(
     State(state): State<ApiState>,
     Json(payload): Json<RecordTransactionRequest>,
 ) -> impl IntoResponse {
     use openstack_studio_ui::TransactionRecord;
+
+    let Some(log_arc) = &state.transaction_log else {
+        // Studio disabled — silently discard, return a fake ID.
+        return (StatusCode::CREATED, Json(json!({ "id": 0 }))).into_response();
+    };
 
     let mut record = TransactionRecord::new(
         0,
@@ -179,7 +164,6 @@ pub async fn record_transaction(
         payload.path,
         payload.started_at_ms,
     );
-
     if let Some(op) = payload.operation {
         record = record.with_operation(op);
     }
@@ -189,25 +173,19 @@ pub async fn record_transaction(
     if payload.from_guided_flow.unwrap_or(false) {
         record = record.with_guided();
     }
-
     let response_body = payload.response_body_preview.as_deref().unwrap_or("");
     record = record.complete(payload.status, response_body, payload.duration_ms);
 
-    let mut log = state.transaction_log.lock().await;
+    let mut log = log_arc.lock().await;
     let id = log.push(record);
-
-    (
-        StatusCode::CREATED,
-        Json(json!({ "id": id })),
-    )
-        .into_response()
+    (StatusCode::CREATED, Json(json!({ "id": id }))).into_response()
 }
 
-/// DELETE /_localstack/studio-api/transactions
-///
-/// Clears the in-memory transaction log.  Useful for test isolation.
 pub async fn clear_transactions(State(state): State<ApiState>) -> impl IntoResponse {
-    let mut log = state.transaction_log.lock().await;
+    let Some(log_arc) = &state.transaction_log else {
+        return Json(json!({ "cleared": 0 }));
+    };
+    let mut log = log_arc.lock().await;
     let count = log.len();
     log.clear();
     Json(json!({ "cleared": count }))

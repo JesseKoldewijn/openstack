@@ -225,27 +225,68 @@ impl StudioApiClient {
 
     pub async fn services(&self) -> Result<StudioServicesResponse, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/services", self.base_url);
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn interaction_schema(&self) -> Result<InteractionSchema, StudioApiError> {
-        let url = format!("{}/_localstack/studio-api/interactions/schema", self.base_url);
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        let url = format!(
+            "{}/_localstack/studio-api/interactions/schema",
+            self.base_url
+        );
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn flow_catalog(&self) -> Result<FlowCatalogResponse, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/flows/catalog", self.base_url);
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
-    pub async fn flow_definition(&self, service: &str) -> Result<FlowDefinitionResponse, StudioApiError> {
+    pub async fn flow_definition(
+        &self,
+        service: &str,
+    ) -> Result<FlowDefinitionResponse, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/flows/{}", self.base_url, service);
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn flow_coverage(&self) -> Result<FlowCoverageResponse, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/flows/coverage", self.base_url);
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     // ── New endpoints ────────────────────────────────────────────────────
@@ -253,7 +294,14 @@ impl StudioApiClient {
     /// Fetch the Studio runtime config (credentials, endpoint, polling).
     pub async fn runtime_config(&self) -> Result<StudioRuntimeConfig, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/runtime-config", self.base_url);
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     /// Fetch the operation catalogue for a single service.
@@ -261,14 +309,31 @@ impl StudioApiClient {
         &self,
         service: &str,
     ) -> Result<ServiceOperationsResponse, StudioApiError> {
-        let url = format!("{}/_localstack/studio-api/operations/{}", self.base_url, service);
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        let url = format!(
+            "{}/_localstack/studio-api/operations/{}",
+            self.base_url, service
+        );
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     /// Fetch the operation catalogue for all services.
     pub async fn all_operations(&self) -> Result<Value, StudioApiError> {
         let url = format!("{}/_localstack/studio-api/operations", self.base_url);
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     /// Fetch the live storage snapshot for a single service.
@@ -276,8 +341,18 @@ impl StudioApiClient {
         &self,
         service: &str,
     ) -> Result<ServiceStorageResponse, StudioApiError> {
-        let url = format!("{}/_localstack/studio-api/storage/{}", self.base_url, service);
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        let url = format!(
+            "{}/_localstack/studio-api/storage/{}",
+            self.base_url, service
+        );
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     /// Fetch the transaction log for a service, with optional filters.
@@ -292,9 +367,20 @@ impl StudioApiClient {
             "{}/_localstack/studio-api/transactions/{}?limit={}",
             self.base_url, service, limit
         );
-        if let Some(o) = outcome { url.push_str(&format!("&outcome={}", o)); }
-        if guided_only { url.push_str("&guided_only=true"); }
-        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+        if let Some(o) = outcome {
+            url.push_str(&format!("&outcome={}", o));
+        }
+        if guided_only {
+            url.push_str("&guided_only=true");
+        }
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     /// Clear the transaction log.
@@ -306,7 +392,10 @@ impl StudioApiClient {
 
     /// Record a completed transaction (typically called from the SPA after an operation).
     pub async fn record_transaction(&self, body: &serde_json::Value) -> Result<(), StudioApiError> {
-        let url = format!("{}/_localstack/studio-api/transactions/record", self.base_url);
+        let url = format!(
+            "{}/_localstack/studio-api/transactions/record",
+            self.base_url
+        );
         self.http
             .post(url)
             .json(body)
@@ -356,6 +445,10 @@ impl StudioApiClient {
             Err(_) => raw_text,
         };
 
-        Ok(RawResponse { status, headers, body })
+        Ok(RawResponse {
+            status,
+            headers,
+            body,
+        })
     }
 }

@@ -88,11 +88,7 @@ pub struct OperationsTabViewModel {
 }
 
 impl OperationsTabViewModel {
-    pub fn build(
-        service: &str,
-        catalog: &OperationCatalog,
-        filter: OperationFilter,
-    ) -> Self {
+    pub fn build(service: &str, catalog: &OperationCatalog, filter: OperationFilter) -> Self {
         let set = catalog.for_service(service);
         let total = set.map(|s| s.total()).unwrap_or(0);
         let guided_count = set.map(|s| s.guided_count()).unwrap_or(0);
@@ -286,11 +282,7 @@ pub struct TransactionsTabViewModel {
 }
 
 impl TransactionsTabViewModel {
-    pub fn build(
-        service: &str,
-        log: &TransactionLog,
-        filter: TransactionFilter,
-    ) -> Self {
+    pub fn build(service: &str, log: &TransactionLog, filter: TransactionFilter) -> Self {
         let all: Vec<&TransactionRecord> = log.for_service(service).collect();
         let total = all.len();
         let success_count = all
@@ -310,10 +302,7 @@ impl TransactionsTabViewModel {
         let rows = all
             .iter()
             .filter(|r| {
-                let outcome_ok = filter
-                    .outcome
-                    .map(|o| r.outcome == o)
-                    .unwrap_or(true);
+                let outcome_ok = filter.outcome.map(|o| r.outcome == o).unwrap_or(true);
                 let guided_ok = !filter.guided_only || r.from_guided_flow;
                 outcome_ok && guided_ok
             })
@@ -369,7 +358,10 @@ impl ServiceExplorerViewModel {
             .map(|s| s.guided_count())
             .unwrap_or(0);
 
-        let storage_count = storage.get(service).map(|s| s.resource_count()).unwrap_or(0);
+        let storage_count = storage
+            .get(service)
+            .map(|s| s.resource_count())
+            .unwrap_or(0);
         let tx_summary = log.summary();
         let service_tx_count = log.for_service(service).count();
 
@@ -425,9 +417,7 @@ mod tests {
         FlowCatalogEntry, FlowCatalogResponse, FlowCoverageEntry, FlowCoverageResponse,
         ServiceEntry, StudioServicesResponse,
     };
-    use crate::storage_inspector::{
-        S3StorageSnapshot, ServiceStorageSnapshot, StorageResource,
-    };
+    use crate::storage_inspector::{S3StorageSnapshot, ServiceStorageSnapshot, StorageResource};
     use crate::transaction_log::TransactionRecord;
 
     fn base_catalog() -> ServiceCatalog {
@@ -512,9 +502,7 @@ mod tests {
     fn transactions_tab_filters_by_outcome() {
         let mut log = TransactionLog::new(50);
         for status in [200u16, 200, 404, 500] {
-            log.push(
-                TransactionRecord::new(0, "s3", "POST", "/", 0).complete(status, "", 10),
-            );
+            log.push(TransactionRecord::new(0, "s3", "POST", "/", 0).complete(status, "", 10));
         }
 
         let filter = TransactionFilter {
@@ -535,9 +523,7 @@ mod tests {
                 .with_guided()
                 .complete(200, "", 5),
         );
-        log.push(
-            TransactionRecord::new(0, "s3", "PUT", "/", 0).complete(200, "", 5),
-        );
+        log.push(TransactionRecord::new(0, "s3", "PUT", "/", 0).complete(200, "", 5));
 
         let filter = TransactionFilter {
             outcome: None,

@@ -1,4 +1,7 @@
-use axum::{Router, routing::{delete, get, post}};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 use crate::ApiState;
 

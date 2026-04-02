@@ -32,8 +32,13 @@ pub async fn get_service_storage(
     let canonical = to_provider_slug(&service).to_string();
     let raw_snapshots = state.plugin_manager.storage_snapshots().await;
 
-    match raw_snapshots.into_iter().find(|(name, _)| name == &canonical) {
-        Some((_, snapshot)) => Json(json!({ "service": canonical, "snapshot": snapshot })).into_response(),
+    match raw_snapshots
+        .into_iter()
+        .find(|(name, _)| name == &canonical)
+    {
+        Some((_, snapshot)) => {
+            Json(json!({ "service": canonical, "snapshot": snapshot })).into_response()
+        }
         None => {
             let service_states = state.plugin_manager.service_states().await;
             let is_registered = service_states.iter().any(|(name, _)| name == &canonical);
@@ -42,13 +47,18 @@ pub async fn get_service_storage(
                     "service": canonical,
                     "snapshot": null,
                     "message": "Service is registered but does not expose storage snapshots",
-                })).into_response()
+                }))
+                .into_response()
             } else {
-                (StatusCode::NOT_FOUND, Json(json!({
-                    "error": "service_not_found",
-                    "service": canonical,
-                    "message": format!("Service '{canonical}' is not registered"),
-                }))).into_response()
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": "service_not_found",
+                        "service": canonical,
+                        "message": format!("Service '{canonical}' is not registered"),
+                    })),
+                )
+                    .into_response()
             }
         }
     }

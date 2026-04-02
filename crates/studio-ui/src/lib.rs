@@ -22,9 +22,9 @@ pub mod workspace;
 pub use api::StudioApiClient;
 pub use api::StudioUrlResolution;
 pub use api::{
-    AllTransactionsResponse, OperationEntryDto, ServiceOperationsResponse,
-    ServiceStorageResponse, ServiceTransactionsResponse, StudioCredentials,
-    StudioPollingConfig, StudioRuntimeConfig, TransactionDto, TransactionSummaryDto,
+    AllTransactionsResponse, OperationEntryDto, ServiceOperationsResponse, ServiceStorageResponse,
+    ServiceTransactionsResponse, StudioCredentials, StudioPollingConfig, StudioRuntimeConfig,
+    TransactionDto, TransactionSummaryDto,
 };
 pub use catalog::ServiceCatalog;
 pub use console::RawConsoleState;
@@ -59,11 +59,11 @@ pub use protocol_adapters::{
     execute_protocol_adapter,
 };
 pub use service_detail::{PanelState, ServiceDetailLayout, build_service_detail_layout};
+pub use slugs::{alias_map, to_manifest_slug, to_provider_slug};
 pub use state::{ThemeMode, ThemeStore};
 pub use storage_inspector::{
-    RuntimeStorageState, ServiceStorageSnapshot, StorageResource, ResourceAttribute,
+    ResourceAttribute, RuntimeStorageState, ServiceStorageSnapshot, StorageResource,
 };
-pub use slugs::{alias_map, to_manifest_slug, to_provider_slug};
 pub use transaction_log::{
     TransactionLog, TransactionOutcome, TransactionRecord, TransactionSummary,
 };

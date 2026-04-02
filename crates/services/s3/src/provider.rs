@@ -2703,11 +2703,7 @@ impl ServiceProvider for S3Provider {
             let region = entry.key().region().to_string();
             let store = entry.value();
             for (name, bucket) in &store.buckets {
-                let object_count = store
-                    .objects
-                    .get(name)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let object_count = store.objects.get(name).map(|m| m.len()).unwrap_or(0);
                 buckets.push(json!({
                     "id": name,
                     "kind": "bucket",
