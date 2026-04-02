@@ -52,18 +52,874 @@ const STUDIO_SPA: &str = r#"<!doctype html>
 "#;
 
 const STUDIO_ASSET_JS: &str = r#"(function () {
-  const root = document.getElementById('studio-app');
-  if (!root) return;
+'use strict';
+// ─── openstack Studio SPA v2 ───────────────────────────────────────────────
+// Tab-based service explorer: Overview · Operations · Storage · Transactions
+// Zero external dependencies. Compiled into the gateway binary.
+// ───────────────────────────────────────────────────────────────────────────
+
+const root = document.getElementById('studio-app');
+if (!root) return;
+
+// ── State ──────────────────────────────────────────────────────────────────
+const S = {
+  // catalogue data
+  services: [],       // [{name, status, support_tier}]
+  flowCatalog: [],    // [{service, protocol, flow_count, maturity}]
+  flowCoverage: [],   // [{service, has_manifest, l1_flows, quality}]
+  opsCatalog: {},     // service → [{name,method,path,has_guided_flow}]
+
+  // explorer navigation
+  selectedService: null,
+  activeTab: 'overview',   // overview | operations | storage | transactions
+
+  // service detail data (per selected service)
+  flowDefinition: null,    // {flows:[{id,level,steps,cleanup}], inputs:[]}
+  storage: null,           // {snapshot:{...}}
+  transactions: [],        // [{id,method,path,status,outcome,...}]
+  txSummary: null,
+
+  // guided interaction form
+  guided: {
+    selectedFlowId: null,
+    inputs: {},
+    running: false,
+    log: [],             // [{stepId, title, status, body, duration_ms}]
+  },
+
+  // raw console
+  raw: { method: 'GET', path: '/_localstack/health', headers: '', body: '' },
+  rawResponse: null,
+
+  // tx filter
+  txFilter: { outcome: '', guidedOnly: false },
+
+  // ops filter
+  opsFilter: { query: '', guidedOnly: false },
+
+  // ui state
+  loading: {},   // keyed loading flags
+  errors: {},    // keyed error messages
+  theme: localStorage.getItem('studio-theme') || 'dark',
+};
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function setTheme(t) {
+  S.theme = t;
+  localStorage.setItem('studio-theme', t);
+  document.documentElement.setAttribute('data-theme', t);
+}
+
+function fmt(v, fallback = '—') { return v != null && v !== '' ? v : fallback; }
+
+function outcomeClass(o) {
+  return {success:'outcome-ok', client_error:'outcome-warn',
+          server_error:'outcome-err', pending:'outcome-pending'}[o] || '';
+}
+
+function methodBadge(m) {
+  const cls = {GET:'method-get',POST:'method-post',PUT:'method-put',
+               DELETE:'method-del',PATCH:'method-patch',HEAD:'method-head'}[m] || 'method-other';
+  return `<span class="method-badge ${cls}">${esc(m)}</span>`;
+}
+
+function statusBadge(s) {
+  const cls = s >= 500 ? 'status-err' : s >= 400 ? 'status-warn' : s >= 200 ? 'status-ok' : 'status-pending';
+  return `<span class="status-badge ${cls}">${esc(s || '…')}</span>`;
+}
+
+// ── API ────────────────────────────────────────────────────────────────────
+const BASE = '';
+
+async function api(path, opts = {}) {
+  const r = await fetch(BASE + path, {
+    headers: { accept: 'application/json', ...opts.headers },
+    ...opts,
+  });
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
+}
+
+async function postJson(path, body) {
+  return api(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+// ── Data loading ──────────────────────────────────────────────────────────
+async function loadCatalogue() {
+  setLoading('catalogue', true);
+  try {
+    const [svcs, cat, cov, ops] = await Promise.all([
+      api('/_localstack/studio-api/services'),
+      api('/_localstack/studio-api/flows/catalog'),
+      api('/_localstack/studio-api/flows/coverage'),
+      api('/_localstack/studio-api/operations'),
+    ]);
+    S.services    = svcs.services  || [];
+    S.flowCatalog = cat.services   || [];
+    S.flowCoverage = cov.services  || [];
+    for (const svcOps of (ops.services || [])) {
+      S.opsCatalog[svcOps.service] = svcOps.operations || [];
+    }
+    clearError('catalogue');
+  } catch (e) {
+    setError('catalogue', e.message);
+  } finally {
+    setLoading('catalogue', false);
+  }
+}
+
+async function loadServiceDetail(service) {
+  setLoading('detail', true);
+  try {
+    const [flowDef, stor, txResp] = await Promise.all([
+      api(`/_localstack/studio-api/flows/${service}`).catch(() => ({ flows: [], inputs: [] })),
+      api(`/_localstack/studio-api/storage/${service}`).catch(() => null),
+      api(`/_localstack/studio-api/transactions/${service}?limit=100`).catch(() => ({ transactions: [], total: 0 })),
+    ]);
+    S.flowDefinition = flowDef;
+    S.storage        = stor;
+    S.transactions   = txResp.transactions || [];
+    S.txSummary      = { total: txResp.total || 0 };
+    // Pre-select first flow
+    if (flowDef.flows?.length && !S.guided.selectedFlowId) {
+      S.guided.selectedFlowId = flowDef.flows[0].id;
+      S.guided.inputs = {};
+      S.guided.log = [];
+    }
+    clearError('detail');
+  } catch (e) {
+    setError('detail', e.message);
+  } finally {
+    setLoading('detail', false);
+  }
+}
+
+async function refreshTransactions() {
+  if (!S.selectedService) return;
+  try {
+    const params = new URLSearchParams({ limit: 200 });
+    if (S.txFilter.outcome) params.set('outcome', S.txFilter.outcome);
+    if (S.txFilter.guidedOnly) params.set('guided_only', 'true');
+    const r = await api(`/_localstack/studio-api/transactions/${S.selectedService}?${params}`);
+    S.transactions = r.transactions || [];
+    S.txSummary = { total: r.total || 0 };
+    render();
+  } catch (_) {}
+}
+
+async function refreshStorage() {
+  if (!S.selectedService) return;
+  try {
+    S.storage = await api(`/_localstack/studio-api/storage/${S.selectedService}`).catch(() => null);
+    render();
+  } catch (_) {}
+}
+
+// ── Loading / error helpers ────────────────────────────────────────────────
+function setLoading(k, v) { S.loading[k] = v; render(); }
+function setError(k, v)   { S.errors[k] = v; render(); }
+function clearError(k)    { delete S.errors[k]; }
+
+// ── Render ────────────────────────────────────────────────────────────────
+function render() {
+  root.innerHTML = layout();
+  bindEvents();
+}
+
+function layout() {
+  return `
+<div class="app" data-theme="${esc(S.theme)}">
+  ${topBar()}
+  <div class="workspace">
+    ${sidebar()}
+    <div class="main">
+      ${S.selectedService ? explorerView() : welcomeView()}
+    </div>
+  </div>
+</div>`;
+}
+
+// ── Top bar ────────────────────────────────────────────────────────────────
+function topBar() {
+  const health = S.services.length ? `<span class="chip chip-ok">${S.services.length} services</span>` : '';
+  return `
+<header class="topbar">
+  <div class="topbar-brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+    </svg>
+    <span class="topbar-title">openstack studio</span>
+    ${health}
+  </div>
+  <div class="topbar-actions">
+    <button class="icon-btn" data-action="refresh-all" title="Refresh all">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>
+        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>
+      </svg>
+    </button>
+    <button class="icon-btn" data-action="toggle-theme" title="Toggle theme">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+      </svg>
+    </button>
+  </div>
+</header>`;
+}
+
+// ── Sidebar ────────────────────────────────────────────────────────────────
+function sidebar() {
+  if (S.loading.catalogue) return `<aside class="sidebar"><div class="sidebar-loading">Loading services…</div></aside>`;
+  if (S.errors.catalogue) return `<aside class="sidebar"><div class="sidebar-error">${esc(S.errors.catalogue)}</div></aside>`;
+
+  const byFlow = new Map(S.flowCatalog.map(x => [x.service, x]));
+  const rows = S.services.map(s => {
+    const flow = byFlow.get(s.name) || {};
+    const isSelected = s.name === S.selectedService;
+    const tier = s.support_tier === 'guided' ? `<span class="chip chip-guided">guided</span>` : `<span class="chip chip-raw">raw</span>`;
+    const statusDot = `<span class="dot dot-${s.status}"></span>`;
+    return `
+<button class="svc-card ${isSelected ? 'svc-card--active' : ''}" data-select="${esc(s.name)}">
+  <div class="svc-card-row">
+    ${statusDot}<strong>${esc(s.name)}</strong>${tier}
+  </div>
+  <div class="svc-card-meta">${esc(flow.protocol || '—')} · ${esc(flow.flow_count ?? 0)} flows</div>
+</button>`;
+  });
+
+  return `
+<aside class="sidebar">
+  <div class="sidebar-search">
+    <input class="search-input" placeholder="Filter services…" id="svc-search" value="${esc(S._svcSearch || '')}">
+  </div>
+  <div class="sidebar-list" id="svc-list">
+    ${rows.join('') || '<div class="sidebar-empty">No services registered</div>'}
+  </div>
+</aside>`;
+}
+
+// ── Welcome ────────────────────────────────────────────────────────────────
+function welcomeView() {
+  const guided = S.services.filter(s => s.support_tier === 'guided').length;
+  const total  = S.services.length;
+  return `
+<div class="welcome">
+  <div class="welcome-hero">
+    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4">
+      <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+    </svg>
+    <h1>openstack studio</h1>
+    <p>Select a service from the sidebar to inspect its operations, storage state, and live transactions.</p>
+  </div>
+  ${total ? `
+  <div class="stat-row">
+    <div class="stat-card"><div class="stat-num">${total}</div><div class="stat-label">Services</div></div>
+    <div class="stat-card"><div class="stat-num">${guided}</div><div class="stat-label">Guided</div></div>
+    <div class="stat-card"><div class="stat-num">${Object.keys(S.opsCatalog).reduce((a,k)=>a+S.opsCatalog[k].length,0)}</div><div class="stat-label">Operations</div></div>
+  </div>` : ''}
+</div>`;
+}
+
+// ── Explorer ───────────────────────────────────────────────────────────────
+function explorerView() {
+  const tabs = ['overview','operations','storage','transactions'];
+  const tabBar = tabs.map(t => `
+<button class="tab ${S.activeTab === t ? 'tab--active' : ''}" data-tab="${t}">
+  ${t.charAt(0).toUpperCase() + t.slice(1)}${tabBadge(t)}
+</button>`).join('');
+
+  const panel = {
+    overview:     overviewTab,
+    operations:   operationsTab,
+    storage:      storageTab,
+    transactions: transactionsTab,
+  }[S.activeTab]?.() ?? '';
+
+  return `
+<div class="explorer">
+  <div class="explorer-header">
+    <div class="explorer-title">
+      <h2>${esc(S.selectedService)}</h2>
+      ${serviceMeta()}
+    </div>
+    <div class="tab-bar">${tabBar}</div>
+  </div>
+  <div class="explorer-body">
+    ${S.loading.detail ? '<div class="panel-loading">Loading…</div>' : panel}
+  </div>
+</div>`;
+}
+
+function tabBadge(t) {
+  if (t === 'transactions' && S.transactions.length) return ` <span class="tab-badge">${S.transactions.length}</span>`;
+  if (t === 'operations') {
+    const ops = S.opsCatalog[S.selectedService] || [];
+    if (ops.length) return ` <span class="tab-badge">${ops.length}</span>`;
+  }
+  return '';
+}
+
+function serviceMeta() {
+  const svc = S.services.find(s => s.name === S.selectedService);
+  const flow = S.flowCatalog.find(f => f.service === S.selectedService);
+  if (!svc) return '';
+  const statusDot = `<span class="dot dot-${svc.status}"></span>`;
+  return `<div class="explorer-meta">${statusDot} ${esc(svc.status)} · ${esc(flow?.protocol || '—')}</div>`;
+}
+
+// ── Overview tab ───────────────────────────────────────────────────────────
+function overviewTab() {
+  const svc   = S.services.find(s => s.name === S.selectedService) || {};
+  const flow  = S.flowCatalog.find(f => f.service === S.selectedService) || {};
+  const cov   = S.flowCoverage.find(f => f.service === S.selectedService) || {};
+  const ops   = S.opsCatalog[S.selectedService] || [];
+  const stor  = S.storage?.snapshot;
+  const txs   = S.transactions;
+
+  const storCount  = storageResourceCount(stor);
+  const errCount   = txs.filter(t => t.outcome === 'client_error' || t.outcome === 'server_error').length;
+  const okCount    = txs.filter(t => t.outcome === 'success').length;
+  const avgDur     = txs.filter(t=>t.duration_ms!=null).length
+    ? Math.round(txs.reduce((a,t)=>a+(t.duration_ms||0),0)/txs.filter(t=>t.duration_ms!=null).length)
+    : null;
+
+  return `
+<div class="overview-grid">
+  <div class="ov-card">
+    <div class="ov-label">Status</div>
+    <div class="ov-value"><span class="dot dot-${svc.status}"></span> ${esc(svc.status || '—')}</div>
+  </div>
+  <div class="ov-card">
+    <div class="ov-label">Protocol</div>
+    <div class="ov-value">${esc(flow.protocol || '—')}</div>
+  </div>
+  <div class="ov-card">
+    <div class="ov-label">Tier</div>
+    <div class="ov-value">${svc.support_tier === 'guided'
+      ? '<span class="chip chip-guided">guided</span>'
+      : '<span class="chip chip-raw">raw</span>'}</div>
+  </div>
+  <div class="ov-card">
+    <div class="ov-label">Operations</div>
+    <div class="ov-value ov-num">${ops.length || '—'}</div>
+  </div>
+  <div class="ov-card">
+    <div class="ov-label">Guided flows</div>
+    <div class="ov-value ov-num">${flow.flow_count ?? '—'}</div>
+  </div>
+  <div class="ov-card">
+    <div class="ov-label">Coverage</div>
+    <div class="ov-value">${esc(cov.quality || '—')}</div>
+  </div>
+  <div class="ov-card">
+    <div class="ov-label">Storage resources</div>
+    <div class="ov-value ov-num">${storCount ?? '—'}</div>
+  </div>
+  <div class="ov-card">
+    <div class="ov-label">Transactions (session)</div>
+    <div class="ov-value ov-num">${txs.length}</div>
+  </div>
+  <div class="ov-card">
+    <div class="ov-label">Errors</div>
+    <div class="ov-value ${errCount > 0 ? 'ov-err' : 'ov-ok'}">${errCount}</div>
+  </div>
+  ${avgDur != null ? `
+  <div class="ov-card">
+    <div class="ov-label">Avg latency</div>
+    <div class="ov-value ov-num">${avgDur} ms</div>
+  </div>` : ''}
+</div>
+${guidedPanel()}`;
+}
+
+function storageResourceCount(snap) {
+  if (!snap) return null;
+  const arrays = Object.values(snap).filter(Array.isArray);
+  return arrays.reduce((a, arr) => a + arr.length, 0);
+}
+
+// ── Guided interaction panel ───────────────────────────────────────────────
+function guidedPanel() {
+  const flows = S.flowDefinition?.flows || [];
+  if (!flows.length) return `
+<div class="panel-section">
+  <div class="panel-section-title">Guided interaction</div>
+  <div class="empty-state">No guided flows available for this service.</div>
+  ${rawConsolePanel()}
+</div>`;
+
+  const flowTabs = flows.map(f => `
+<button class="sub-tab ${S.guided.selectedFlowId === f.id ? 'sub-tab--active' : ''}" data-flow="${esc(f.id)}">
+  ${esc(f.id)} <span class="chip chip-level">${esc(f.level)}</span>
+</button>`).join('');
+
+  const selectedFlow = flows.find(f => f.id === S.guided.selectedFlowId) || flows[0];
+  const inputs = S.flowDefinition?.inputs || [];
+
+  const inputFields = inputs.map(inp => `
+<div class="field-row">
+  <label class="field-label">${esc(inp.name)}${inp.required ? ' <span class="req">*</span>' : ''}</label>
+  ${inp.description ? `<div class="field-desc">${esc(inp.description)}</div>` : ''}
+  <input class="field-input" data-input="${esc(inp.name)}"
+    value="${esc(S.guided.inputs[inp.name] || '')}"
+    placeholder="${esc(inp.name)}" />
+</div>`).join('');
+
+  const steps = selectedFlow?.steps || [];
+  const stepPreview = steps.map((s,i) => {
+    const log = S.guided.log.find(l => l.stepId === s.id);
+    const stateClass = log ? (log.success ? 'step-ok' : 'step-err') : '';
+    return `
+<div class="step-row ${stateClass}">
+  <span class="step-num">${i+1}</span>
+  <div class="step-body">
+    <div class="step-title">${esc(s.title)}</div>
+    <div class="step-op">${methodBadge(s.operation?.method || 'GET')} <code>${esc(s.operation?.path || '/')}</code></div>
+    ${log ? `<div class="step-result">${statusBadge(log.status)} ${log.duration_ms != null ? `<span class="step-dur">${log.duration_ms}ms</span>` : ''}
+      <pre class="step-body-preview">${esc((log.body||'').slice(0,400))}</pre>
+    </div>` : ''}
+    ${s.error_guidance && log && !log.success ? `<div class="step-guidance">${esc(s.error_guidance)}</div>` : ''}
+  </div>
+</div>`;
+  }).join('');
+
+  return `
+<div class="panel-section">
+  <div class="panel-section-title">Guided interaction</div>
+  <div class="sub-tabs">${flowTabs}</div>
+  ${inputs.length ? `
+  <div class="guided-inputs">
+    <div class="inputs-title">Inputs</div>
+    ${inputFields}
+  </div>` : ''}
+  <div class="guided-steps">${stepPreview || '<div class="empty-state">No steps in this flow.</div>'}</div>
+  <div class="guided-actions">
+    <button class="btn btn-primary ${S.guided.running ? 'btn-loading' : ''}"
+      data-action="run-guided" ${S.guided.running ? 'disabled' : ''}>
+      ${S.guided.running ? 'Running…' : '▶ Run flow'}
+    </button>
+    ${S.guided.log.length ? `<button class="btn btn-ghost" data-action="clear-guided">Clear results</button>` : ''}
+  </div>
+</div>
+${rawConsolePanel()}`;
+}
+
+// ── Raw console panel ──────────────────────────────────────────────────────
+function rawConsolePanel() {
+  const resp = S.rawResponse;
+  return `
+<div class="panel-section">
+  <div class="panel-section-title">Raw request</div>
+  <div class="raw-form">
+    <div class="raw-row">
+      <select class="raw-method" id="raw-method">
+        ${['GET','POST','PUT','DELETE','PATCH','HEAD'].map(m =>
+          `<option ${S.raw.method===m?'selected':''}>${m}</option>`).join('')}
+      </select>
+      <input class="raw-path" id="raw-path" value="${esc(S.raw.path)}" placeholder="/_localstack/health" />
+    </div>
+    <textarea class="raw-body" id="raw-body" rows="3" placeholder="Request body (JSON / XML)">${esc(S.raw.body)}</textarea>
+    <button class="btn btn-primary" data-action="run-raw">Send</button>
+  </div>
+  ${resp ? `
+  <div class="raw-response">
+    ${statusBadge(resp.status)}
+    <pre class="resp-body">${esc(resp.body.slice(0,4000))}</pre>
+  </div>` : ''}
+</div>`;
+}
+
+// ── Operations tab ─────────────────────────────────────────────────────────
+function operationsTab() {
+  const all  = S.opsCatalog[S.selectedService] || [];
+  const q    = (S.opsFilter.query || '').toLowerCase();
+  const ops  = all.filter(op => {
+    const nameOk = !q || op.name.toLowerCase().includes(q);
+    const gOk    = !S.opsFilter.guidedOnly || op.has_guided_flow;
+    return nameOk && gOk;
+  });
+
+  const guided = all.filter(o => o.has_guided_flow).length;
+
+  if (!all.length) return `<div class="empty-state">No operation catalogue for this service.</div>`;
+
+  const rows = ops.map(op => `
+<div class="op-row" data-op="${esc(op.name)}">
+  <div class="op-left">
+    ${methodBadge(op.method)}
+    <div class="op-name">${esc(op.name)}</div>
+    ${op.has_guided_flow ? '<span class="chip chip-guided">guided</span>' : ''}
+  </div>
+  <code class="op-path">${esc(op.path)}</code>
+  <button class="btn-tiny" data-fill-raw="${esc(op.name)}" title="Fill raw console">↗</button>
+</div>`).join('');
+
+  return `
+<div class="ops-toolbar">
+  <input class="search-input" id="ops-search" placeholder="Search operations…" value="${esc(S.opsFilter.query)}">
+  <label class="toggle-label">
+    <input type="checkbox" id="ops-guided-only" ${S.opsFilter.guidedOnly?'checked':''}>
+    Guided only
+  </label>
+  <span class="ops-stats">${ops.length} / ${all.length} · ${guided} guided</span>
+</div>
+<div class="op-list">
+  ${rows || '<div class="empty-state">No operations match the filter.</div>'}
+</div>`;
+}
+
+// ── Storage tab ────────────────────────────────────────────────────────────
+function storageTab() {
+  const snap = S.storage?.snapshot;
+
+  return `
+<div class="storage-toolbar">
+  <button class="btn btn-ghost" data-action="refresh-storage">↻ Refresh</button>
+</div>
+${snap ? renderStorageSnapshot(snap) : '<div class="empty-state">No storage snapshot available. The service may not implement storage introspection.</div>'}`;
+}
+
+function renderStorageSnapshot(snap) {
+  // snap is {kind:'s3', buckets:[...]} etc.
+  const sections = [];
+  for (const [key, val] of Object.entries(snap)) {
+    if (key === 'kind') continue;
+    if (!Array.isArray(val)) continue;
+    sections.push(renderStorageSection(key, val));
+  }
+  if (!sections.length) return '<div class="empty-state">No resources found.</div>';
+  return sections.join('');
+}
+
+function renderStorageSection(heading, resources) {
+  if (!resources.length) return `
+<div class="storage-section">
+  <div class="storage-section-title">${esc(heading)} <span class="chip">0</span></div>
+  <div class="empty-state">Empty</div>
+</div>`;
+
+  const rows = resources.map(r => {
+    const attrs = (r.attributes || []).map(a =>
+      `<span class="attr-pair"><span class="attr-key">${esc(a.key)}</span><span class="attr-val">${esc(a.value)}</span></span>`
+    ).join('');
+    return `
+<div class="resource-row">
+  <div class="resource-id" title="${esc(r.id)}">${esc(r.id)}</div>
+  ${r.created_at ? `<div class="resource-ts">${esc(r.created_at.slice(0,19).replace('T',' '))}</div>` : ''}
+  <div class="resource-attrs">${attrs}</div>
+</div>`;
+  }).join('');
+
+  return `
+<div class="storage-section">
+  <div class="storage-section-title">${esc(heading.replace(/_/g,' '))} <span class="chip">${resources.length}</span></div>
+  <div class="resource-list">${rows}</div>
+</div>`;
+}
+
+// ── Transactions tab ──────────────────────────────────────────────────────
+function transactionsTab() {
+  const summary = S.txSummary;
+  const txs = S.transactions;
+
+  const summaryBar = summary ? `
+<div class="tx-summary">
+  <span class="tx-stat">Total <strong>${summary.total}</strong></span>
+  <span class="tx-stat outcome-ok">✓ ${txs.filter(t=>t.outcome==='success').length}</span>
+  <span class="tx-stat outcome-warn">⚠ ${txs.filter(t=>t.outcome==='client_error').length}</span>
+  <span class="tx-stat outcome-err">✗ ${txs.filter(t=>t.outcome==='server_error').length}</span>
+</div>` : '';
+
+  const toolbar = `
+<div class="tx-toolbar">
+  ${summaryBar}
+  <div class="tx-filters">
+    <select id="tx-outcome-filter" class="filter-select">
+      <option value="">All outcomes</option>
+      <option value="success" ${S.txFilter.outcome==='success'?'selected':''}>Success</option>
+      <option value="client_error" ${S.txFilter.outcome==='client_error'?'selected':''}>Client error</option>
+      <option value="server_error" ${S.txFilter.outcome==='server_error'?'selected':''}>Server error</option>
+    </select>
+    <label class="toggle-label">
+      <input type="checkbox" id="tx-guided-only" ${S.txFilter.guidedOnly?'checked':''}>
+      Guided only
+    </label>
+    <button class="btn btn-ghost" data-action="refresh-tx">↻ Refresh</button>
+    <button class="btn btn-ghost btn-danger" data-action="clear-tx">Clear</button>
+  </div>
+</div>`;
+
+  if (!txs.length) return `${toolbar}<div class="empty-state">No transactions recorded yet. Run a guided flow or raw request to populate this log.</div>`;
+
+  const rows = txs.map(t => `
+<div class="tx-row ${outcomeClass(t.outcome)}">
+  <div class="tx-id">#${t.id}</div>
+  ${methodBadge(t.method)}
+  <div class="tx-path" title="${esc(t.path)}">${esc(t.path)}</div>
+  ${t.operation ? `<code class="tx-op">${esc(t.operation)}</code>` : ''}
+  ${statusBadge(t.status)}
+  ${t.duration_ms != null ? `<span class="tx-dur">${t.duration_ms}ms</span>` : ''}
+  ${t.from_guided_flow ? '<span class="chip chip-guided">guided</span>' : ''}
+  <button class="btn-tiny" data-replay-tx="${esc(t.id)}" title="Replay in raw console">↗</button>
+</div>`).join('');
+
+  return `${toolbar}<div class="tx-list">${rows}</div>`;
+}
+
+// ── Event binding ─────────────────────────────────────────────────────────
+function bindEvents() {
+  // Theme toggle
+  root.querySelector('[data-action="toggle-theme"]')?.addEventListener('click', () => {
+    setTheme(S.theme === 'dark' ? 'light' : 'dark');
+    render();
+  });
+
+  // Refresh all
+  root.querySelector('[data-action="refresh-all"]')?.addEventListener('click', async () => {
+    await loadCatalogue();
+    if (S.selectedService) await loadServiceDetail(S.selectedService);
+  });
+
+  // Service search
+  const search = root.querySelector('#svc-search');
+  if (search) {
+    search.addEventListener('input', e => {
+      S._svcSearch = e.target.value;
+      const q = e.target.value.toLowerCase();
+      root.querySelectorAll('.svc-card').forEach(card => {
+        const name = card.dataset.select || '';
+        card.style.display = !q || name.includes(q) ? '' : 'none';
+      });
+    });
+  }
+
+  // Service selection
+  root.querySelectorAll('[data-select]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const svc = btn.dataset.select;
+      if (S.selectedService !== svc) {
+        S.selectedService = svc;
+        S.activeTab = 'overview';
+        S.guided = { selectedFlowId: null, inputs: {}, running: false, log: [] };
+        S.rawResponse = null;
+        render();
+        await loadServiceDetail(svc);
+      }
+    });
+  });
+
+  // Tab switching
+  root.querySelectorAll('[data-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      S.activeTab = btn.dataset.tab;
+      render();
+    });
+  });
+
+  // Flow sub-tab
+  root.querySelectorAll('[data-flow]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      S.guided.selectedFlowId = btn.dataset.flow;
+      S.guided.log = [];
+      render();
+    });
+  });
+
+  // Guided inputs
+  root.querySelectorAll('[data-input]').forEach(inp => {
+    inp.addEventListener('input', e => {
+      S.guided.inputs[e.target.dataset.input] = e.target.value;
+    });
+  });
+
+  // Run guided
+  root.querySelector('[data-action="run-guided"]')?.addEventListener('click', runGuided);
+
+  // Clear guided
+  root.querySelector('[data-action="clear-guided"]')?.addEventListener('click', () => {
+    S.guided.log = [];
+    render();
+  });
+
+  // Run raw
+  root.querySelector('[data-action="run-raw"]')?.addEventListener('click', runRaw);
+
+  // Ops filter
+  root.querySelector('#ops-search')?.addEventListener('input', e => {
+    S.opsFilter.query = e.target.value;
+    render();
+  });
+  root.querySelector('#ops-guided-only')?.addEventListener('change', e => {
+    S.opsFilter.guidedOnly = e.target.checked;
+    render();
+  });
+
+  // Fill raw from op
+  root.querySelectorAll('[data-fill-raw]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const opName = btn.dataset.fillRaw;
+      const ops = S.opsCatalog[S.selectedService] || [];
+      const op = ops.find(o => o.name === opName);
+      if (op) {
+        S.raw.method = op.method;
+        S.raw.path   = op.path;
+        S.activeTab  = 'overview';
+        render();
+      }
+    });
+  });
+
+  // Storage refresh
+  root.querySelector('[data-action="refresh-storage"]')?.addEventListener('click', refreshStorage);
+
+  // Tx filters
+  root.querySelector('#tx-outcome-filter')?.addEventListener('change', e => {
+    S.txFilter.outcome = e.target.value;
+    refreshTransactions();
+  });
+  root.querySelector('#tx-guided-only')?.addEventListener('change', e => {
+    S.txFilter.guidedOnly = e.target.checked;
+    refreshTransactions();
+  });
+  root.querySelector('[data-action="refresh-tx"]')?.addEventListener('click', refreshTransactions);
+  root.querySelector('[data-action="clear-tx"]')?.addEventListener('click', async () => {
+    await fetch('/_localstack/studio-api/transactions', { method: 'DELETE' });
+    S.transactions = [];
+    render();
+  });
+
+  // Replay tx in raw console
+  root.querySelectorAll('[data-replay-tx]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.dataset.replayTx);
+      const tx = S.transactions.find(t => t.id === id);
+      if (tx) {
+        S.raw.method = tx.method;
+        S.raw.path   = tx.path;
+        S.raw.body   = tx.request_body_preview || '';
+        S.activeTab  = 'overview';
+        render();
+      }
+    });
+  });
+}
+
+// ── Actions ────────────────────────────────────────────────────────────────
+async function runGuided() {
+  const flows = S.flowDefinition?.flows || [];
+  const flow  = flows.find(f => f.id === S.guided.selectedFlowId) || flows[0];
+  if (!flow) return;
+
+  S.guided.running = true;
+  S.guided.log = [];
+  render();
+
+  for (const step of (flow.steps || [])) {
+    let path = step.operation?.path || '/';
+    const method = (step.operation?.method || 'GET').toUpperCase();
+
+    // Interpolate {{inputs.*}} and {{captures.*}}
+    const captures = {};
+    S.guided.log.forEach(l => Object.assign(captures, l.captures || {}));
+    path = path.replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(S.guided.inputs[k] || k));
+    path = path.replace(/\{\{captures\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(captures[k] || k));
+
+    const bodyStr = step.operation?.body
+      ? step.operation.body.replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => S.guided.inputs[k] || '')
+      : undefined;
+
+    const t0 = Date.now();
+    let status = 0, body = '', success = false;
+    try {
+      const r = await fetch(path, {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: bodyStr,
+      });
+      status = r.status;
+      body   = await r.text();
+      // Evaluate assertions
+      success = (step.assertions || []).every(a => {
+        if (a.kind === 'status') return String(status) === String(a.expected);
+        return true;
+      });
+    } catch (e) {
+      body = e.message;
+    }
+    const duration_ms = Date.now() - t0;
+
+    // Record to transaction log (fire-and-forget)
+    postJson('/_localstack/studio-api/transactions/record', {
+      service:   S.selectedService,
+      operation: step.id,
+      method,
+      path,
+      status,
+      responseBodyPreview: body.slice(0,512),
+      startedAtMs: t0,
+      durationMs: duration_ms,
+      fromGuidedFlow: true,
+    }).catch(() => {});
+
+    S.guided.log.push({ stepId: step.id, title: step.title, status, body, success, duration_ms });
+    render();
+    if (!success) break;
+  }
+
+  S.guided.running = false;
+  render();
+}
+
+async function runRaw() {
+  const method  = root.querySelector('#raw-method')?.value || S.raw.method;
+  const path    = root.querySelector('#raw-path')?.value   || S.raw.path;
+  const bodyStr = root.querySelector('#raw-body')?.value   || '';
+  S.raw = { method, path, body: bodyStr };
+
+  const t0 = Date.now();
+  try {
+    const opts = { method, headers: {} };
+    if (bodyStr) opts.body = bodyStr;
+    const r = await fetch(path, opts);
+    const text = await r.text();
+    let pretty = text;
+    try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
+    S.rawResponse = { status: r.status, body: pretty };
+
+    // Record to transaction log
+    postJson('/_localstack/studio-api/transactions/record', {
+      service: S.selectedService || 'raw',
+      method: method.toUpperCase(),
+      path,
+      status: r.status,
+      requestBodyPreview: bodyStr.slice(0,256),
+      responseBodyPreview: text.slice(0,512),
+      startedAtMs: t0,
+      durationMs: Date.now() - t0,
+      fromGuidedFlow: false,
+    }).catch(() => {});
+  } catch (e) {
+    S.rawResponse = { status: 0, body: `Error: ${e.message}` };
+  }
+  render();
+}
+
+// ── Bootstrap ──────────────────────────────────────────────────────────────
+setTheme(S.theme);
+loadCatalogue().then(render);
 
   const state = {
     services: [],
-    flowCatalog: [],
-    flowCoverage: [],
-    selectedService: null,
-    flowDefinition: null,
-    history: [],
-    raw: { method: 'GET', path: '/_localstack/health', body: '' },
-    response: null,
+    // kept for legacy usage — now fully replaced by S above
   };
 
   function esc(v) {
@@ -250,7 +1106,264 @@ const STUDIO_ASSET_JS: &str = r#"(function () {
 })();
 "#;
 
-const STUDIO_ASSET_CSS: &str = r#":root{color-scheme:light dark;--bg:#0f172a;--fg:#e2e8f0;--card:#1e293b;--muted:#94a3b8;--accent:#22c55e}*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,sans-serif;background:linear-gradient(120deg,#0f172a,#111827);color:var(--fg)}.studio-layout{max-width:1200px;margin:0 auto;padding:20px}.studio-header h1{margin:0}.studio-header p{color:var(--muted)}.studio-grid{display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:16px}.studio-panel{background:color-mix(in oklab,var(--card) 92%,black);border:1px solid #334155;border-radius:12px;padding:12px;min-height:260px}.service-list{display:grid;gap:8px}.service-card{display:grid;text-align:left;gap:2px;padding:8px;border:1px solid #334155;background:#0b1220;color:var(--fg);border-radius:8px;cursor:pointer}.service-card.active{border-color:var(--accent)}.detail-grid{display:grid;gap:12px}label{display:grid;gap:6px;margin:6px 0}input,textarea{width:100%;background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px}button{background:#0b1220;color:var(--fg);border:1px solid #334155;border-radius:8px;padding:8px;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.history-list{display:grid;gap:8px}.history-item{text-align:left}pre{white-space:pre-wrap;overflow:auto;background:#0b1220;padding:8px;border-radius:8px}@media(max-width:1024px){.studio-grid{grid-template-columns:1fr}}"#;
+const STUDIO_ASSET_CSS: &str = r#"*,::before,::after{box-sizing:border-box;margin:0;padding:0}
+:root{color-scheme:light dark;
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;
+  --fg:#e6edf3;--fg2:#8b949e;--fg3:#6e7681;
+  --accent:#2f81f7;--accent-hover:#388bfd;
+  --ok:#3fb950;--warn:#d29922;--err:#f85149;--pending:#8b949e;
+  --radius:8px;--radius-sm:5px;
+  --shadow:0 1px 3px rgba(0,0,0,.4);
+  --font: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+}
+[data-theme="light"]{
+  --bg:#f6f8fa;--bg2:#ffffff;--bg3:#f0f2f5;--border:#d0d7de;
+  --fg:#1f2328;--fg2:#636c76;--fg3:#8c959f;
+  --shadow:0 1px 3px rgba(0,0,0,.1);
+}
+body{font-family:var(--font);background:var(--bg);color:var(--fg);font-size:13px;line-height:1.5;height:100vh;overflow:hidden}
+.app{display:flex;flex-direction:column;height:100vh}
+
+/* ── topbar ──────────────────────────────────────────────────────────── */
+.topbar{display:flex;align-items:center;justify-content:space-between;
+  padding:0 16px;height:48px;background:var(--bg2);border-bottom:1px solid var(--border);
+  flex-shrink:0;gap:12px}
+.topbar-brand{display:flex;align-items:center;gap:8px}
+.topbar-title{font-weight:600;font-size:14px}
+.topbar-actions{display:flex;gap:6px}
+.icon-btn{background:none;border:1px solid transparent;color:var(--fg2);border-radius:var(--radius-sm);
+  padding:5px;cursor:pointer;display:flex;align-items:center}
+.icon-btn:hover{background:var(--bg3);border-color:var(--border);color:var(--fg)}
+
+/* ── workspace ───────────────────────────────────────────────────────── */
+.workspace{display:flex;flex:1;overflow:hidden}
+
+/* ── sidebar ─────────────────────────────────────────────────────────── */
+.sidebar{width:220px;flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;overflow:hidden}
+.sidebar-search{padding:10px 10px 6px}
+.sidebar-list{overflow-y:auto;flex:1;padding:0 6px 10px}
+.sidebar-loading,.sidebar-error,.sidebar-empty{padding:16px 10px;color:var(--fg2);font-size:12px}
+.sidebar-error{color:var(--err)}
+.search-input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--fg);
+  border-radius:var(--radius-sm);padding:5px 8px;font-size:12px;font-family:inherit}
+.search-input:focus{outline:none;border-color:var(--accent)}
+
+.svc-card{width:100%;text-align:left;background:none;border:1px solid transparent;
+  border-radius:var(--radius-sm);padding:7px 8px;cursor:pointer;color:var(--fg);margin-bottom:2px}
+.svc-card:hover{background:var(--bg3);border-color:var(--border)}
+.svc-card--active{background:var(--bg3);border-color:var(--accent)}
+.svc-card-row{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:600}
+.svc-card-meta{font-size:11px;color:var(--fg2);margin-top:2px;padding-left:14px}
+
+/* ── main area ───────────────────────────────────────────────────────── */
+.main{flex:1;overflow-y:auto;display:flex;flex-direction:column}
+
+/* ── welcome ─────────────────────────────────────────────────────────── */
+.welcome{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  flex:1;gap:24px;padding:32px}
+.welcome-hero{text-align:center;display:flex;flex-direction:column;align-items:center;gap:12px}
+.welcome-hero h1{font-size:22px;font-weight:600}
+.welcome-hero p{color:var(--fg2);max-width:420px;font-size:13px}
+.stat-row{display:flex;gap:12px}
+.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px 24px;text-align:center;min-width:100px}
+.stat-num{font-size:28px;font-weight:700;color:var(--accent)}
+.stat-label{font-size:11px;color:var(--fg2);margin-top:4px}
+
+/* ── explorer ────────────────────────────────────────────────────────── */
+.explorer{display:flex;flex-direction:column;flex:1;overflow:hidden}
+.explorer-header{padding:12px 16px 0;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0}
+.explorer-title{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.explorer-title h2{font-size:16px;font-weight:600}
+.explorer-meta{font-size:12px;color:var(--fg2);display:flex;align-items:center;gap:4px}
+.explorer-body{flex:1;overflow-y:auto;padding:16px}
+
+/* tabs */
+.tab-bar{display:flex;gap:2px}
+.tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--fg2);
+  padding:6px 12px 8px;cursor:pointer;font-size:12px;font-family:inherit;display:flex;align-items:center;gap:5px}
+.tab:hover{color:var(--fg)}
+.tab--active{color:var(--fg);border-bottom-color:var(--accent)}
+.tab-badge{background:var(--bg3);border:1px solid var(--border);border-radius:10px;
+  padding:0 6px;font-size:10px;line-height:16px}
+
+/* ── chips ───────────────────────────────────────────────────────────── */
+.chip{display:inline-flex;align-items:center;border-radius:10px;padding:1px 7px;
+  font-size:10px;font-weight:500;line-height:16px;background:var(--bg3);border:1px solid var(--border)}
+.chip-ok{background:#1c3a20;border-color:#3fb950;color:#3fb950}
+.chip-guided{background:#1a2d4a;border-color:var(--accent);color:var(--accent)}
+.chip-raw{background:var(--bg3);border-color:var(--border);color:var(--fg2)}
+.chip-level{background:#2a2016;border-color:var(--warn);color:var(--warn)}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;display:inline-block}
+.dot-running{background:var(--ok)}.dot-starting{background:var(--warn)}
+.dot-stopping,.dot-stopped{background:var(--fg3)}.dot-error{background:var(--err)}
+.dot-available{background:var(--fg2)}
+
+/* ── method badges ───────────────────────────────────────────────────── */
+.method-badge{display:inline-block;border-radius:var(--radius-sm);padding:1px 6px;font-size:10px;font-weight:700;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;min-width:44px;text-align:center}
+.method-get{background:#1c3a20;color:#3fb950}.method-post{background:#1a2d4a;color:#2f81f7}
+.method-put{background:#2a2016;color:#d29922}.method-del{background:#3a1a1a;color:#f85149}
+.method-patch{background:#261a3a;color:#bc8cff}.method-head{background:#1a2a2a;color:#39d353}
+.method-other{background:var(--bg3);color:var(--fg2)}
+
+/* ── status badges ───────────────────────────────────────────────────── */
+.status-badge{display:inline-block;border-radius:var(--radius-sm);padding:1px 7px;font-size:11px;font-weight:600;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.status-ok{background:#1c3a20;color:#3fb950}.status-warn{background:#2d2a10;color:#d29922}
+.status-err{background:#3a1a1a;color:#f85149}.status-pending{background:var(--bg3);color:var(--fg2)}
+
+/* ── buttons ─────────────────────────────────────────────────────────── */
+.btn{border-radius:var(--radius-sm);padding:5px 12px;font-size:12px;font-family:inherit;cursor:pointer;
+  border:1px solid var(--border);background:var(--bg3);color:var(--fg);transition:background .1s}
+.btn:hover{background:var(--border)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover:not(:disabled){background:var(--accent-hover);border-color:var(--accent-hover)}
+.btn-primary.btn-loading{opacity:.7}
+.btn-ghost{background:none;border-color:transparent;color:var(--fg2)}
+.btn-ghost:hover{background:var(--bg3);border-color:var(--border);color:var(--fg)}
+.btn-danger{color:var(--err)}
+.btn-tiny{background:none;border:none;color:var(--fg3);cursor:pointer;padding:2px 5px;
+  border-radius:3px;font-size:11px}
+.btn-tiny:hover{background:var(--bg3);color:var(--fg)}
+
+/* ── panels & sections ───────────────────────────────────────────────── */
+.panel-section{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;margin-bottom:14px}
+.panel-section-title{font-size:11px;font-weight:600;color:var(--fg2);text-transform:uppercase;
+  letter-spacing:.06em;margin-bottom:10px}
+.panel-loading{padding:32px;text-align:center;color:var(--fg2)}
+.empty-state{color:var(--fg2);font-size:12px;padding:12px 0}
+
+/* ── overview ────────────────────────────────────────────────────────── */
+.overview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:14px}
+.ov-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px}
+.ov-label{font-size:10px;color:var(--fg2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+.ov-value{font-size:14px;font-weight:600;display:flex;align-items:center;gap:5px}
+.ov-num{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:18px;color:var(--accent)}
+.ov-ok{color:var(--ok)}.ov-err{color:var(--err)}
+
+/* ── guided ──────────────────────────────────────────────────────────── */
+.sub-tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}
+.sub-tab{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:3px 10px;font-size:11px;cursor:pointer;color:var(--fg2);font-family:inherit;display:flex;align-items:center;gap:4px}
+.sub-tab:hover{border-color:var(--accent);color:var(--fg)}
+.sub-tab--active{background:var(--bg3);border-color:var(--accent);color:var(--fg)}
+.guided-inputs{margin-bottom:10px}
+.inputs-title{font-size:11px;color:var(--fg2);margin-bottom:6px}
+.field-row{margin-bottom:8px}
+.field-label{font-size:12px;font-weight:500;margin-bottom:3px;display:block}
+.req{color:var(--err)}
+.field-desc{font-size:11px;color:var(--fg2);margin-bottom:3px}
+.field-input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--fg);
+  border-radius:var(--radius-sm);padding:5px 8px;font-size:12px;font-family:inherit}
+.field-input:focus{outline:none;border-color:var(--accent)}
+.guided-steps{margin-bottom:10px}
+.step-row{display:flex;gap:10px;padding:8px;border-radius:var(--radius-sm);margin-bottom:6px;
+  border:1px solid var(--border)}
+.step-ok{border-color:var(--ok);background:#0f2010}
+.step-err{border-color:var(--err);background:#200f0f}
+.step-num{font-size:10px;color:var(--fg2);min-width:16px;padding-top:2px}
+.step-body{flex:1;min-width:0}
+.step-title{font-size:12px;font-weight:600;margin-bottom:3px}
+.step-op{display:flex;align-items:center;gap:6px;font-size:11px}
+.step-op code{color:var(--fg2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+.step-result{margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.step-dur{font-size:11px;color:var(--fg2)}
+.step-body-preview{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;
+  background:var(--bg);border-radius:4px;padding:6px 8px;margin-top:4px;
+  max-height:120px;overflow-y:auto;word-break:break-all;width:100%;white-space:pre-wrap;color:var(--fg2)}
+.step-guidance{font-size:11px;color:var(--warn);margin-top:4px;padding:4px 6px;
+  background:#1e1800;border-radius:4px;border:1px solid #3d3000}
+.guided-actions{display:flex;gap:8px;align-items:center}
+
+/* ── raw console ─────────────────────────────────────────────────────── */
+.raw-form{display:flex;flex-direction:column;gap:8px}
+.raw-row{display:flex;gap:6px}
+.raw-method{background:var(--bg3);border:1px solid var(--border);color:var(--fg);
+  border-radius:var(--radius-sm);padding:5px 8px;font-size:12px;font-family:inherit;width:90px}
+.raw-path{flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--fg);
+  border-radius:var(--radius-sm);padding:5px 8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.raw-path:focus,.raw-method:focus{outline:none;border-color:var(--accent)}
+.raw-body{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--fg);
+  border-radius:var(--radius-sm);padding:6px 8px;font-size:11px;resize:vertical;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.raw-body:focus{outline:none;border-color:var(--accent)}
+.raw-response{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+.resp-body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+  background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:8px;max-height:240px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+
+/* ── operations tab ──────────────────────────────────────────────────── */
+.ops-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.ops-stats{font-size:11px;color:var(--fg2);margin-left:auto}
+.toggle-label{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--fg2);cursor:pointer;white-space:nowrap}
+.toggle-label input{accent-color:var(--accent)}
+.op-list{display:flex;flex-direction:column;gap:2px}
+.op-row{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:var(--radius-sm);
+  border:1px solid transparent;background:var(--bg2)}
+.op-row:hover{border-color:var(--border)}
+.op-left{display:flex;align-items:center;gap:6px;min-width:260px;flex-shrink:0}
+.op-name{font-size:12px;font-weight:500}
+.op-path{font-size:11px;color:var(--fg2);flex:1;word-break:break-all;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* ── storage tab ─────────────────────────────────────────────────────── */
+.storage-toolbar{margin-bottom:12px}
+.storage-section{margin-bottom:16px}
+.storage-section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--fg2);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.resource-list{display:flex;flex-direction:column;gap:4px}
+.resource-row{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:8px 12px;display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.resource-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+  font-weight:600;min-width:160px;word-break:break-all}
+.resource-ts{font-size:10px;color:var(--fg3);white-space:nowrap}
+.resource-attrs{display:flex;flex-wrap:wrap;gap:6px;flex:1}
+.attr-pair{display:inline-flex;align-items:center;gap:3px;font-size:10px;
+  background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:1px 6px}
+.attr-key{color:var(--fg2)}.attr-val{color:var(--fg);font-weight:500}
+
+/* ── transactions tab ────────────────────────────────────────────────── */
+.tx-toolbar{margin-bottom:10px}
+.tx-summary{display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap}
+.tx-stat{font-size:12px;color:var(--fg2)}
+.tx-stat strong{color:var(--fg)}
+.tx-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.filter-select{background:var(--bg3);border:1px solid var(--border);color:var(--fg);
+  border-radius:var(--radius-sm);padding:4px 8px;font-size:12px;font-family:inherit}
+.filter-select:focus{outline:none;border-color:var(--accent)}
+.tx-list{display:flex;flex-direction:column;gap:2px}
+.tx-row{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:var(--radius-sm);
+  border:1px solid transparent;background:var(--bg2);flex-wrap:wrap}
+.tx-row:hover{border-color:var(--border)}
+.outcome-ok{border-left:2px solid var(--ok)}
+.outcome-warn{border-left:2px solid var(--warn)}
+.outcome-err{border-left:2px solid var(--err)}
+.outcome-pending{border-left:2px solid var(--fg3)}
+.tx-id{font-size:10px;color:var(--fg3);min-width:30px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.tx-path{font-size:11px;color:var(--fg2);flex:1;word-break:break-all;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;min-width:120px}
+.tx-op{font-size:10px;color:var(--fg2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.tx-dur{font-size:11px;color:var(--fg3);white-space:nowrap}
+
+/* ── outcome colour helpers ──────────────────────────────────────────── */
+.outcome-ok .tx-path,.outcome-ok .tx-id{color:inherit}
+
+/* ── scrollbars ──────────────────────────────────────────────────────── */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--border)}
+
+/* ── responsive ──────────────────────────────────────────────────────── */
+@media(max-width:768px){
+  .sidebar{width:180px}
+  .overview-grid{grid-template-columns:repeat(2,1fr)}
+  .op-left{min-width:180px}
+}"#;
 const STUDIO_GUIDED_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
 // Thread-local fast RNG — seeded once per thread from the OS RNG, avoiding a
