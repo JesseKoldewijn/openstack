@@ -1534,6 +1534,11 @@ impl Gateway {
         gw
     }
 
+    /// Returns whether the Studio UI subsystem is active for this gateway instance.
+    pub fn studio_enabled(&self) -> bool {
+        self.studio_enabled
+    }
+
     /// Build the axum Router for this gateway (useful for testing).
     fn build_app(&self) -> Router {
         let cors = Arc::new(CorsHandler::new(&self.config));

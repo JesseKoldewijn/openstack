@@ -9,7 +9,6 @@ mod studio_security_tests {
     use openstack_gateway::Gateway;
     use openstack_service_framework::ServicePluginManager;
     use tower::ServiceExt;
-
     fn test_config() -> Config {
         Config {
             gateway_listen: vec!["0.0.0.0:4566".parse().unwrap()],
@@ -112,5 +111,78 @@ mod studio_security_tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // ── Studio-enabled / disabled gateway construction ──────────────────
+
+    #[tokio::test]
+    async fn gateway_default_has_studio_disabled() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        // Default gateway should not have studio enabled.
+        assert!(!gateway.studio_enabled());
+    }
+
+    #[tokio::test]
+    async fn gateway_new_with_studio_has_studio_enabled() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new_with_studio(config, manager);
+        assert!(gateway.studio_enabled());
+    }
+
+    #[tokio::test]
+    async fn gateway_debug_config_enables_studio() {
+        let mut config = test_config();
+        config.debug = true;
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        assert!(gateway.studio_enabled());
+    }
+
+    #[tokio::test]
+    async fn studio_disabled_tx_record_endpoint_returns_created_silently() {
+        // In default (non-studio) mode the record endpoint is a no-op
+        // but must still return 201 so the caller doesn't error.
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let payload = serde_json::json!({
+            "service": "s3", "method": "GET", "path": "/",
+            "status": 200, "startedAtMs": 0, "durationMs": 5,
+        });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/_localstack/studio-api/transactions/record")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn studio_disabled_tx_list_endpoint_returns_empty_ok() {
+        let config = test_config();
+        let manager = ServicePluginManager::new(config.clone());
+        let gateway = Gateway::new(config, manager);
+        let app = gateway.build_app_for_tests();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/_localstack/studio-api/transactions")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
+        assert_eq!(body["_studio_disabled"], true);
     }
 }

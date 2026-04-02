@@ -36,7 +36,7 @@ pub struct ApiState {
     /// `None` when running in headless/benchmark mode (no `STUDIO=1` env var
     /// and no `--debug` flag).  All Studio TX endpoints silently return empty
     /// results when this is `None`, so the binary stays lean by default.
-    pub(crate) transaction_log: Option<Arc<Mutex<openstack_studio_ui::TransactionLog>>>,
+    pub transaction_log: Option<Arc<Mutex<openstack_studio_ui::TransactionLog>>>,
     /// Whether the Studio UI subsystem (TX log, operation catalog) is active.
     pub studio_enabled: bool,
 }

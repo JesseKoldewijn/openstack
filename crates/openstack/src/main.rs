@@ -744,4 +744,65 @@ mod tests {
         assert!(!paths.pid.exists());
         assert!(!paths.meta.exists());
     }
+
+    // ── --studio flag parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_start_studio_flag() {
+        let args = vec!["start".to_string(), "--studio".to_string()];
+        assert_eq!(
+            parse_cli_command(&args).unwrap(),
+            CliCommand::Start {
+                daemon: false,
+                studio: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_start_daemon_and_studio_together() {
+        let args = vec![
+            "start".to_string(),
+            "--daemon".to_string(),
+            "--studio".to_string(),
+        ];
+        assert_eq!(
+            parse_cli_command(&args).unwrap(),
+            CliCommand::Start {
+                daemon: true,
+                studio: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_start_daemon_no_studio_by_default() {
+        let args = vec!["start".to_string(), "--daemon".to_string()];
+        let cmd = parse_cli_command(&args).unwrap();
+        assert_eq!(
+            cmd,
+            CliCommand::Start {
+                daemon: true,
+                studio: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_start_unknown_flag_errors() {
+        let args = vec!["start".to_string(), "--unknown".to_string()];
+        assert!(parse_cli_command(&args).is_err());
+    }
+
+    #[test]
+    fn parse_foreground_no_args_studio_false() {
+        // STUDIO env var is not set in unit tests — studio should be false.
+        // (We unset it explicitly to be safe.)
+        // SAFETY: test-only, single-threaded context.
+        unsafe { std::env::remove_var("STUDIO") };
+        assert_eq!(
+            parse_cli_command(&[]).unwrap(),
+            CliCommand::RunForeground { studio: false }
+        );
+    }
 }

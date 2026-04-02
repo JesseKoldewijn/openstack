@@ -42,9 +42,13 @@ fn test_config() -> Config {
 }
 
 fn make_state(config: Config) -> ApiState {
+    make_state_with_studio(config, false)
+}
+
+fn make_state_with_studio(config: Config, studio: bool) -> ApiState {
     let (shutdown_tx, _) = broadcast::channel(1);
     let plugin_manager = ServicePluginManager::new(config.clone());
-    let mut state = ApiState::new(config, plugin_manager, shutdown_tx);
+    let mut state = ApiState::new_with_studio(config, plugin_manager, shutdown_tx, studio);
     state.session_id = "studio-contracts".to_string();
     state.start_time = Arc::new(Instant::now());
     state
@@ -227,7 +231,7 @@ async fn studio_transactions_all_returns_summary_and_empty_log() {
 async fn studio_transactions_record_and_retrieve() {
     use axum::http::Method;
 
-    let state = make_state(test_config());
+    let state = make_state_with_studio(test_config(), true);
     let router = internal_api_router(state);
 
     // POST a transaction record
@@ -283,7 +287,7 @@ async fn studio_transactions_record_and_retrieve() {
 async fn studio_transactions_clear_empties_log() {
     use axum::http::Method;
 
-    let state = make_state(test_config());
+    let state = make_state_with_studio(test_config(), true);
     let router = internal_api_router(state);
 
     // Insert a record
@@ -378,4 +382,176 @@ async fn studio_operations_states_alias_resolves_to_stepfunctions() {
     assert_eq!(body_states["service"], "stepfunctions");
     assert_eq!(body_sf["service"], "stepfunctions");
     assert_eq!(body_states["total"], body_sf["total"]);
+}
+
+// ===========================================================================
+// Studio-disabled mode (default / benchmark mode)
+// ===========================================================================
+
+#[tokio::test]
+async fn studio_disabled_tx_list_returns_empty_not_error() {
+    // Default state has studio_enabled = false → transaction_log = None.
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
+    assert_eq!(body["summary"]["total"], 0);
+    // Disabled mode signals itself via _studio_disabled flag.
+    assert_eq!(body["_studio_disabled"], true);
+}
+
+#[tokio::test]
+async fn studio_disabled_tx_service_returns_empty_not_error() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions/s3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn studio_disabled_tx_record_is_silent_noop() {
+    use axum::body::Body;
+    let router = internal_api_router(make_state(test_config()));
+    let payload = serde_json::json!({
+        "service": "s3", "method": "GET", "path": "/",
+        "status": 200, "startedAtMs": 0, "durationMs": 5,
+    });
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/_localstack/studio-api/transactions/record")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    // Should return 201 Created even in disabled mode (silent no-op).
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // And the log should still be empty.
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn studio_disabled_tx_clear_returns_zero_cleared() {
+    let router = internal_api_router(make_state(test_config()));
+    let req = axum::http::Request::builder()
+        .method("DELETE")
+        .uri("/_localstack/studio-api/transactions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["cleared"], 0);
+}
+
+// ===========================================================================
+// Studio-enabled mode (explicit studio=true)
+// ===========================================================================
+
+#[tokio::test]
+async fn studio_enabled_tx_log_is_active() {
+    use axum::body::Body;
+    let router = internal_api_router(make_state_with_studio(test_config(), true));
+
+    // Record two transactions.
+    for (svc, status) in [("s3", 200u16), ("sqs", 404u16)] {
+        let payload = serde_json::json!({
+            "service": svc, "method": "POST", "path": "/",
+            "status": status, "startedAtMs": 0, "durationMs": 10,
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_localstack/studio-api/transactions/record")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap();
+    }
+
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 2);
+    assert_eq!(body["summary"]["total"], 2);
+    assert_eq!(body["summary"]["success"], 1);
+    assert_eq!(body["summary"]["client_error"], 1);
+    // Enabled mode must NOT have _studio_disabled flag.
+    assert!(body["_studio_disabled"].is_null());
+}
+
+#[tokio::test]
+async fn studio_enabled_tx_outcome_filter_works() {
+    use axum::body::Body;
+    let router = internal_api_router(make_state_with_studio(test_config(), true));
+
+    for status in [200u16, 200, 404, 500] {
+        let payload = serde_json::json!({
+            "service": "s3", "method": "GET", "path": "/",
+            "status": status, "startedAtMs": 0, "durationMs": 1,
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_localstack/studio-api/transactions/record")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap();
+    }
+
+    let (status, body) = get_json(
+        &router,
+        "/_localstack/studio-api/transactions?outcome=success",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 2);
+
+    let (status, body) = get_json(
+        &router,
+        "/_localstack/studio-api/transactions?outcome=client_error",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 1);
+}
+
+// ===========================================================================
+// ApiState::studio_enabled flag
+// ===========================================================================
+
+#[test]
+fn api_state_default_has_studio_disabled() {
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let config = test_config();
+    let plugin_manager = ServicePluginManager::new(config.clone());
+    let state = ApiState::new(config, plugin_manager, shutdown_tx);
+    assert!(!state.studio_enabled);
+    assert!(state.transaction_log.is_none());
+}
+
+#[test]
+fn api_state_with_studio_true_allocates_log() {
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let config = test_config();
+    let plugin_manager = ServicePluginManager::new(config.clone());
+    let state = ApiState::new_with_studio(config, plugin_manager, shutdown_tx, true);
+    assert!(state.studio_enabled);
+    assert!(state.transaction_log.is_some());
+}
+
+#[test]
+fn api_state_debug_config_enables_studio() {
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let mut config = test_config();
+    config.debug = true;
+    let plugin_manager = ServicePluginManager::new(config.clone());
+    let state = ApiState::new(config, plugin_manager, shutdown_tx);
+    // debug = true should auto-enable studio.
+    assert!(state.studio_enabled);
+    assert!(state.transaction_log.is_some());
 }
