@@ -1,4 +1,4 @@
-use axum::{Router, routing::get};
+use axum::{Router, routing::{delete, get, post}};
 
 use crate::ApiState;
 
@@ -24,6 +24,7 @@ pub fn internal_api_router(state: ApiState) -> Router {
             "/_localstack/config",
             get(crate::config_api::get_config).post(crate::config_api::post_config),
         )
+        // --- Studio: service catalogue & guided flows ---
         .route(
             "/_localstack/studio-api/services",
             get(crate::studio::get_studio_services),
@@ -43,6 +44,38 @@ pub fn internal_api_router(state: ApiState) -> Router {
         .route(
             "/_localstack/studio-api/flows/{service}",
             get(crate::studio::get_studio_flow_definition),
+        )
+        // --- Studio: per-service operation catalogue ---
+        .route(
+            "/_localstack/studio-api/operations",
+            get(crate::studio_operations::list_all_operations),
+        )
+        .route(
+            "/_localstack/studio-api/operations/{service}",
+            get(crate::studio_operations::get_service_operations),
+        )
+        // --- Studio: live storage snapshots ---
+        .route(
+            "/_localstack/studio-api/storage",
+            get(crate::studio_storage::list_all_storage),
+        )
+        .route(
+            "/_localstack/studio-api/storage/{service}",
+            get(crate::studio_storage::get_service_storage),
+        )
+        // --- Studio: transaction log ---
+        .route(
+            "/_localstack/studio-api/transactions",
+            get(crate::studio_transactions::list_all_transactions)
+                .delete(crate::studio_transactions::clear_transactions),
+        )
+        .route(
+            "/_localstack/studio-api/transactions/{service}",
+            get(crate::studio_transactions::list_service_transactions),
+        )
+        .route(
+            "/_localstack/studio-api/transactions/record",
+            post(crate::studio_transactions::record_transaction),
         )
         .with_state(state)
 }

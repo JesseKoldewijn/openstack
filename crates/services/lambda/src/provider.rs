@@ -1215,4 +1215,24 @@ impl ServiceProvider for LambdaProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut functions = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for func in store.functions.values() {
+                functions.push(json!({
+                    "id": func.function_arn.clone(),
+                    "kind": "function",
+                    "attributes": [
+                        {"key": "name", "value": func.function_name.clone()},
+                        {"key": "runtime", "value": func.runtime.clone()},
+                        {"key": "handler", "value": func.handler.clone()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "lambda", "functions": functions }))
+    }
 }

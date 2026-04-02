@@ -125,4 +125,19 @@ impl ServicePluginManager {
             }
         }
     }
+
+    /// Collect storage snapshots from all registered services that support
+    /// introspection.  Services that return `None` from
+    /// `storage_snapshot()` are omitted.
+    pub async fn storage_snapshots(&self) -> Vec<(String, serde_json::Value)> {
+        let mut out = Vec::new();
+        for entry in self.containers.iter() {
+            let service_name = entry.key().clone();
+            let container = entry.value().clone();
+            if let Some(snapshot) = container.provider.storage_snapshot().await {
+                out.push((service_name, snapshot));
+            }
+        }
+        out
+    }
 }

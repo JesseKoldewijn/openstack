@@ -168,6 +168,22 @@ pub trait ServiceProvider: Send + Sync {
     /// Dispatch an operation to this provider.
     /// Returns the serialized HTTP response body and status code.
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError>;
+
+    /// Return a JSON snapshot of this service's in-memory storage resources
+    /// for display in the Studio storage inspector.
+    ///
+    /// The returned JSON must match the `ServiceStorageSnapshot` schema used
+    /// by `openstack-studio-ui`.  Providers that do not implement this method
+    /// will return `None` and the Studio UI will show an empty storage tab.
+    ///
+    /// Schema for the returned value (service-specific variant):
+    /// ```json
+    /// { "kind": "<variant>", /* variant-specific fields */ }
+    /// ```
+    /// See `openstack_studio_ui::ServiceStorageSnapshot` for all variants.
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// The body of a dispatch response.

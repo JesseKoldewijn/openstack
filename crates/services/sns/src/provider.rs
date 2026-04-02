@@ -731,4 +731,28 @@ impl ServiceProvider for SnsProvider {
 
         Ok(response)
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut topics = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for topic in store.topics.values() {
+                let sub_count = store
+                    .subscriptions
+                    .values()
+                    .filter(|s| s.topic_arn == topic.topic_arn)
+                    .count();
+                topics.push(json!({
+                    "id": topic.topic_arn,
+                    "kind": "topic",
+                    "attributes": [
+                        {"key": "name", "value": topic.name.clone()},
+                        {"key": "subscription_count", "value": sub_count.to_string()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "sns", "topics": topics }))
+    }
 }

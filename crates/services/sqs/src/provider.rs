@@ -1239,4 +1239,25 @@ impl ServiceProvider for SqsProvider {
 
         Ok(response)
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut queues = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for q in store.queues.values() {
+                queues.push(json!({
+                    "id": q.url,
+                    "kind": "queue",
+                    "created_at": q.created.to_rfc3339(),
+                    "attributes": [
+                        {"key": "name", "value": q.name.clone()},
+                        {"key": "arn", "value": q.arn.clone()},
+                        {"key": "message_count", "value": q.messages.len().to_string()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "sqs", "queues": queues }))
+    }
 }

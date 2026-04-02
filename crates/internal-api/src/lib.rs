@@ -6,6 +6,9 @@ pub mod init;
 pub mod plugins;
 pub mod router;
 pub mod studio;
+pub mod studio_operations;
+pub mod studio_storage;
+pub mod studio_transactions;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,7 +16,7 @@ use std::time::Instant;
 use openstack_config::Config;
 use openstack_service_framework::ServicePluginManager;
 pub use router::internal_api_router;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 
 /// Shared state injected into all internal API handlers.
 #[derive(Clone)]
@@ -27,6 +30,8 @@ pub struct ApiState {
     pub(crate) guided_service_matrix: std::collections::HashSet<String>,
     pub(crate) guided_manifest_inventory:
         std::collections::HashMap<String, crate::studio::GuidedManifestFile>,
+    /// Live transaction log shared across all Studio handlers.
+    pub(crate) transaction_log: Arc<Mutex<openstack_studio_ui::TransactionLog>>,
 }
 
 impl ApiState {
@@ -45,6 +50,9 @@ impl ApiState {
             shutdown_tx,
             guided_service_matrix,
             guided_manifest_inventory,
+            transaction_log: Arc::new(Mutex::new(
+                openstack_studio_ui::TransactionLog::new(2000),
+            )),
         }
     }
 }

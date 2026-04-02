@@ -1975,4 +1975,26 @@ impl ServiceProvider for DynamoDbProvider {
 
         response
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut tables = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for table in store.tables.iter() {
+                tables.push(json!({
+                    "id": table.table_arn.clone(),
+                    "kind": "table",
+                    "created_at": table.created.to_rfc3339(),
+                    "attributes": [
+                        {"key": "name", "value": table.table_name.clone()},
+                        {"key": "status", "value": format!("{:?}", table.status)},
+                        {"key": "item_count", "value": table.item_count.to_string()},
+                        {"key": "billing_mode", "value": table.billing_mode.clone()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "dynamodb", "tables": tables }))
+    }
 }

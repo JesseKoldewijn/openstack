@@ -554,4 +554,23 @@ impl ServiceProvider for SecretsManagerProvider {
             )),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut secrets = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for secret in store.secrets.values() {
+                secrets.push(json!({
+                    "id": secret.arn.clone(),
+                    "kind": "secret",
+                    "attributes": [
+                        {"key": "name", "value": secret.name.clone()},
+                        {"key": "description", "value": secret.description.clone()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "secrets_manager", "secrets": secrets }))
+    }
 }

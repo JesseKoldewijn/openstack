@@ -2695,6 +2695,33 @@ impl ServiceProvider for S3Provider {
 
         Ok(response)
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut buckets = Vec::new();
+        for entry in self.store.iter() {
+            let region = entry.key().region().to_string();
+            let store = entry.value();
+            for (name, bucket) in &store.buckets {
+                let object_count = store
+                    .objects
+                    .get(name)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                buckets.push(json!({
+                    "id": name,
+                    "kind": "bucket",
+                    "created_at": bucket.creation_date.to_rfc3339(),
+                    "attributes": [
+                        {"key": "region", "value": region},
+                        {"key": "object_count", "value": object_count.to_string()},
+                        {"key": "versioning", "value": bucket.versioning.clone()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "s3", "buckets": buckets }))
+    }
 }
 
 // ---------------------------------------------------------------------------

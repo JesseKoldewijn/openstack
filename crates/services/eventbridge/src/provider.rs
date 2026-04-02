@@ -438,4 +438,28 @@ impl ServiceProvider for EventBridgeProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut buses = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for bus in store.buses.values() {
+                let rule_count = store
+                    .rules
+                    .values()
+                    .filter(|r| r.event_bus_name == bus.name)
+                    .count();
+                buses.push(json!({
+                    "id": bus.arn.clone(),
+                    "kind": "event_bus",
+                    "attributes": [
+                        {"key": "name", "value": bus.name.clone()},
+                        {"key": "rule_count", "value": rule_count.to_string()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "event_bridge", "buses": buses }))
+    }
 }
