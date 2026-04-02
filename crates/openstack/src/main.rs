@@ -362,7 +362,11 @@ async fn daemon_start(config: &openstack_config::Config, studio: bool) -> Result
         started_at_utc: chrono::Utc::now().to_rfc3339(),
         health_url: format!("{}/_localstack/health", config.base_url()),
         log_path: paths.log.display().to_string(),
-        command: "openstack".to_string(),
+        command: if studio {
+            "openstack --studio".to_string()
+        } else {
+            "openstack".to_string()
+        },
     };
     tokio::fs::write(&paths.meta, serde_json::to_vec_pretty(&meta)?).await?;
 
@@ -445,8 +449,19 @@ async fn daemon_stop(config: &openstack_config::Config) -> Result<()> {
 }
 
 async fn daemon_restart(config: &openstack_config::Config) -> Result<()> {
+    let paths = daemon_paths(config);
+    let studio_from_meta = read_meta(&paths.meta)
+        .await
+        .ok()
+        .is_some_and(|meta| meta.command.split_whitespace().any(|arg| arg == "--studio"));
+
     daemon_stop(config).await?;
-    let studio = std::env::var("STUDIO").is_ok_and(|v| v == "1" || v == "true");
+
+    let studio = if studio_from_meta {
+        true
+    } else {
+        std::env::var("STUDIO").is_ok_and(|v| v == "1" || v == "true")
+    };
     daemon_start(config, studio).await
 }
 
@@ -799,15 +814,36 @@ mod tests {
         assert!(parse_cli_command(&args).is_err());
     }
 
+    fn with_studio_env_removed<F: FnOnce() + std::panic::UnwindSafe>(f: F) {
+        let prev = std::env::var_os("STUDIO");
+        // SAFETY: test-only env mutation guarded by restore logic below.
+        unsafe { std::env::remove_var("STUDIO") };
+
+        let result = std::panic::catch_unwind(f);
+
+        match prev {
+            Some(v) => {
+                // SAFETY: restore prior value after test body.
+                unsafe { std::env::set_var("STUDIO", v) };
+            }
+            None => {
+                // SAFETY: restore prior unset state after test body.
+                unsafe { std::env::remove_var("STUDIO") };
+            }
+        }
+
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     #[test]
     fn parse_foreground_no_args_studio_false() {
-        // STUDIO env var is not set in unit tests — studio should be false.
-        // (We unset it explicitly to be safe.)
-        // SAFETY: test-only, single-threaded context.
-        unsafe { std::env::remove_var("STUDIO") };
-        assert_eq!(
-            parse_cli_command(&[]).unwrap(),
-            CliCommand::RunForeground { studio: false }
-        );
+        with_studio_env_removed(|| {
+            assert_eq!(
+                parse_cli_command(&[]).unwrap(),
+                CliCommand::RunForeground { studio: false }
+            );
+        });
     }
 }

@@ -791,8 +791,16 @@ function bindEvents() {
 
   // Ops filter
   root.querySelector('#ops-search')?.addEventListener('input', e => {
-    S.opsFilter.query = e.target.value;
+    const input = e.target;
+    const selStart = input.selectionStart;
+    const selEnd = input.selectionEnd;
+    S.opsFilter.query = input.value;
     render();
+    const next = root.querySelector('#ops-search');
+    if (next) {
+      next.focus();
+      if (selStart != null && selEnd != null) next.setSelectionRange(selStart, selEnd);
+    }
   });
   root.querySelector('#ops-guided-only')?.addEventListener('change', e => {
     S.opsFilter.guidedOnly = e.target.checked;
@@ -1097,8 +1105,9 @@ async function runGuided() {
       });
       status = r.status;
       body   = await r.text();
-      // Evaluate assertions
-      success = (step.assertions || []).every(a => {
+      // Evaluate assertions. If none are declared, require HTTP success.
+      const assertions = step.assertions || [];
+      success = assertions.length === 0 ? r.ok : assertions.every(a => {
         if (a.kind === 'status') return String(status) === String(a.expected);
         return true;
       });
@@ -1183,7 +1192,10 @@ async function runRaw() {
 
   const t0 = Date.now();
   try {
-    const opts = { method: method.toUpperCase(), headers: {} };
+    const opts = {
+      method: method.toUpperCase(),
+      headers: { 'x-openstack-studio-origin': '1' },
+    };
     if (bodyStr) opts.body = bodyStr;
     // Sign the raw request against the selected service (or a generic slug).
     const r = await signedFetch(S.selectedService || 'execute-api', path, opts);
@@ -1862,12 +1874,20 @@ async fn handle_request(
     };
 
     // Determine whether this is an S3 object-body request BEFORE reading the
-    // body.  For S3 PutObject / UploadPart we bypass the intermediate
-    // SpooledBody disk spool entirely: the raw axum body stream is wrapped in
-    // a `StreamReader` and passed directly to the S3 provider so it can write
-    // object data to persistent storage in a single pass (eliminates the
-    // intermediate disk write that SpooledBody would have caused).
-    let is_s3_body = is_s3_object_body_request(&method, &path, &headers, &query_params);
+    // body.  For virtual-hosted-style S3 requests we normalize path first so
+    // classification sees /bucket/key rather than /key.
+    let path_for_body_check = if should_rewrite_s3_vhost_for_body_check(&headers, &query_params) {
+        rewrite_s3_virtual_hosted_path(&path, &headers, &state.config.localstack_host)
+    } else {
+        path.clone()
+    };
+
+    // For S3 PutObject / UploadPart we bypass the intermediate SpooledBody
+    // disk spool entirely: the raw axum body stream is wrapped in a
+    // `StreamReader` and passed directly to the S3 provider so it can write
+    // object data to persistent storage in a single pass.
+    let is_s3_body =
+        is_s3_object_body_request(&method, &path_for_body_check, &headers, &query_params);
 
     let (body_bytes, body_reader): (Bytes, Option<BodyReader>) = if is_s3_body {
         // S3 object-body path: wrap the axum body as an AsyncRead and pass it
@@ -1908,6 +1928,12 @@ async fn handle_request(
         .get("origin")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+
+    // Marker used to suppress duplicate Studio-origin transaction recording.
+    let is_studio_origin = headers
+        .get("x-openstack-studio-origin")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
 
     // Build request context
     let context_start = std::time::Instant::now();
@@ -2056,7 +2082,9 @@ async fn handle_request(
 
     // Fire-and-forget: record this transaction to the Studio transaction log.
     // Skipped entirely when Studio is disabled to avoid spawn overhead on every request.
-    if state.studio_enabled {
+    // Requests initiated by Studio itself attach x-openstack-studio-origin=1
+    // and are recorded client-side to avoid duplicate transaction rows.
+    if state.studio_enabled && !is_studio_origin {
         let service = svc_ctx.service.clone();
         // Allow rest-xml services (S3) to provide the true operation name.
         let operation = state
@@ -2818,6 +2846,27 @@ fn is_studio_guided_execution_route(path: &str) -> bool {
 /// the method is PUT or POST with a non-empty key segment in the path.
 /// Content-Type is NOT checked because the S3 SDK may omit it or set it
 /// to "application/octet-stream" for arbitrary object data.
+fn should_rewrite_s3_vhost_for_body_check(
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    // Signed header style: Authorization: .../<region>/s3/aws4_request
+    if headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_sigv4_auth)
+        .is_some_and(|auth| auth.service.eq_ignore_ascii_case("s3"))
+    {
+        return true;
+    }
+
+    // Presigned URL style: X-Amz-Credential=.../<region>/s3/aws4_request
+    query_params
+        .get("X-Amz-Credential")
+        .or_else(|| query_params.get("x-amz-credential"))
+        .is_some_and(|cred| cred.split('/').nth(3).is_some_and(|svc| svc == "s3"))
+}
+
 fn is_s3_object_body_request(
     method: &Method,
     path: &str,
@@ -2962,7 +3011,7 @@ mod tests {
 
     use super::{
         detect_service, extract_rest_operation, is_s3_object_body_request,
-        rewrite_s3_virtual_hosted_path,
+        rewrite_s3_virtual_hosted_path, should_rewrite_s3_vhost_for_body_check,
     };
 
     #[test]
@@ -3130,5 +3179,25 @@ mod tests {
             rewrite_s3_virtual_hosted_path("/", &h, "localhost:4566"),
             "/my-bucket/"
         );
+    }
+
+    #[test]
+    fn body_check_rewrite_enabled_for_sigv4_s3_auth() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static(
+                "AWS4-HMAC-SHA256 Credential=test/20260402/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc",
+            ),
+        );
+        let query = std::collections::HashMap::new();
+        assert!(should_rewrite_s3_vhost_for_body_check(&headers, &query));
+    }
+
+    #[test]
+    fn body_check_rewrite_disabled_without_s3_markers() {
+        let headers = HeaderMap::new();
+        let query = std::collections::HashMap::new();
+        assert!(!should_rewrite_s3_vhost_for_body_check(&headers, &query));
     }
 }

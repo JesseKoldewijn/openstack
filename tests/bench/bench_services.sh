@@ -666,6 +666,8 @@ start_docker_mode() {
     -e GATEWAY_LISTEN="0.0.0.0:4566" \
     -e PERSISTENCE=0 \
     -e LS_LOG=error \
+    -e STUDIO=0 \
+    -e DEBUG=0 \
     "$OPENSTACK_IMAGE")
 
   if target_active ls; then
@@ -732,6 +734,8 @@ start_binary_mode() {
   LOCALSTACK_DATA_DIR="$OS_DATA_DIR" \
   PERSISTENCE=0 \
   LS_LOG=error \
+  STUDIO=0 \
+  DEBUG=0 \
     "$BINARY_PATH" &
   OS_PID=$!
 

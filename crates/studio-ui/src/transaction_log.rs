@@ -297,10 +297,20 @@ pub struct TransactionSummary {
 
 fn truncate(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max_bytes])
+        return s.to_string();
     }
+
+    let cutoff = if s.is_char_boundary(max_bytes) {
+        max_bytes
+    } else {
+        s.char_indices()
+            .map(|(idx, _)| idx)
+            .take_while(|idx| *idx < max_bytes)
+            .last()
+            .unwrap_or(0)
+    };
+
+    format!("{}…", &s[..cutoff])
 }
 
 // ---------------------------------------------------------------------------
