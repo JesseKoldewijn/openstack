@@ -7,6 +7,7 @@ pub mod plugins;
 pub mod router;
 pub mod studio;
 pub mod studio_operations;
+pub mod studio_runtime_config;
 pub mod studio_storage;
 pub mod studio_transactions;
 

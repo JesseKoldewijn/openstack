@@ -97,6 +97,10 @@ const S = {
   // ops filter
   opsFilter: { query: '', guidedOnly: false },
 
+  // polling
+  runtimeConfig: null,  // populated from /_localstack/studio-api/runtime-config
+  _pollTimers: [],      // managed by startPolling/stopPolling
+
   // ui state
   loading: {},   // keyed loading flags
   errors: {},    // keyed error messages
@@ -251,6 +255,9 @@ function layout() {
 // ── Top bar ────────────────────────────────────────────────────────────────
 function topBar() {
   const health = S.services.length ? `<span class="chip chip-ok">${S.services.length} services</span>` : '';
+  const pollIndicator = S.selectedService
+    ? `<span class="chip chip-live" title="Polling active — transactions every ${S.runtimeConfig?.polling?.transactions_interval_ms||3000}ms, storage every ${S.runtimeConfig?.polling?.storage_interval_ms||5000}ms">● live</span>`
+    : '';
   return `
 <header class="topbar">
   <div class="topbar-brand">
@@ -259,6 +266,7 @@ function topBar() {
     </svg>
     <span class="topbar-title">openstack studio</span>
     ${health}
+    ${pollIndicator}
   </div>
   <div class="topbar-actions">
     <button class="icon-btn" data-action="refresh-all" title="Refresh all">
@@ -813,6 +821,145 @@ function bindEvents() {
   });
 }
 
+// ── SigV4 signer (pure JS, no external deps) ──────────────────────────────
+// Implements AWS Signature Version 4 so guided flows and raw requests can be
+// sent as properly signed AWS API calls.  The gateway accepts unsigned requests
+// too (falling back to DEFAULT_ACCESS_KEY), but signing is the correct path.
+
+async function sha256Hex(message) {
+  const data = typeof message === 'string' ? new TextEncoder().encode(message) : message;
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+async function hmacSha256(key, message) {
+  const keyData = typeof key === 'string' ? new TextEncoder().encode(key) : key;
+  const msgData = typeof message === 'string' ? new TextEncoder().encode(message) : message;
+  const cryptoKey = await crypto.subtle.importKey('raw', keyData, { name:'HMAC', hash:'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
+  return new Uint8Array(sig);
+}
+
+async function hmacSha256Hex(key, message) {
+  const bytes = await hmacSha256(key, message);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+async function signRequest(method, url, service, body, creds, region) {
+  const urlObj = new URL(url, window.location.origin);
+  const host   = urlObj.hostname + (urlObj.port ? ':' + urlObj.port : '');
+  const path   = urlObj.pathname || '/';
+  const query  = urlObj.searchParams.toString();
+
+  const now     = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
+  const dateStamp = amzDate.slice(0, 8);
+
+  const bodyStr   = body || '';
+  const bodyHash  = await sha256Hex(bodyStr);
+
+  // Canonical headers (must be sorted, lowercase)
+  const headers = {
+    'host':          host,
+    'x-amz-date':    amzDate,
+    'x-amz-content-sha256': bodyHash,
+  };
+  if (creds.session_token) headers['x-amz-security-token'] = creds.session_token;
+  const sortedHeaderNames = Object.keys(headers).sort();
+  const canonicalHeaders  = sortedHeaderNames.map(k => `${k}:${headers[k]}\n`).join('');
+  const signedHeaders     = sortedHeaderNames.join(';');
+
+  const canonicalRequest = [
+    method.toUpperCase(),
+    path,
+    query,
+    canonicalHeaders,
+    signedHeaders,
+    bodyHash,
+  ].join('\n');
+
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const strToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    credentialScope,
+    await sha256Hex(canonicalRequest),
+  ].join('\n');
+
+  // Derive signing key
+  const kDate    = await hmacSha256(`AWS4${creds.secret_access_key}`, dateStamp);
+  const kRegion  = await hmacSha256(kDate, region);
+  const kService = await hmacSha256(kRegion, service);
+  const kSigning = await hmacSha256(kService, 'aws4_request');
+  const signature = await hmacSha256Hex(kSigning, strToSign);
+
+  const authHeader = [
+    `AWS4-HMAC-SHA256 Credential=${creds.access_key_id}/${credentialScope}`,
+    `SignedHeaders=${signedHeaders}`,
+    `Signature=${signature}`,
+  ].join(', ');
+
+  return {
+    headers: {
+      ...headers,
+      'Authorization': authHeader,
+    },
+  };
+}
+
+// Signed fetch — adds SigV4 headers when runtime config is available.
+// `awsService` is the AWS service slug, e.g. "s3", "sqs".
+async function signedFetch(awsService, path, opts = {}) {
+  const cfg = S.runtimeConfig;
+  if (!cfg) return fetch(path, opts);
+
+  const body = opts.body || '';
+  const method = (opts.method || 'GET').toUpperCase();
+  const region = cfg.region || 'us-east-1';
+  const creds  = cfg.credentials;
+
+  try {
+    const signed = await signRequest(method, path, awsService, body, creds, region);
+    return fetch(path, {
+      ...opts,
+      method,
+      headers: { ...(opts.headers || {}), ...signed.headers },
+    });
+  } catch (_) {
+    // Signing failed (e.g. subtle crypto unavailable in non-HTTPS) — fall back unsigned
+    return fetch(path, opts);
+  }
+}
+
+// ── Polling engine ─────────────────────────────────────────────────────────
+let _pollTimers = [];
+
+function stopPolling() {
+  _pollTimers.forEach(id => clearInterval(id));
+  _pollTimers = [];
+}
+
+function startPolling() {
+  stopPolling();
+  const cfg = S.runtimeConfig?.polling || {};
+  const storageMs = cfg.storage_interval_ms || 5000;
+  const txMs      = cfg.transactions_interval_ms || 3000;
+
+  // Storage poller — only runs when storage tab is active
+  _pollTimers.push(setInterval(async () => {
+    if (S.selectedService && S.activeTab === 'storage') {
+      await refreshStorage();
+    }
+  }, storageMs));
+
+  // Transaction poller — runs when transactions tab is active OR always in background
+  _pollTimers.push(setInterval(async () => {
+    if (S.selectedService) {
+      await refreshTransactions();
+    }
+  }, txMs));
+}
+
 // ── Actions ────────────────────────────────────────────────────────────────
 async function runGuided() {
   const flows = S.flowDefinition?.flows || [];
@@ -840,7 +987,9 @@ async function runGuided() {
     const t0 = Date.now();
     let status = 0, body = '', success = false;
     try {
-      const r = await fetch(path, {
+      // Derive AWS service slug from the selected service name for signing.
+      // Studio requests go to the local gateway so we sign with the service slug.
+      const r = await signedFetch(S.selectedService || 's3', path, {
         method,
         headers: { 'content-type': 'application/json' },
         body: bodyStr,
@@ -887,9 +1036,10 @@ async function runRaw() {
 
   const t0 = Date.now();
   try {
-    const opts = { method, headers: {} };
+    const opts = { method: method.toUpperCase(), headers: {} };
     if (bodyStr) opts.body = bodyStr;
-    const r = await fetch(path, opts);
+    // Sign the raw request against the selected service (or a generic slug).
+    const r = await signedFetch(S.selectedService || 'execute-api', path, opts);
     const text = await r.text();
     let pretty = text;
     try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
@@ -915,197 +1065,29 @@ async function runRaw() {
 
 // ── Bootstrap ──────────────────────────────────────────────────────────────
 setTheme(S.theme);
-loadCatalogue().then(render);
 
-  const state = {
-    services: [],
-    // kept for legacy usage — now fully replaced by S above
-  };
-
-  function esc(v) {
-    return String(v ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// Load runtime config first (credentials + polling intervals), then catalogue.
+(async () => {
+  try {
+    const cfg = await api('/_localstack/studio-api/runtime-config');
+    S.runtimeConfig = cfg;
+    // Start polling as soon as we have the config (intervals may be non-default)
+    startPolling();
+  } catch (_) {
+    // runtime-config unavailable — use defaults and still poll
+    S.runtimeConfig = {
+      endpoint: '',
+      credentials: { access_key_id: 'test', secret_access_key: 'test', session_token: null },
+      region: 'us-east-1',
+      polling: { storage_interval_ms: 5000, transactions_interval_ms: 3000 },
+    };
+    startPolling();
   }
+  await loadCatalogue();
+})();
 
-  async function getJson(path) {
-    const r = await fetch(path, { headers: { 'accept': 'application/json' } });
-    if (!r.ok) throw new Error(path + ' failed: ' + r.status);
-    return r.json();
-  }
-
-  function mergeServiceData() {
-    const byFlow = new Map(state.flowCatalog.map((x) => [x.service, x]));
-    const byCoverage = new Map(state.flowCoverage.map((x) => [x.service, x]));
-    return state.services.map((s) => {
-      const flow = byFlow.get(s.name) || { protocol: 'unknown', flow_count: 0, maturity: 'none' };
-      const coverage = byCoverage.get(s.name) || { quality: 'unknown', l1_flows: 0 };
-      return {
-        name: s.name,
-        status: s.status,
-        tier: s.support_tier,
-        protocol: flow.protocol,
-        flows: flow.flow_count,
-        quality: coverage.quality,
-      };
-    });
-  }
-
-  function render() {
-    const cards = mergeServiceData();
-    const selected = state.selectedService;
-    const selectedCard = cards.find((c) => c.name === selected);
-
-    root.innerHTML = `
-      <div class=\"studio-layout\">
-        <header class=\"studio-header\">
-          <h1>OpenStack Studio</h1>
-          <p>Service dashboard for guided and raw operations</p>
-        </header>
-        <main class=\"studio-grid\">
-          <section class=\"studio-panel\">
-            <h2>Services</h2>
-            <div class=\"service-list\">
-              ${cards.map((c) => `
-                <button class=\"service-card ${selected === c.name ? 'active' : ''}\" data-service=\"${esc(c.name)}\">
-                  <strong>${esc(c.name)}</strong>
-                  <span>Status: ${esc(c.status)}</span>
-                  <span>Tier: ${esc(c.tier)}</span>
-                  <span>Protocol: ${esc(c.protocol)}</span>
-                  <span>Flows: ${esc(c.flows)}</span>
-                  <span>Coverage: ${esc(c.quality)}</span>
-                </button>
-              `).join('')}
-            </div>
-          </section>
-          <section class=\"studio-panel\">
-            <h2>Service Detail ${selectedCard ? '(' + esc(selectedCard.name) + ')' : ''}</h2>
-            ${selected ? renderDetail() : '<p>Select a service to run guided or raw operations.</p>'}
-          </section>
-          <section class=\"studio-panel\">
-            <h2>History</h2>
-            <div class=\"history-list\">
-              ${state.history.length === 0 ? '<p>No interactions yet.</p>' : state.history.map((h, i) =>
-                `<button class=\"history-item\" data-history=\"${i}\">${esc(h.service)} - ${esc(h.method)} ${esc(h.path)} (${esc(h.status)})</button>`
-              ).join('')}
-            </div>
-          </section>
-        </main>
-      </div>
-    `;
-
-    root.querySelectorAll('[data-service]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        state.selectedService = btn.getAttribute('data-service');
-        try {
-          state.flowDefinition = await getJson('/_localstack/studio-api/flows/' + state.selectedService);
-        } catch (e) {
-          state.flowDefinition = { service: state.selectedService, flows: [], inputs: [] };
-        }
-        render();
-      });
-    });
-
-    root.querySelectorAll('[data-history]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const idx = Number(btn.getAttribute('data-history'));
-        const item = state.history[idx];
-        if (!item) return;
-        state.raw.method = item.method;
-        state.raw.path = item.path;
-        state.raw.body = item.body || '';
-        render();
-      });
-    });
-
-    const rawRun = root.querySelector('[data-run-raw]');
-    if (rawRun) rawRun.addEventListener('click', runRaw);
-    const flowRun = root.querySelector('[data-run-flow]');
-    if (flowRun) flowRun.addEventListener('click', runGuided);
-  }
-
-  function renderDetail() {
-    const flow = state.flowDefinition;
-    return `
-      <div class=\"detail-grid\">
-        <div>
-          <h3>Guided Flow</h3>
-          <p>Flows available: ${esc(flow && flow.flows ? flow.flows.length : 0)}</p>
-          <button data-run-flow ${!flow || !flow.flows || flow.flows.length === 0 ? 'disabled' : ''}>Run first guided flow</button>
-        </div>
-        <div>
-          <h3>Raw Request</h3>
-          <label>Method <input id=\"raw-method\" value=\"${esc(state.raw.method)}\"/></label>
-          <label>Path <input id=\"raw-path\" value=\"${esc(state.raw.path)}\"/></label>
-          <label>Body <textarea id=\"raw-body\">${esc(state.raw.body)}</textarea></label>
-          <button data-run-raw>Run raw request</button>
-          ${state.response ? `<pre>${esc(JSON.stringify(state.response, null, 2))}</pre>` : ''}
-        </div>
-      </div>
-    `;
-  }
-
-  async function runRaw() {
-    const methodInput = document.getElementById('raw-method');
-    const pathInput = document.getElementById('raw-path');
-    const bodyInput = document.getElementById('raw-body');
-    state.raw.method = (methodInput && methodInput.value || 'GET').toUpperCase();
-    state.raw.path = (pathInput && pathInput.value || '/_localstack/health');
-    state.raw.body = bodyInput ? bodyInput.value : '';
-
-    const opts = { method: state.raw.method, headers: {} };
-    if (state.raw.body) opts.body = state.raw.body;
-    const r = await fetch(state.raw.path, opts);
-    const text = await r.text();
-    state.response = { status: r.status, body: text };
-    state.history.unshift({
-      service: state.selectedService || 'raw',
-      method: state.raw.method,
-      path: state.raw.path,
-      body: state.raw.body,
-      status: r.status,
-    });
-    state.history = state.history.slice(0, 20);
-    render();
-  }
-
-  async function runGuided() {
-    if (!state.flowDefinition || !state.flowDefinition.flows || state.flowDefinition.flows.length === 0) return;
-    const firstFlow = state.flowDefinition.flows[0];
-    for (const step of (firstFlow.steps || [])) {
-      const op = step.operation || {};
-      const method = (op.method || 'GET').toUpperCase();
-      const path = (op.path || '/').replace('{{inputs.resource_name}}', 'studio-resource');
-      const body = op.body || undefined;
-      const r = await fetch(path, { method, body });
-      state.history.unshift({
-        service: state.selectedService || 'guided',
-        method,
-        path,
-        body: body || '',
-        status: r.status,
-      });
-    }
-    state.history = state.history.slice(0, 20);
-    render();
-  }
-
-  async function bootstrap() {
-    const [services, flowCatalog, flowCoverage] = await Promise.all([
-      getJson('/_localstack/studio-api/services'),
-      getJson('/_localstack/studio-api/flows/catalog'),
-      getJson('/_localstack/studio-api/flows/coverage'),
-    ]);
-    state.services = services.services || [];
-    state.flowCatalog = flowCatalog.services || [];
-    state.flowCoverage = flowCoverage.services || [];
-    render();
-  }
-
-  bootstrap().catch((err) => {
-    root.innerHTML = '<pre>Studio dashboard failed to load: ' + esc(err.message || String(err)) + '</pre>';
-  });
 })();
 "#;
-
 const STUDIO_ASSET_CSS: &str = r#"*,::before,::after{box-sizing:border-box;margin:0;padding:0}
 :root{color-scheme:light dark;
   --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;
@@ -1192,6 +1174,8 @@ body{font-family:var(--font);background:var(--bg);color:var(--fg);font-size:13px
 .chip{display:inline-flex;align-items:center;border-radius:10px;padding:1px 7px;
   font-size:10px;font-weight:500;line-height:16px;background:var(--bg3);border:1px solid var(--border)}
 .chip-ok{background:#1c3a20;border-color:#3fb950;color:#3fb950}
+.chip-live{background:#1a2d18;border-color:#3fb950;color:#3fb950;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
 .chip-guided{background:#1a2d4a;border-color:var(--accent);color:var(--accent)}
 .chip-raw{background:var(--bg3);border-color:var(--border);color:var(--fg2)}
 .chip-level{background:#2a2016;border-color:var(--warn);color:var(--warn)}

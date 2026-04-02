@@ -45,6 +45,11 @@ pub fn internal_api_router(state: ApiState) -> Router {
             "/_localstack/studio-api/flows/{service}",
             get(crate::studio::get_studio_flow_definition),
         )
+        // --- Studio: runtime config (credentials, endpoint, polling) ---
+        .route(
+            "/_localstack/studio-api/runtime-config",
+            get(crate::studio_runtime_config::get_runtime_config),
+        )
         // --- Studio: per-service operation catalogue ---
         .route(
             "/_localstack/studio-api/operations",

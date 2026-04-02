@@ -20,6 +20,11 @@ pub mod workspace;
 
 pub use api::StudioApiClient;
 pub use api::StudioUrlResolution;
+pub use api::{
+    AllTransactionsResponse, OperationEntryDto, ServiceOperationsResponse,
+    ServiceStorageResponse, ServiceTransactionsResponse, StudioCredentials,
+    StudioPollingConfig, StudioRuntimeConfig, TransactionDto, TransactionSummaryDto,
+};
 pub use catalog::ServiceCatalog;
 pub use console::RawConsoleState;
 pub use dashboard::{DashboardHomeViewModel, DashboardServiceCard, build_dashboard_home_model};

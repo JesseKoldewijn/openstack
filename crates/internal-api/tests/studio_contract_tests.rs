@@ -306,3 +306,29 @@ async fn studio_transactions_clear_empties_log() {
     assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
 }
 
+// ---------------------------------------------------------------------------
+// Runtime config
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn studio_runtime_config_contract() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/runtime-config").await;
+    assert_eq!(status, StatusCode::OK);
+    // Schema version
+    assert_eq!(body["schema_version"], "1.0");
+    // Endpoint is a non-empty string
+    assert!(body["endpoint"].as_str().is_some_and(|s| !s.is_empty()));
+    // Credentials block
+    assert_eq!(body["credentials"]["access_key_id"], "test");
+    assert_eq!(body["credentials"]["secret_access_key"], "test");
+    // Region
+    assert!(body["region"].as_str().is_some());
+    // Polling intervals are positive integers
+    assert!(body["polling"]["storage_interval_ms"].as_u64().is_some_and(|v| v > 0));
+    assert!(body["polling"]["transactions_interval_ms"].as_u64().is_some_and(|v| v > 0));
+    // Studio paths
+    assert!(body["studio"]["api_base"].as_str().is_some());
+    assert!(body["studio"]["spa_base"].as_str().is_some());
+}
+
