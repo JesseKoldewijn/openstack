@@ -2,12 +2,89 @@
   "schemaVersion": "1.2",
   "service": "kinesis",
   "protocol": "json_target",
+  "inputs": [
+    { "name": "stream_name", "type": "string", "required": true, "description": "Kinesis stream name" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create stream","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"Kinesis_20131202.CreateStream"},"body":"{\"StreamName\":\"{{inputs.resource_name}}\",\"ShardCount\":1}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete stream","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"Kinesis_20131202.DeleteStream"},"body":"{\"StreamName\":\"{{captures.resource_name}}\"}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-stream",
+          "title": "Create stream",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Kinesis_20131202.CreateStream", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"StreamName\":\"{{inputs.stream_name}}\",\"ShardCount\":1}"
+          },
+          "captures": [{ "name": "stream_name", "source": "inputs.stream_name" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "put-record",
+          "title": "Put record",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Kinesis_20131202.PutRecord", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"StreamName\":\"{{captures.stream_name}}\",\"Data\":\"aGVsbG8gZnJvbSBzdHVkaW8=\",\"PartitionKey\":\"studio\"}"
+          },
+          "captures": [
+            { "name": "sequence_number", "source": "SequenceNumber" },
+            { "name": "shard_id",        "source": "ShardId" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-shard-iterator",
+          "title": "Get shard iterator",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Kinesis_20131202.GetShardIterator", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"StreamName\":\"{{captures.stream_name}}\",\"ShardId\":\"{{captures.shard_id}}\",\"ShardIteratorType\":\"TRIM_HORIZON\"}"
+          },
+          "captures": [{ "name": "shard_iterator", "source": "ShardIterator" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-records",
+          "title": "Get records",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Kinesis_20131202.GetRecords", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"ShardIterator\":\"{{captures.shard_iterator}}\",\"Limit\":10}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-stream",
+          "title": "Describe stream",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Kinesis_20131202.DescribeStreamSummary", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"StreamName\":\"{{captures.stream_name}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-stream",
+          "title": "Delete stream",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Kinesis_20131202.DeleteStream", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"StreamName\":\"{{captures.stream_name}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

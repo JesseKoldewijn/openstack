@@ -2,24 +2,66 @@
   "schemaVersion": "1.2",
   "service": "sns",
   "protocol": "query",
+  "inputs": [
+    { "name": "topic_name", "type": "string", "required": true, "description": "SNS topic name" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
       "steps": [
         {
-          "id": "create",
+          "id": "create-topic",
           "title": "Create topic",
-          "operation": { "method": "POST", "path": "/", "body": "Action=CreateTopic&Name={{inputs.resource_name}}&Version=2010-03-31" },
-          "captures": [{ "name": "resource_name", "source": "inputs.resource_name" }],
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateTopic&Name={{inputs.topic_name}}&Version=2010-03-31"
+          },
+          "captures": [{ "name": "topic_arn", "source": "TopicArn" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-topic-attributes",
+          "title": "Get topic attributes",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=GetTopicAttributes&TopicArn={{captures.topic_arn}}&Version=2010-03-31"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "publish",
+          "title": "Publish message",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=Publish&TopicArn={{captures.topic_arn}}&Message=hello+from+studio&Subject=studio-test&Version=2010-03-31"
+          },
+          "captures": [{ "name": "message_id", "source": "MessageId" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-topics",
+          "title": "List topics",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=ListTopics&Version=2010-03-31"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ],
       "cleanup": [
         {
-          "id": "delete",
+          "id": "delete-topic",
           "title": "Delete topic",
-          "operation": { "method": "POST", "path": "/", "body": "Action=DeleteTopic&TopicArn={{captures.resource_name}}&Version=2010-03-31" },
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteTopic&TopicArn={{captures.topic_arn}}&Version=2010-03-31"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ]

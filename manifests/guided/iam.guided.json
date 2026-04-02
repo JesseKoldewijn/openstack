@@ -2,24 +2,79 @@
   "schemaVersion": "1.2",
   "service": "iam",
   "protocol": "query",
+  "inputs": [
+    { "name": "role_name",   "type": "string", "required": true,  "description": "IAM role name" },
+    { "name": "policy_name", "type": "string", "required": false, "description": "Inline policy name (default: studio-policy)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
       "steps": [
         {
-          "id": "create",
+          "id": "create-role",
           "title": "Create role",
-          "operation": { "method": "POST", "path": "/", "body": "Action=CreateRole&RoleName={{inputs.resource_name}}&AssumeRolePolicyDocument=%7B%7D&Version=2010-05-08" },
-          "captures": [{ "name": "resource_name", "source": "inputs.resource_name" }],
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateRole&RoleName={{inputs.role_name}}&AssumeRolePolicyDocument=%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22lambda.amazonaws.com%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D&Version=2010-05-08"
+          },
+          "captures": [
+            { "name": "role_name", "source": "RoleName" },
+            { "name": "role_arn",  "source": "Arn" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "put-role-policy",
+          "title": "Put role policy",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=PutRolePolicy&RoleName={{captures.role_name}}&PolicyName={{inputs.policy_name}}&PolicyDocument=%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Action%22%3A%22logs%3A%2A%22%2C%22Resource%22%3A%22%2A%22%7D%5D%7D&Version=2010-05-08"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-role",
+          "title": "Get role",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=GetRole&RoleName={{captures.role_name}}&Version=2010-05-08"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-roles",
+          "title": "List roles",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=ListRoles&Version=2010-05-08"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ],
       "cleanup": [
         {
-          "id": "delete",
+          "id": "delete-role-policy",
+          "title": "Delete role policy",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteRolePolicy&RoleName={{captures.role_name}}&PolicyName={{inputs.policy_name}}&Version=2010-05-08"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "delete-role",
           "title": "Delete role",
-          "operation": { "method": "POST", "path": "/", "body": "Action=DeleteRole&RoleName={{captures.resource_name}}&Version=2010-05-08" },
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteRole&RoleName={{captures.role_name}}&Version=2010-05-08"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ]

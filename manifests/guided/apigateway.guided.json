@@ -2,12 +2,67 @@
   "schemaVersion": "1.2",
   "service": "apigateway",
   "protocol": "rest_json",
+  "inputs": [
+    { "name": "api_name", "type": "string", "required": true, "description": "REST API name" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create api","operation":{"method":"POST","path":"/","body":"{\"name\":\"{{inputs.resource_name}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete api","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-rest-api",
+          "title": "Create REST API",
+          "operation": {
+            "method": "POST",
+            "path": "/restapis",
+            "body": "{\"name\":\"{{inputs.api_name}}\",\"description\":\"Created by openstack studio\"}"
+          },
+          "captures": [{ "name": "api_id", "source": "id" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "201" }]
+        },
+        {
+          "id": "get-resources",
+          "title": "Get resources",
+          "operation": {
+            "method": "GET",
+            "path": "/restapis/{{captures.api_id}}/resources"
+          },
+          "captures": [{ "name": "root_resource_id", "source": "id" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "create-deployment",
+          "title": "Create deployment",
+          "operation": {
+            "method": "POST",
+            "path": "/restapis/{{captures.api_id}}/deployments",
+            "body": "{\"stageName\":\"studio\",\"description\":\"Studio test deployment\"}"
+          },
+          "captures": [{ "name": "deployment_id", "source": "id" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "201" }]
+        },
+        {
+          "id": "get-rest-api",
+          "title": "Get REST API",
+          "operation": {
+            "method": "GET",
+            "path": "/restapis/{{captures.api_id}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-rest-api",
+          "title": "Delete REST API",
+          "operation": {
+            "method": "DELETE",
+            "path": "/restapis/{{captures.api_id}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "202" }]
+        }
+      ]
     }
   ]
 }

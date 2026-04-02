@@ -2,12 +2,80 @@
   "schemaVersion": "1.2",
   "service": "events",
   "protocol": "rest_json",
+  "inputs": [
+    { "name": "bus_name",  "type": "string", "required": true,  "description": "EventBridge event bus name" },
+    { "name": "rule_name", "type": "string", "required": false, "description": "Rule name (default: studio-rule)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Put rule","operation":{"method":"POST","path":"/","body":"{\"Name\":\"{{inputs.resource_name}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete rule","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-bus",
+          "title": "Create event bus",
+          "operation": {
+            "method": "POST",
+            "path": "/eventbuses",
+            "body": "{\"Name\":\"{{inputs.bus_name}}\"}"
+          },
+          "captures": [
+            { "name": "bus_name", "source": "EventBusArn" },
+            { "name": "bus_arn",  "source": "EventBusArn" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "put-rule",
+          "title": "Put rule",
+          "operation": {
+            "method": "POST",
+            "path": "/rules",
+            "body": "{\"Name\":\"{{inputs.rule_name}}\",\"EventBusName\":\"{{inputs.bus_name}}\",\"EventPattern\":\"{\\\"source\\\":[\\\"studio\\\"]}\",\"State\":\"ENABLED\"}"
+          },
+          "captures": [{ "name": "rule_arn", "source": "RuleArn" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "put-events",
+          "title": "Put events",
+          "operation": {
+            "method": "POST",
+            "path": "/events",
+            "body": "{\"Entries\":[{\"EventBusName\":\"{{inputs.bus_name}}\",\"Source\":\"studio\",\"DetailType\":\"studio-test\",\"Detail\":\"{\\\"key\\\":\\\"value\\\"}\"}]}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-rules",
+          "title": "List rules",
+          "operation": {
+            "method": "GET",
+            "path": "/rules?EventBusName={{inputs.bus_name}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-rule",
+          "title": "Delete rule",
+          "operation": {
+            "method": "DELETE",
+            "path": "/rules/{{inputs.rule_name}}?EventBusName={{inputs.bus_name}}&Force=true"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "delete-bus",
+          "title": "Delete event bus",
+          "operation": {
+            "method": "DELETE",
+            "path": "/eventbuses/{{inputs.bus_name}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

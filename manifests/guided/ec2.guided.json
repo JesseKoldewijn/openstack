@@ -1,13 +1,80 @@
 {
   "schemaVersion": "1.2",
   "service": "ec2",
-  "protocol": "rest_json",
+  "protocol": "ec2",
+  "inputs": [
+    { "name": "vpc_cidr", "type": "string", "required": false, "description": "VPC CIDR block (default: 10.0.0.0/16)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create instance","operation":{"method":"POST","path":"/","body":"{\"ClientToken\":\"{{inputs.resource_name}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Terminate instance","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-vpc",
+          "title": "Create VPC",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateVpc&CidrBlock={{inputs.vpc_cidr}}&Version=2016-11-15"
+          },
+          "captures": [{ "name": "vpc_id", "source": "vpcId" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-vpcs",
+          "title": "Describe VPCs",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DescribeVpcs&Filter.1.Name=vpc-id&Filter.1.Value.1={{captures.vpc_id}}&Version=2016-11-15"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "create-security-group",
+          "title": "Create security group",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateSecurityGroup&GroupName=studio-sg&Description=studio+test+sg&VpcId={{captures.vpc_id}}&Version=2016-11-15"
+          },
+          "captures": [{ "name": "sg_id", "source": "groupId" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-instances",
+          "title": "Describe instances",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DescribeInstances&Filter.1.Name=vpc-id&Filter.1.Value.1={{captures.vpc_id}}&Version=2016-11-15"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-security-group",
+          "title": "Delete security group",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteSecurityGroup&GroupId={{captures.sg_id}}&Version=2016-11-15"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "delete-vpc",
+          "title": "Delete VPC",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteVpc&VpcId={{captures.vpc_id}}&Version=2016-11-15"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

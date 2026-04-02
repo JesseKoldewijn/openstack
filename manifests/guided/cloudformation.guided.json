@@ -2,24 +2,65 @@
   "schemaVersion": "1.2",
   "service": "cloudformation",
   "protocol": "query",
+  "inputs": [
+    { "name": "stack_name", "type": "string", "required": true, "description": "CloudFormation stack name" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
       "steps": [
         {
-          "id": "create",
+          "id": "create-stack",
           "title": "Create stack",
-          "operation": { "method": "POST", "path": "/", "body": "Action=CreateStack&StackName={{inputs.resource_name}}&TemplateBody=%7B%22Resources%22%3A%7B%7D%7D&Version=2010-05-15" },
-          "captures": [{ "name": "resource_name", "source": "inputs.resource_name" }],
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateStack&StackName={{inputs.stack_name}}&TemplateBody=%7B%22AWSTemplateFormatVersion%22%3A%222010-09-09%22%2C%22Description%22%3A%22openstack+studio+test+stack%22%2C%22Resources%22%3A%7B%22StudioQueue%22%3A%7B%22Type%22%3A%22AWS%3A%3ASQS%3A%3AQueue%22%2C%22Properties%22%3A%7B%22QueueName%22%3A%22studio-cfn-queue%22%7D%7D%7D%7D&Version=2010-05-15"
+          },
+          "captures": [{ "name": "stack_id", "source": "StackId" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-stacks",
+          "title": "Describe stacks",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DescribeStacks&StackName={{inputs.stack_name}}&Version=2010-05-15"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-stack-resources",
+          "title": "List stack resources",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=ListStackResources&StackName={{inputs.stack_name}}&Version=2010-05-15"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-stacks",
+          "title": "List stacks",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=ListStacks&Version=2010-05-15"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ],
       "cleanup": [
         {
-          "id": "delete",
+          "id": "delete-stack",
           "title": "Delete stack",
-          "operation": { "method": "POST", "path": "/", "body": "Action=DeleteStack&StackName={{captures.resource_name}}&Version=2010-05-15" },
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteStack&StackName={{inputs.stack_name}}&Version=2010-05-15"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ]

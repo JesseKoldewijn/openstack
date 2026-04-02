@@ -2,12 +2,58 @@
   "schemaVersion": "1.2",
   "service": "opensearch",
   "protocol": "rest_json",
+  "inputs": [
+    { "name": "domain_name", "type": "string", "required": true, "description": "OpenSearch domain name (lowercase alphanumeric, 3-28 chars)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create domain","operation":{"method":"POST","path":"/","body":"{\"DomainName\":\"{{inputs.resource_name}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete domain","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-domain",
+          "title": "Create domain",
+          "operation": {
+            "method": "POST",
+            "path": "/2021-01-01/opensearch/domain",
+            "body": "{\"DomainName\":\"{{inputs.domain_name}}\",\"EngineVersion\":\"OpenSearch_2.11\",\"ClusterConfig\":{\"InstanceType\":\"t3.small.search\",\"InstanceCount\":1}}"
+          },
+          "captures": [
+            { "name": "domain_name", "source": "DomainStatus.DomainName" },
+            { "name": "domain_arn",  "source": "DomainStatus.ARN" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-domain",
+          "title": "Describe domain",
+          "operation": {
+            "method": "GET",
+            "path": "/2021-01-01/opensearch/domain/{{captures.domain_name}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-domain-names",
+          "title": "List domain names",
+          "operation": {
+            "method": "GET",
+            "path": "/2021-01-01/opensearch/domain"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-domain",
+          "title": "Delete domain",
+          "operation": {
+            "method": "DELETE",
+            "path": "/2021-01-01/opensearch/domain/{{captures.domain_name}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

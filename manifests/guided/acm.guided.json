@@ -1,13 +1,63 @@
 {
   "schemaVersion": "1.2",
   "service": "acm",
-  "protocol": "rest_json",
+  "protocol": "json_target",
+  "inputs": [
+    { "name": "domain_name", "type": "string", "required": true, "description": "Domain name for the certificate (e.g. example.com)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create certificate","operation":{"method":"POST","path":"/","body":"{\"CertificateArn\":\"{{inputs.resource_name}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete certificate","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "request-certificate",
+          "title": "Request certificate",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "CertificateManager.RequestCertificate", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"DomainName\":\"{{inputs.domain_name}}\",\"ValidationMethod\":\"DNS\"}"
+          },
+          "captures": [{ "name": "cert_arn", "source": "CertificateArn" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-certificate",
+          "title": "Describe certificate",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "CertificateManager.DescribeCertificate", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"CertificateArn\":\"{{captures.cert_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-certificates",
+          "title": "List certificates",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "CertificateManager.ListCertificates", "content-type": "application/x-amz-json-1.1" },
+            "body": "{}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-certificate",
+          "title": "Delete certificate",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "CertificateManager.DeleteCertificate", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"CertificateArn\":\"{{captures.cert_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }
