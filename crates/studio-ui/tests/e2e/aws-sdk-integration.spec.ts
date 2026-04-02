@@ -13,14 +13,23 @@ test.describe('Studio UI Verification with AWS SDK', () => {
   const AWS_ENDPOINT = 'http://localhost:4566';
   const REGION = 'us-east-1';
 
-  // Helper to create SDK clients pointing to the local gateway
-  // forcePathStyle is required — the gateway expects /bucket/key paths, not
-  // virtual-hosted style (bucket.localhost:4566).
-  const s3 = new S3Client({
+  // Helper to create SDK clients pointing to the local gateway.
+  // S3 clients are tested in both path-style and virtual-hosted style.
+  // forcePathStyle=true is required when the test environment does not have
+  // wildcard DNS for bucket subdomains — the default for CI.
+  const s3PathStyle = new S3Client({
     endpoint: AWS_ENDPOINT,
     region: REGION,
     credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
     forcePathStyle: true,
+  });
+  // Virtual-hosted-style client (no forcePathStyle) — SDK sends
+  // PUT /  with Host: bucket.localhost instead of PUT /bucket.
+  // The gateway rewrites this to path-style before dispatch.
+  const s3VHost = new S3Client({
+    endpoint: AWS_ENDPOINT,
+    region: REGION,
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
   });
   const sqs = new SQSClient({ endpoint: AWS_ENDPOINT, region: REGION, credentials: { accessKeyId: 'test', secretAccessKey: 'test' } });
   const ddb = new DynamoDBClient({ endpoint: AWS_ENDPOINT, region: REGION, credentials: { accessKeyId: 'test', secretAccessKey: 'test' } });
@@ -28,8 +37,8 @@ test.describe('Studio UI Verification with AWS SDK', () => {
   test('should reflect S3 bucket creation in Studio explorer', async ({ page }) => {
     const bucketName = `sdk-bucket-${Date.now()}`;
     
-    // 1. Create bucket via SDK
-    await s3.send(new CreateBucketCommand({ Bucket: bucketName }));
+    // 1. Create bucket via path-style SDK client
+    await s3PathStyle.send(new CreateBucketCommand({ Bucket: bucketName }));
     
     // 2. Open Studio
     await page.goto(STUDIO_URL);
@@ -42,6 +51,30 @@ test.describe('Studio UI Verification with AWS SDK', () => {
     // 4. Check Transactions tab — CreateBucket should be recorded
     await page.click('.tab:has-text("Transactions")');
     await expect(page.locator('code.tx-op:has-text("CreateBucket")').first()).toBeVisible();
+  });
+
+  test('should work with S3 virtual-hosted style (no forcePathStyle)', async ({ page }) => {
+    const bucketName = `sdk-vhost-${Date.now()}`;
+
+    // Virtual-hosted style: SDK sends PUT / with Host: bucket.localhost
+    // The gateway rewrites it to /bucket before reaching S3 provider.
+    await s3VHost.send(new CreateBucketCommand({ Bucket: bucketName }));
+    await s3VHost.send(new PutObjectCommand({
+      Bucket: bucketName,
+      Key: 'hello.txt',
+      Body: Buffer.from('hello from vhost'),
+      ContentType: 'text/plain',
+    }));
+
+    // Open Studio and verify storage shows the bucket
+    await page.goto(STUDIO_URL);
+    await page.click('.svc-card:has-text("S3")');
+    await page.click('.tab:has-text("Storage")');
+    await expect(page.locator('.resource-row .resource-id', { hasText: bucketName })).toBeVisible({ timeout: 10000 });
+
+    // Transactions should show PutObject
+    await page.click('.tab:has-text("Transactions")');
+    await expect(page.locator('code.tx-op:has-text("PutObject")').first()).toBeVisible();
   });
 
   test('should reflect SQS message operations in Studio history', async ({ page }) => {

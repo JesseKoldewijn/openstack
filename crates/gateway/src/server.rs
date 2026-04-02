@@ -2089,6 +2089,18 @@ fn build_request_context(
     let service =
         detect_service(&path, &query_params, &headers, body, service_from_auth).into_owned();
 
+    // Virtual-hosted-style S3 rewriting:
+    //   bucket.s3.amazonaws.com/key  →  path = /bucket/key
+    //   bucket.localhost:4566/key    →  path = /bucket/key
+    //
+    // The AWS SDK v3 defaults to virtual-hosted style.  We normalise the path
+    // here so the S3 provider always sees path-style, matching its routing logic.
+    let path = if service == "s3" {
+        rewrite_s3_virtual_hosted_path(&path, &headers, &config.localstack_host)
+    } else {
+        path
+    };
+
     // Validate / normalize region
     let region = if config.allow_nonstandard_regions || is_valid_region(region) {
         region.to_string()
@@ -2132,6 +2144,78 @@ fn build_request_context(
         spooled_body: None,
         body_reader,
     })
+}
+
+/// Rewrite an S3 virtual-hosted-style path to path-style.
+///
+/// If the `Host` header looks like `<bucket>.<s3-endpoint>` (e.g.
+/// `my-bucket.s3.amazonaws.com`, `my-bucket.localhost:4566`,
+/// `my-bucket.s3.us-east-1.localhost.localstack.cloud`), extract `<bucket>`
+/// and prepend it to `path` so the S3 provider always sees `/bucket[/key]`.
+///
+/// Path-style requests are returned unchanged.
+fn rewrite_s3_virtual_hosted_path(
+    path: &str,
+    headers: &HeaderMap,
+    localstack_host: &str,
+) -> String {
+    let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) else {
+        return path.to_string();
+    };
+    // Strip port so comparison works for both localhost:4566 and bare hostnames.
+    let host_no_port = host.split(':').next().unwrap_or(host);
+    let localstack_host_no_port = localstack_host.split(':').next().unwrap_or(localstack_host);
+
+    // Patterns that indicate virtual-hosted style:
+    //   <bucket>.s3.amazonaws.com
+    //   <bucket>.s3.<region>.amazonaws.com
+    //   <bucket>.s3.<region>.localhost.localstack.cloud
+    //   <bucket>.localhost
+    //   <bucket>.<localstack_host>
+    let bucket = if let Some(rest) = host_no_port.strip_suffix(".s3.amazonaws.com") {
+        Some(rest)
+    } else if let Some(b) = extract_bucket_before_s3_region(host_no_port) {
+        Some(b)
+    } else {
+        // <bucket>.localhost or <bucket>.<localstack_host>
+        host_no_port
+            .strip_suffix(&format!(".{localstack_host_no_port}"))
+            .or_else(|| host_no_port.strip_suffix(".localhost"))
+            .filter(|rest| !rest.contains('.') && !rest.is_empty())
+    };
+
+    match bucket {
+        Some(b) if !b.is_empty() => {
+            // Avoid double-prefix: if path already starts with /bucket skip.
+            let stripped = path.trim_start_matches('/');
+            if stripped.starts_with(b)
+                && (stripped.len() == b.len() || stripped.as_bytes().get(b.len()) == Some(&b'/'))
+            {
+                // Already path-style (shouldn't happen in practice).
+                path.to_string()
+            } else {
+                format!("/{b}{path}")
+            }
+        }
+        _ => path.to_string(),
+    }
+}
+
+/// Extract the bucket name from hosts like
+/// `bucket.s3.us-east-1.amazonaws.com` or
+/// `bucket.s3.us-east-1.localhost.localstack.cloud`.
+fn extract_bucket_before_s3_region(host: &str) -> Option<&str> {
+    // Must have at least 4 parts: bucket . s3 . region . tld
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    // Second segment must be "s3".
+    if parts[1].eq_ignore_ascii_case("s3") {
+        Some(parts[0])
+    } else {
+        None
+    }
 }
 
 /// Detect which AWS service is being targeted.
@@ -2787,7 +2871,10 @@ mod tests {
     use bytes::Bytes;
     use serde_json::json;
 
-    use super::{detect_service, extract_rest_operation, is_s3_object_body_request};
+    use super::{
+        detect_service, extract_rest_operation, is_s3_object_body_request,
+        rewrite_s3_virtual_hosted_path,
+    };
 
     #[test]
     fn maps_lambda_create_function_with_or_without_trailing_slash() {
@@ -2865,5 +2952,94 @@ mod tests {
             &headers,
             &query,
         ));
+    }
+
+    // ── S3 virtual-hosted path rewriting ─────────────────────────────────
+
+    fn vhost(bucket: &str, host_suffix: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::HOST,
+            HeaderValue::from_str(&format!("{bucket}.{host_suffix}")).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn s3_vhost_amazonaws_root() {
+        let h = vhost("my-bucket", "s3.amazonaws.com");
+        assert_eq!(
+            rewrite_s3_virtual_hosted_path("/", &h, "localhost:4566"),
+            "/my-bucket/"
+        );
+    }
+
+    #[test]
+    fn s3_vhost_amazonaws_with_key() {
+        let h = vhost("my-bucket", "s3.amazonaws.com");
+        assert_eq!(
+            rewrite_s3_virtual_hosted_path("/my-key.txt", &h, "localhost:4566"),
+            "/my-bucket/my-key.txt"
+        );
+    }
+
+    #[test]
+    fn s3_vhost_amazonaws_regional() {
+        let h = vhost("my-bucket", "s3.us-east-1.amazonaws.com");
+        assert_eq!(
+            rewrite_s3_virtual_hosted_path("/img/cat.png", &h, "localhost:4566"),
+            "/my-bucket/img/cat.png"
+        );
+    }
+
+    #[test]
+    fn s3_vhost_localhost_4566() {
+        let h = vhost("my-bucket", "localhost:4566");
+        assert_eq!(
+            rewrite_s3_virtual_hosted_path("/object.txt", &h, "localhost:4566"),
+            "/my-bucket/object.txt"
+        );
+    }
+
+    #[test]
+    fn s3_vhost_localstack_cloud() {
+        let h = vhost("my-bucket", "s3.us-east-1.localhost.localstack.cloud");
+        assert_eq!(
+            rewrite_s3_virtual_hosted_path("/k", &h, "localhost.localstack.cloud:4566"),
+            "/my-bucket/k"
+        );
+    }
+
+    #[test]
+    fn s3_path_style_unchanged() {
+        let h = HeaderMap::new(); // no host header
+        assert_eq!(
+            rewrite_s3_virtual_hosted_path("/my-bucket/my-key", &h, "localhost:4566"),
+            "/my-bucket/my-key"
+        );
+    }
+
+    #[test]
+    fn s3_path_style_with_s3_host_unchanged() {
+        // s3.amazonaws.com without a bucket subdomain = path-style
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::HOST,
+            HeaderValue::from_static("s3.amazonaws.com"),
+        );
+        assert_eq!(
+            rewrite_s3_virtual_hosted_path("/my-bucket/my-key", &h, "localhost:4566"),
+            "/my-bucket/my-key"
+        );
+    }
+
+    #[test]
+    fn s3_vhost_root_path() {
+        // Root path on a vhost bucket should become /bucket/
+        let h = vhost("my-bucket", "s3.amazonaws.com");
+        assert_eq!(
+            rewrite_s3_virtual_hosted_path("/", &h, "localhost:4566"),
+            "/my-bucket/"
+        );
     }
 }
