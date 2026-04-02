@@ -12,6 +12,7 @@ pub mod navigation;
 pub mod operation_catalog;
 pub mod protocol_adapters;
 pub mod service_detail;
+pub mod slugs;
 pub mod state;
 pub mod storage_inspector;
 pub mod transaction_log;
@@ -62,6 +63,7 @@ pub use state::{ThemeMode, ThemeStore};
 pub use storage_inspector::{
     RuntimeStorageState, ServiceStorageSnapshot, StorageResource, ResourceAttribute,
 };
+pub use slugs::{alias_map, to_manifest_slug, to_provider_slug};
 pub use transaction_log::{
     TransactionLog, TransactionOutcome, TransactionRecord, TransactionSummary,
 };

@@ -229,4 +229,18 @@ impl ServiceProvider for SesProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut identities = Vec::new();
+        for entry in self.store.iter() {
+            for id in entry.value().identities.values() {
+                identities.push(json!({
+                    "id": id.identity, "kind": "identity",
+                    "attributes": [{"key": "verified", "value": id.verified.to_string()}]
+                }));
+            }
+        }
+        Some(json!({ "kind": "ses", "identities": identities }))
+    }
 }

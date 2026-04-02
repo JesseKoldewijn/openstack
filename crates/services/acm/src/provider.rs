@@ -284,4 +284,18 @@ impl ServiceProvider for AcmProvider {
             )),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut certificates = Vec::new();
+        for entry in self.store.iter() {
+            for cert in entry.value().certificates.values() {
+                certificates.push(json!({
+                    "id": cert.arn, "kind": "certificate",
+                    "attributes": [{"key": "domain", "value": cert.domain_name.clone()}]
+                }));
+            }
+        }
+        Some(json!({ "kind": "acm", "certificates": certificates }))
+    }
 }

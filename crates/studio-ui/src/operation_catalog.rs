@@ -6,21 +6,16 @@
 use std::collections::HashMap;
 
 use crate::guided_manifest::GuidedManifest;
+use crate::slugs::to_provider_slug;
 
-/// A single operation offered by a service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationEntry {
-    /// AWS-style operation name, e.g. `"PutObject"`.
     pub name: String,
-    /// HTTP method used for this operation.
     pub method: String,
-    /// URL path template.
     pub path: String,
-    /// Whether a guided flow covers this operation.
     pub has_guided_flow: bool,
 }
 
-/// All operations for one service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceOperationSet {
     pub service: String,
@@ -37,34 +32,34 @@ impl ServiceOperationSet {
     }
 }
 
-/// Full operation catalogue across all services, enriched with guided-flow
-/// coverage from loaded manifests.
 #[derive(Debug, Clone, Default)]
 pub struct OperationCatalog {
     by_service: HashMap<String, ServiceOperationSet>,
 }
 
 impl OperationCatalog {
-    /// Build from the built-in static operation list and optionally mark which
-    /// operations have a corresponding guided manifest flow.
     pub fn build(manifests: &[GuidedManifest]) -> Self {
         let guided_index: HashMap<String, std::collections::HashSet<String>> = manifests
             .iter()
             .map(|m| {
+                // Normalize manifest slug to provider slug for consistent keying.
+                let key = to_provider_slug(&m.service).to_string();
                 let ops: std::collections::HashSet<String> = m
                     .flows
                     .iter()
                     .flat_map(|f| f.steps.iter())
                     .map(|s| s.id.clone())
                     .collect();
-                (m.service.clone(), ops)
+                (key, ops)
             })
             .collect();
 
         let mut by_service: HashMap<String, ServiceOperationSet> = HashMap::new();
 
         for (service, raw_ops) in STATIC_OPERATIONS.iter() {
-            let guided_ops = guided_index.get(*service);
+            // Normalize static catalog key to provider slug too.
+            let canonical = to_provider_slug(service).to_string();
+            let guided_ops = guided_index.get(&canonical);
             let operations = raw_ops
                 .iter()
                 .map(|(name, method, path)| OperationEntry {
@@ -78,9 +73,9 @@ impl OperationCatalog {
                 .collect();
 
             by_service.insert(
-                service.to_string(),
+                canonical.clone(),
                 ServiceOperationSet {
-                    service: service.to_string(),
+                    service: canonical,
                     operations,
                 },
             );
@@ -90,7 +85,8 @@ impl OperationCatalog {
     }
 
     pub fn for_service(&self, service: &str) -> Option<&ServiceOperationSet> {
-        self.by_service.get(service)
+        // Normalize lookup slug to provider slug.
+        self.by_service.get(to_provider_slug(service))
     }
 
     pub fn all_services(&self) -> impl Iterator<Item = &ServiceOperationSet> {
@@ -391,7 +387,7 @@ static STATIC_OPERATIONS: &[(&str, &[(&str, &str, &str)])] = &[
         ],
     ),
     (
-        "events",
+        "eventbridge",
         &[
             ("CreateEventBus", "POST", "/"),
             ("DeleteEventBus", "POST", "/"),
@@ -450,7 +446,7 @@ static STATIC_OPERATIONS: &[(&str, &[(&str, &str, &str)])] = &[
         ],
     ),
     (
-        "states",
+        "stepfunctions",
         &[
             ("CreateStateMachine", "POST", "/"),
             ("DeleteStateMachine", "POST", "/"),

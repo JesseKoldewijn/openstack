@@ -375,4 +375,22 @@ impl ServiceProvider for Route53Provider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut zones = Vec::new();
+        for entry in self.store.iter() {
+            for zone in entry.value().zones.values() {
+                zones.push(json!({
+                    "id": zone.id, "kind": "hosted_zone",
+                    "attributes": [
+                        {"key": "name", "value": zone.name.clone()},
+                        {"key": "record_count", "value": zone.record_count.to_string()},
+                        {"key": "private", "value": zone.private_zone.to_string()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "route53", "hosted_zones": zones }))
+    }
 }

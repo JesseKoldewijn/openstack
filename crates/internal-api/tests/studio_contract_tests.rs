@@ -315,20 +315,43 @@ async fn studio_runtime_config_contract() {
     let router = internal_api_router(make_state(test_config()));
     let (status, body) = get_json(&router, "/_localstack/studio-api/runtime-config").await;
     assert_eq!(status, StatusCode::OK);
-    // Schema version
     assert_eq!(body["schema_version"], "1.0");
-    // Endpoint is a non-empty string
     assert!(body["endpoint"].as_str().is_some_and(|s| !s.is_empty()));
-    // Credentials block
     assert_eq!(body["credentials"]["access_key_id"], "test");
     assert_eq!(body["credentials"]["secret_access_key"], "test");
-    // Region
     assert!(body["region"].as_str().is_some());
-    // Polling intervals are positive integers
     assert!(body["polling"]["storage_interval_ms"].as_u64().is_some_and(|v| v > 0));
     assert!(body["polling"]["transactions_interval_ms"].as_u64().is_some_and(|v| v > 0));
-    // Studio paths
     assert!(body["studio"]["api_base"].as_str().is_some());
     assert!(body["studio"]["spa_base"].as_str().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Slug normalization
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn studio_operations_events_alias_resolves_to_eventbridge() {
+    let router = internal_api_router(make_state(test_config()));
+    // "events" is the manifest slug, "eventbridge" is the provider slug — both should work
+    let (status_events, body_events) = get_json(&router, "/_localstack/studio-api/operations/events").await;
+    let (status_eb, body_eb) = get_json(&router, "/_localstack/studio-api/operations/eventbridge").await;
+    assert_eq!(status_events, StatusCode::OK);
+    assert_eq!(status_eb, StatusCode::OK);
+    assert_eq!(body_events["service"], "eventbridge");
+    assert_eq!(body_eb["service"], "eventbridge");
+    assert_eq!(body_events["total"], body_eb["total"]);
+}
+
+#[tokio::test]
+async fn studio_operations_states_alias_resolves_to_stepfunctions() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status_states, body_states) = get_json(&router, "/_localstack/studio-api/operations/states").await;
+    let (status_sf, body_sf) = get_json(&router, "/_localstack/studio-api/operations/stepfunctions").await;
+    assert_eq!(status_states, StatusCode::OK);
+    assert_eq!(status_sf, StatusCode::OK);
+    assert_eq!(body_states["service"], "stepfunctions");
+    assert_eq!(body_sf["service"], "stepfunctions");
+    assert_eq!(body_states["total"], body_sf["total"]);
 }
 

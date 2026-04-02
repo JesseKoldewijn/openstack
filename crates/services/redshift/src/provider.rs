@@ -221,4 +221,22 @@ impl ServiceProvider for RedshiftProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut clusters = Vec::new();
+        for entry in self.store.iter() {
+            for cluster in entry.value().clusters.values() {
+                clusters.push(json!({
+                    "id": cluster.cluster_identifier, "kind": "cluster",
+                    "attributes": [
+                        {"key": "status", "value": cluster.cluster_status.clone()},
+                        {"key": "node_type", "value": cluster.node_type.clone()},
+                        {"key": "db_name", "value": cluster.db_name.clone()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "redshift", "clusters": clusters }))
+    }
 }

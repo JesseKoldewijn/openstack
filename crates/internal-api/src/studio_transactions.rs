@@ -9,7 +9,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use openstack_studio_ui::TransactionOutcome;
+use openstack_studio_ui::{TransactionOutcome, to_provider_slug};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -135,13 +135,14 @@ pub async fn list_service_transactions(
     Path(service): Path<String>,
     Query(params): Query<TransactionQueryParams>,
 ) -> impl IntoResponse {
+    let canonical = to_provider_slug(&service).to_string();
     let log = state.transaction_log.lock().await;
     let limit = params.limit.unwrap_or(200).min(2000);
     let outcome_filter = params.outcome.as_deref().and_then(parse_outcome);
     let guided_only = params.guided_only.unwrap_or(false);
 
     let records: Vec<serde_json::Value> = log
-        .for_service(&service)
+        .for_service(&canonical)
         .filter(|r| {
             let outcome_ok = outcome_filter.map(|o| r.outcome == o).unwrap_or(true);
             let guided_ok = !guided_only || r.from_guided_flow;
@@ -151,11 +152,11 @@ pub async fn list_service_transactions(
         .map(record_to_json)
         .collect();
 
-    let total = log.for_service(&service).count();
+    let total = log.for_service(&canonical).count();
 
     Json(json!({
         "schema_version": "1.0",
-        "service": service,
+        "service": canonical,
         "total": total,
         "transactions": records,
     }))

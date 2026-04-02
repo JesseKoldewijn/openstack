@@ -84,7 +84,8 @@ const S = {
     selectedFlowId: null,
     inputs: {},
     running: false,
-    log: [],             // [{stepId, title, status, body, duration_ms}]
+    cleaningUp: false,
+    log: [],             // [{stepId, title, status, body, duration_ms, isCleanup}]
   },
 
   // raw console
@@ -216,16 +217,24 @@ async function refreshTransactions() {
     const r = await api(`/_localstack/studio-api/transactions/${S.selectedService}?${params}`);
     S.transactions = r.transactions || [];
     S.txSummary = { total: r.total || 0 };
+    delete S.errors.transactions;
     render();
-  } catch (_) {}
+  } catch (e) {
+    S.errors.transactions = e.message;
+    render();
+  }
 }
 
 async function refreshStorage() {
   if (!S.selectedService) return;
   try {
-    S.storage = await api(`/_localstack/studio-api/storage/${S.selectedService}`).catch(() => null);
+    S.storage = await api(`/_localstack/studio-api/storage/${S.selectedService}`);
+    delete S.errors.storage;
     render();
-  } catch (_) {}
+  } catch (e) {
+    S.errors.storage = e.message;
+    render();
+  }
 }
 
 // ── Loading / error helpers ────────────────────────────────────────────────
@@ -362,7 +371,9 @@ function explorerView() {
     <div class="tab-bar">${tabBar}</div>
   </div>
   <div class="explorer-body">
-    ${S.loading.detail ? '<div class="panel-loading">Loading…</div>' : panel}
+    ${S.loading.detail ? '<div class="panel-loading">Loading…</div>' :
+      S.errors.detail ? `<div class="tab-error">⚠ ${esc(S.errors.detail)} <button class="btn btn-ghost" data-action="retry-detail">Retry</button></div>` :
+      panel}
   </div>
 </div>`;
 }
@@ -485,7 +496,7 @@ function guidedPanel() {
   const steps = selectedFlow?.steps || [];
   const stepPreview = steps.map((s,i) => {
     const log = S.guided.log.find(l => l.stepId === s.id);
-    const stateClass = log ? (log.success ? 'step-ok' : 'step-err') : '';
+    const stateClass = log ? (log.isCleanup ? (log.success ? 'step-cleanup-ok' : 'step-cleanup-err') : (log.success ? 'step-ok' : 'step-err')) : '';
     return `
 <div class="step-row ${stateClass}">
   <span class="step-num">${i+1}</span>
@@ -511,9 +522,9 @@ function guidedPanel() {
   </div>` : ''}
   <div class="guided-steps">${stepPreview || '<div class="empty-state">No steps in this flow.</div>'}</div>
   <div class="guided-actions">
-    <button class="btn btn-primary ${S.guided.running ? 'btn-loading' : ''}"
-      data-action="run-guided" ${S.guided.running ? 'disabled' : ''}>
-      ${S.guided.running ? 'Running…' : '▶ Run flow'}
+    <button class="btn btn-primary ${S.guided.running || S.guided.cleaningUp ? 'btn-loading' : ''}"
+      data-action="run-guided" ${S.guided.running || S.guided.cleaningUp ? 'disabled' : ''}>
+      ${S.guided.cleaningUp ? 'Cleaning up…' : S.guided.running ? 'Running…' : '▶ Run flow'}
     </button>
     ${S.guided.log.length ? `<button class="btn btn-ghost" data-action="clear-guided">Clear results</button>` : ''}
   </div>
@@ -587,6 +598,7 @@ function operationsTab() {
 
 // ── Storage tab ────────────────────────────────────────────────────────────
 function storageTab() {
+  if (S.errors.storage) return `<div class="tab-error">⚠ Failed to load storage: ${esc(S.errors.storage)} <button class="btn btn-ghost" data-action="refresh-storage">Retry</button></div>`;
   const snap = S.storage?.snapshot;
 
   return `
@@ -636,6 +648,7 @@ function renderStorageSection(heading, resources) {
 
 // ── Transactions tab ──────────────────────────────────────────────────────
 function transactionsTab() {
+  if (S.errors.transactions) return `<div class="tab-error">⚠ Failed to load transactions: ${esc(S.errors.transactions)} <button class="btn btn-ghost" data-action="refresh-tx">Retry</button></div>`;
   const summary = S.txSummary;
   const txs = S.transactions;
 
@@ -788,6 +801,15 @@ function bindEvents() {
 
   // Storage refresh
   root.querySelector('[data-action="refresh-storage"]')?.addEventListener('click', refreshStorage);
+
+  // Retry detail load on error
+  root.querySelector('[data-action="retry-detail"]')?.addEventListener('click', async () => {
+    if (S.selectedService) {
+      delete S.errors.detail;
+      render();
+      await loadServiceDetail(S.selectedService);
+    }
+  });
 
   // Tx filters
   root.querySelector('#tx-outcome-filter')?.addEventListener('change', e => {
@@ -1024,6 +1046,42 @@ async function runGuided() {
     if (!success) break;
   }
 
+  // Run cleanup steps regardless of outcome (resource hygiene).
+  // Cleanup failures are recorded but don't affect the overall result display.
+  const cleanupSteps = flow.cleanup || [];
+  if (cleanupSteps.length > 0) {
+    S.guided.cleaningUp = true;
+    render();
+    const captures = {};
+    S.guided.log.forEach(l => Object.assign(captures, l.captures || {}));
+
+    for (const step of cleanupSteps) {
+      let path = step.operation?.path || '/';
+      const method = (step.operation?.method || 'DELETE').toUpperCase();
+      path = path.replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(S.guided.inputs[k] || k));
+      path = path.replace(/\{\{captures\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(captures[k] || k));
+      const bodyStr = step.operation?.body
+        ? step.operation.body.replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => S.guided.inputs[k] || '')
+        : undefined;
+      const t0 = Date.now();
+      try {
+        const r = await signedFetch(S.selectedService || 's3', path, { method, body: bodyStr });
+        const body = await r.text();
+        const duration_ms = Date.now() - t0;
+        postJson('/_localstack/studio-api/transactions/record', {
+          service: S.selectedService, operation: `cleanup:${step.id}`,
+          method, path, status: r.status, durationMs: duration_ms,
+          startedAtMs: t0, fromGuidedFlow: true,
+        }).catch(() => {});
+        S.guided.log.push({ stepId: `cleanup:${step.id}`, title: `[cleanup] ${step.title}`, status: r.status, body, success: r.ok, duration_ms, isCleanup: true });
+      } catch (e) {
+        S.guided.log.push({ stepId: `cleanup:${step.id}`, title: `[cleanup] ${step.title}`, status: 0, body: e.message, success: false, duration_ms: 0, isCleanup: true });
+      }
+      render();
+    }
+    S.guided.cleaningUp = false;
+  }
+
   S.guided.running = false;
   render();
 }
@@ -1219,6 +1277,8 @@ body{font-family:var(--font);background:var(--bg);color:var(--fg);font-size:13px
 .panel-section-title{font-size:11px;font-weight:600;color:var(--fg2);text-transform:uppercase;
   letter-spacing:.06em;margin-bottom:10px}
 .panel-loading{padding:32px;text-align:center;color:var(--fg2)}
+.tab-error{padding:16px;background:#1e0a0a;border:1px solid var(--err);border-radius:var(--radius);
+  color:var(--err);display:flex;align-items:center;gap:10px;margin-bottom:12px}
 .empty-state{color:var(--fg2);font-size:12px;padding:12px 0}
 
 /* ── overview ────────────────────────────────────────────────────────── */
@@ -1249,6 +1309,8 @@ body{font-family:var(--font);background:var(--bg);color:var(--fg);font-size:13px
   border:1px solid var(--border)}
 .step-ok{border-color:var(--ok);background:#0f2010}
 .step-err{border-color:var(--err);background:#200f0f}
+.step-cleanup-ok{border-color:var(--fg3);background:var(--bg);opacity:.7}
+.step-cleanup-err{border-color:var(--warn);background:#1a1200;opacity:.8}
 .step-num{font-size:10px;color:var(--fg2);min-width:16px;padding-top:2px}
 .step-body{flex:1;min-width:0}
 .step-title{font-size:12px;font-weight:600;margin-bottom:3px}
@@ -1881,6 +1943,42 @@ async fn handle_request(
     state
         .cors
         .add_cors_headers(response.headers_mut(), origin_header.as_deref());
+
+    // Fire-and-forget: record this transaction to the Studio transaction log.
+    // Clone what we need before moving response out.
+    {
+        let service   = svc_ctx.service.clone();
+        let operation = svc_ctx.operation.clone();
+        let method    = method.to_string();
+        let path_str  = svc_ctx.path.clone();
+        let status_u16 = status.as_u16();
+        let dur_ms    = latency_ms as u64;
+        let started_ms = request_start
+            .duration_since(std::time::Instant::now().checked_sub(request_start.elapsed()).unwrap_or(std::time::Instant::now()))
+            .as_millis() as u64;
+        let router = state.internal_api_router.clone();
+
+        tokio::spawn(async move {
+            use axum::body::Body;
+            let payload = serde_json::json!({
+                "service":   service,
+                "operation": operation,
+                "method":    method,
+                "path":      path_str,
+                "status":    status_u16,
+                "startedAtMs": started_ms,
+                "durationMs":  dur_ms,
+                "fromGuidedFlow": false,
+            });
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/_localstack/studio-api/transactions/record")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&payload).unwrap_or_default()))
+                .unwrap_or_default();
+            let _ = tower::ServiceExt::oneshot(router, req).await;
+        });
+    }
 
     response
 }

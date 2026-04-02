@@ -1002,4 +1002,23 @@ impl ServiceProvider for CloudWatchProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut alarms = Vec::new();
+        let mut log_groups = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for alarm in store.alarms.values() {
+                alarms.push(json!({
+                    "id": alarm.alarm_name, "kind": "alarm",
+                    "attributes": [{"key": "state", "value": alarm.state_value.clone()}]
+                }));
+            }
+            for (name, _) in &store.log_groups {
+                log_groups.push(json!({ "id": name, "kind": "log_group", "attributes": [] }));
+            }
+        }
+        Some(json!({ "kind": "cloudwatch", "alarms": alarms, "log_groups": log_groups }))
+    }
 }

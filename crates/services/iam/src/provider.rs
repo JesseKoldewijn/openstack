@@ -832,4 +832,33 @@ impl ServiceProvider for IamProvider {
             )),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut users = Vec::new();
+        let mut roles = Vec::new();
+        let mut policies = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for user in store.users.values() {
+                users.push(json!({
+                    "id": user.arn, "kind": "user",
+                    "attributes": [{"key": "name", "value": user.user_name.clone()}]
+                }));
+            }
+            for role in store.roles.values() {
+                roles.push(json!({
+                    "id": role.arn, "kind": "role",
+                    "attributes": [{"key": "name", "value": role.role_name.clone()}]
+                }));
+            }
+            for policy in store.policies.values() {
+                policies.push(json!({
+                    "id": policy.arn, "kind": "policy",
+                    "attributes": [{"key": "name", "value": policy.policy_name.clone()}]
+                }));
+            }
+        }
+        Some(json!({ "kind": "iam", "users": users, "roles": roles, "policies": policies }))
+    }
 }
