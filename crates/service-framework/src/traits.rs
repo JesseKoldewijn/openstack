@@ -169,6 +169,17 @@ pub trait ServiceProvider: Send + Sync {
     /// Returns the serialized HTTP response body and status code.
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError>;
 
+    /// For rest-xml services (like S3) the operation name cannot be inferred
+    /// from X-Amz-Target and must be derived from method + path + query.
+    ///
+    /// The default implementation returns `None`, meaning the gateway uses
+    /// `ctx.operation` as-is.  S3 overrides this to return the correct name
+    /// so Studio shows `CreateBucket`, `PutObject`, etc. instead of `Unknown(PUT)`.
+    fn derive_operation(&self, ctx: &RequestContext) -> Option<&str> {
+        let _ = ctx;
+        None
+    }
+
     /// Return a JSON snapshot of this service's in-memory storage resources
     /// for display in the Studio storage inspector.
     ///

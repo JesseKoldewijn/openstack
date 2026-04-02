@@ -1969,7 +1969,11 @@ async fn handle_request(
     // Skipped entirely when Studio is disabled to avoid spawn overhead on every request.
     if state.studio_enabled {
         let service = svc_ctx.service.clone();
-        let operation = svc_ctx.operation.clone();
+        // Allow rest-xml services (S3) to provide the true operation name.
+        let operation = state
+            .plugin_manager
+            .derive_operation(&svc_ctx)
+            .unwrap_or_else(|| svc_ctx.operation.clone());
         let method = method.to_string();
         let path_str = svc_ctx.path.clone();
         let status_u16 = status.as_u16();

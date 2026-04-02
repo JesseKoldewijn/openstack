@@ -2441,6 +2441,15 @@ impl ServiceProvider for S3Provider {
         "s3"
     }
 
+    /// S3 uses rest-xml — there is no X-Amz-Target, so derive the operation
+    /// name from the HTTP method + path shape + query params instead.
+    fn derive_operation(&self, ctx: &RequestContext) -> Option<&str> {
+        // derive_s3_operation returns a Cow<'static, str>.
+        // We can't return a reference into it from this fn with lifetime 'a,
+        // so we compute a &'static str via the same match logic and return that.
+        Some(derive_s3_operation_static(ctx))
+    }
+
     async fn start(&self) -> Result<(), anyhow::Error> {
         let dir = self.s3_objects_dir.clone();
         let store = self
@@ -2466,17 +2475,16 @@ impl ServiceProvider for S3Provider {
 
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
         let op_start = std::time::Instant::now();
+        // S3 uses rest-xml. Derive the operation from method + path + query params.
+        let op = derive_s3_operation(ctx);
+
         debug!(
             service = "s3",
-            operation = %ctx.operation,
+            operation = %op,
             path = %ctx.path,
             method = %ctx.method,
             "S3 dispatch"
         );
-
-        // Determine what operation this is. S3 uses rest-xml so there's no
-        // X-Amz-Target — we derive the operation from method + path + query params.
-        let op = derive_s3_operation(ctx);
 
         // For read operations we use get() (read lock); mutations use get_or_create() (write lock).
         let response = match op.as_ref() {
@@ -2723,6 +2731,16 @@ impl ServiceProvider for S3Provider {
 // ---------------------------------------------------------------------------
 // Operation derivation from HTTP method + path + query params
 // ---------------------------------------------------------------------------
+
+/// Same logic as `derive_s3_operation` but returns `&'static str` so callers
+/// with a lifetime bound (e.g. `ServiceProvider::derive_operation`) can use it.
+fn derive_s3_operation_static(ctx: &RequestContext) -> &'static str {
+    match derive_s3_operation(ctx) {
+        Cow::Borrowed(s) => s,
+        // All arms in derive_s3_operation return Cow::Borrowed, so this is unreachable.
+        Cow::Owned(_) => "Unknown",
+    }
+}
 
 fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
     let method = ctx.method.as_str();

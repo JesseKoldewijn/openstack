@@ -77,6 +77,20 @@ impl ServicePluginManager {
         container.provider.dispatch(ctx).await
     }
 
+    /// Derive the effective operation name for a request, allowing rest-xml
+    /// services (like S3) to override `ctx.operation` with the correct name.
+    ///
+    /// Returns `None` if the service is not registered or if the provider
+    /// returns `None` (i.e., the operation is already set correctly).
+    pub fn derive_operation(&self, ctx: &RequestContext) -> Option<String> {
+        let service_key = ctx.service.to_ascii_lowercase();
+        let container = self.containers.get(&service_key)?;
+        container
+            .provider
+            .derive_operation(ctx)
+            .map(ToOwned::to_owned)
+    }
+
     /// Returns the current state of all registered services.
     pub async fn service_states(&self) -> Vec<(String, ServiceState)> {
         let mut states = Vec::new();
