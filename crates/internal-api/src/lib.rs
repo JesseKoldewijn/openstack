@@ -64,15 +64,20 @@ impl ApiState {
             || config.debug
             || std::env::var("STUDIO").is_ok_and(|v| v == "1" || v == "true");
 
-        let guided_service_matrix = crate::studio::load_service_matrix_services();
-        let guided_manifest_inventory = crate::studio::load_manifest_inventory();
-
-        let transaction_log = if studio_active {
-            Some(Arc::new(Mutex::new(
-                openstack_studio_ui::TransactionLog::new(2000),
-            )))
+        let (guided_service_matrix, guided_manifest_inventory, transaction_log) = if studio_active {
+            (
+                crate::studio::load_service_matrix_services(),
+                crate::studio::load_manifest_inventory(),
+                Some(Arc::new(Mutex::new(
+                    openstack_studio_ui::TransactionLog::new(2000),
+                ))),
+            )
         } else {
-            None
+            (
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
+                None,
+            )
         };
 
         Self {

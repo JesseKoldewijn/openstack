@@ -561,6 +561,9 @@ impl ServiceProvider for SecretsManagerProvider {
         for entry in self.store.iter() {
             let store = entry.value();
             for secret in store.secrets.values() {
+                if secret.deleted {
+                    continue;
+                }
                 secrets.push(json!({
                     "id": secret.arn.clone(),
                     "kind": "secret",

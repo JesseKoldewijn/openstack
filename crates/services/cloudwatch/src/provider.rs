@@ -1008,15 +1008,39 @@ impl ServiceProvider for CloudWatchProvider {
         let mut alarms = Vec::new();
         let mut log_groups = Vec::new();
         for entry in self.store.iter() {
+            let key = entry.key();
+            let account = key.account_id().to_string();
+            let region = key.region().to_string();
             let store = entry.value();
+
             for alarm in store.alarms.values() {
+                let alarm_arn = format!(
+                    "arn:aws:cloudwatch:{region}:{account}:alarm:{}",
+                    alarm.alarm_name
+                );
                 alarms.push(json!({
-                    "id": alarm.alarm_name, "kind": "alarm",
-                    "attributes": [{"key": "state", "value": alarm.state_value.clone()}]
+                    "id": alarm_arn,
+                    "kind": "alarm",
+                    "attributes": [
+                        {"key": "name", "value": alarm.alarm_name.clone()},
+                        {"key": "state", "value": alarm.state_value.clone()},
+                        {"key": "account", "value": account.clone()},
+                        {"key": "region", "value": region.clone()}
+                    ]
                 }));
             }
+
             for name in store.log_groups.keys() {
-                log_groups.push(json!({ "id": name, "kind": "log_group", "attributes": [] }));
+                let log_group_arn = format!("arn:aws:logs:{region}:{account}:log-group:{name}");
+                log_groups.push(json!({
+                    "id": log_group_arn,
+                    "kind": "log_group",
+                    "attributes": [
+                        {"key": "name", "value": name.clone()},
+                        {"key": "account", "value": account.clone()},
+                        {"key": "region", "value": region.clone()}
+                    ]
+                }));
             }
         }
         Some(json!({ "kind": "cloudwatch", "alarms": alarms, "log_groups": log_groups }))

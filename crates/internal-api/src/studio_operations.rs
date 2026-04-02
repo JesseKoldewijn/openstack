@@ -9,19 +9,28 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use openstack_studio_ui::{OperationCatalog, OperationEntry, to_provider_slug};
 use serde_json::json;
+use tracing::warn;
 
 use crate::ApiState;
 
 fn build_catalog(state: &ApiState) -> OperationCatalog {
-    let manifests: Vec<openstack_studio_ui::GuidedManifest> = state
-        .guided_manifest_inventory
-        .values()
-        .filter_map(|raw| {
-            serde_json::to_value(raw)
-                .ok()
-                .and_then(|v| serde_json::from_value(v).ok())
-        })
-        .collect();
+    let mut manifests: Vec<openstack_studio_ui::GuidedManifest> = Vec::new();
+
+    for (service, raw) in &state.guided_manifest_inventory {
+        match serde_json::to_value(raw)
+            .and_then(serde_json::from_value::<openstack_studio_ui::GuidedManifest>)
+        {
+            Ok(manifest) => manifests.push(manifest),
+            Err(err) => {
+                warn!(
+                    service = %service,
+                    error = %err,
+                    "failed to decode guided manifest for operation catalog; skipping entry"
+                );
+            }
+        }
+    }
+
     OperationCatalog::build(&manifests)
 }
 

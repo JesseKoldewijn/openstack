@@ -83,9 +83,10 @@ const S = {
   guided: {
     selectedFlowId: null,
     inputs: {},
+    captures: {},
     running: false,
     cleaningUp: false,
-    log: [],             // [{stepId, title, status, body, duration_ms, isCleanup}]
+    log: [],             // [{stepId, title, status, body, duration_ms, isCleanup, captures}]
   },
 
   // raw console
@@ -198,6 +199,7 @@ async function loadServiceDetail(service) {
     if (flowDef.flows?.length && !S.guided.selectedFlowId) {
       S.guided.selectedFlowId = flowDef.flows[0].id;
       S.guided.inputs = {};
+      S.guided.captures = {};
       S.guided.log = [];
     }
     clearError('detail');
@@ -218,10 +220,10 @@ async function refreshTransactions() {
     S.transactions = r.transactions || [];
     S.txSummary = { total: r.total || 0 };
     delete S.errors.transactions;
-    render();
+    if (S.activeTab === 'transactions') render();
   } catch (e) {
     S.errors.transactions = e.message;
-    render();
+    if (S.activeTab === 'transactions') render();
   }
 }
 
@@ -730,7 +732,7 @@ function bindEvents() {
       if (S.selectedService !== svc) {
         S.selectedService = svc;
         S.activeTab = 'overview';
-        S.guided = { selectedFlowId: null, inputs: {}, running: false, log: [] };
+        S.guided = { selectedFlowId: null, inputs: {}, captures: {}, running: false, cleaningUp: false, log: [] };
         S.rawResponse = null;
         render();
         await loadServiceDetail(svc);
@@ -751,6 +753,7 @@ function bindEvents() {
     btn.addEventListener('click', () => {
       S.guided.selectedFlowId = btn.dataset.flow;
       S.guided.log = [];
+      S.guided.captures = {};
       render();
     });
   });
@@ -768,7 +771,19 @@ function bindEvents() {
   // Clear guided
   root.querySelector('[data-action="clear-guided"]')?.addEventListener('click', () => {
     S.guided.log = [];
+    S.guided.captures = {};
     render();
+  });
+
+  // Keep raw editor state synced so background renders don't discard unsent edits.
+  root.querySelector('#raw-method')?.addEventListener('change', e => {
+    S.raw.method = e.target.value;
+  });
+  root.querySelector('#raw-path')?.addEventListener('input', e => {
+    S.raw.path = e.target.value;
+  });
+  root.querySelector('#raw-body')?.addEventListener('input', e => {
+    S.raw.body = e.target.value;
   });
 
   // Run raw
@@ -822,8 +837,11 @@ function bindEvents() {
   });
   root.querySelector('[data-action="refresh-tx"]')?.addEventListener('click', refreshTransactions);
   root.querySelector('[data-action="clear-tx"]')?.addEventListener('click', async () => {
-    await fetch('/_localstack/studio-api/transactions', { method: 'DELETE' });
+    const scope = S.selectedService ? `/${encodeURIComponent(S.selectedService)}` : '';
+    const r = await fetch(`/_localstack/studio-api/transactions${scope}`, { method: 'DELETE' });
+    if (!r.ok) return;
     S.transactions = [];
+    S.txSummary = { total: 0 };
     render();
   });
 
@@ -983,6 +1001,64 @@ function startPolling() {
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────
+function getGuidedCaptures() {
+  return { ...(S.guided.captures || {}) };
+}
+
+function resolveCaptureSource(source, responseBody, captures, inputs) {
+  if (!source) return null;
+
+  if (source.startsWith('inputs.')) {
+    const key = source.slice('inputs.'.length);
+    return inputs[key] ?? null;
+  }
+
+  if (source.startsWith('captures.')) {
+    const key = source.slice('captures.'.length);
+    return captures[key] ?? null;
+  }
+
+  // Try JSON body path first (supports dotted path like A.B.C)
+  try {
+    const parsed = JSON.parse(responseBody || '{}');
+    const value = source.split('.').reduce((acc, seg) => (
+      acc && typeof acc === 'object' ? acc[seg] : undefined
+    ), parsed);
+    if (value != null) return String(value);
+  } catch (_) {
+    // not JSON, continue
+  }
+
+  // Fallback to XML/query-like tag extraction (<Tag>value</Tag>)
+  const safe = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = (responseBody || '').match(new RegExp(`<${safe}>([^<]+)</${safe}>`));
+  if (m && m[1] != null) return m[1];
+
+  return null;
+}
+
+function captureBindingsForStep(step, responseBody, currentCaptures) {
+  const next = {};
+  for (const binding of (step?.captures || [])) {
+    const name = binding?.name;
+    const source = binding?.source;
+    if (!name || !source) continue;
+    const value = resolveCaptureSource(source, responseBody, currentCaptures, S.guided.inputs || {});
+    if (value != null && value !== '') {
+      next[name] = value;
+    }
+  }
+  return next;
+}
+
+function interpolateTemplate(value, captures) {
+  if (!value) return value;
+  let out = String(value);
+  out = out.replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(S.guided.inputs[k] || k));
+  out = out.replace(/\{\{captures\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(captures[k] || k));
+  return out;
+}
+
 async function runGuided() {
   const flows = S.flowDefinition?.flows || [];
   const flow  = flows.find(f => f.id === S.guided.selectedFlowId) || flows[0];
@@ -990,21 +1066,24 @@ async function runGuided() {
 
   S.guided.running = true;
   S.guided.log = [];
+  S.guided.captures = {};
   render();
 
   for (const step of (flow.steps || [])) {
     let path = step.operation?.path || '/';
     const method = (step.operation?.method || 'GET').toUpperCase();
 
-    // Interpolate {{inputs.*}} and {{captures.*}}
-    const captures = {};
-    S.guided.log.forEach(l => Object.assign(captures, l.captures || {}));
-    path = path.replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(S.guided.inputs[k] || k));
-    path = path.replace(/\{\{captures\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(captures[k] || k));
+    const captures = getGuidedCaptures();
+    path = interpolateTemplate(path, captures);
 
-    const bodyStr = step.operation?.body
-      ? step.operation.body.replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => S.guided.inputs[k] || '')
-      : undefined;
+    let bodyStr = step.operation?.body;
+    if (bodyStr) {
+      // Preserve previous behavior for request bodies: raw value substitution,
+      // no URL-encoding (JSON/query payloads expect plain token replacement).
+      bodyStr = bodyStr
+        .replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => S.guided.inputs[k] || '')
+        .replace(/\{\{captures\.([^}]+)\}\}/g, (_,k) => captures[k] || k);
+    }
 
     const t0 = Date.now();
     let status = 0, body = '', success = false;
@@ -1041,7 +1120,17 @@ async function runGuided() {
       fromGuidedFlow: true,
     }).catch(() => {});
 
-    S.guided.log.push({ stepId: step.id, title: step.title, status, body, success, duration_ms });
+    const stepCaptures = captureBindingsForStep(step, body, captures);
+    S.guided.captures = { ...(S.guided.captures || {}), ...stepCaptures };
+    S.guided.log.push({
+      stepId: step.id,
+      title: step.title,
+      status,
+      body,
+      success,
+      duration_ms,
+      captures: stepCaptures,
+    });
     render();
     if (!success) break;
   }
@@ -1052,17 +1141,17 @@ async function runGuided() {
   if (cleanupSteps.length > 0) {
     S.guided.cleaningUp = true;
     render();
-    const captures = {};
-    S.guided.log.forEach(l => Object.assign(captures, l.captures || {}));
-
     for (const step of cleanupSteps) {
+      const captures = getGuidedCaptures();
       let path = step.operation?.path || '/';
       const method = (step.operation?.method || 'DELETE').toUpperCase();
-      path = path.replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(S.guided.inputs[k] || k));
-      path = path.replace(/\{\{captures\.([^}]+)\}\}/g, (_,k) => encodeURIComponent(captures[k] || k));
-      const bodyStr = step.operation?.body
-        ? step.operation.body.replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => S.guided.inputs[k] || '')
-        : undefined;
+      path = interpolateTemplate(path, captures);
+      let bodyStr = step.operation?.body;
+      if (bodyStr) {
+        bodyStr = bodyStr
+          .replace(/\{\{inputs\.([^}]+)\}\}/g, (_,k) => S.guided.inputs[k] || '')
+          .replace(/\{\{captures\.([^}]+)\}\}/g, (_,k) => captures[k] || k);
+      }
       const t0 = Date.now();
       try {
         const r = await signedFetch(S.selectedService || 's3', path, { method, body: bodyStr });

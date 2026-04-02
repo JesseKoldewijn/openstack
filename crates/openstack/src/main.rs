@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         CliCommand::RunForeground { studio } => run_server(config, studio).await,
         CliCommand::Start { daemon, studio } => {
             if daemon {
-                daemon_start(&config).await
+                daemon_start(&config, studio).await
             } else {
                 run_server(config, studio).await
             }
@@ -290,7 +290,7 @@ fn daemon_paths(config: &openstack_config::Config) -> DaemonPaths {
     }
 }
 
-async fn daemon_start(config: &openstack_config::Config) -> Result<()> {
+async fn daemon_start(config: &openstack_config::Config, studio: bool) -> Result<()> {
     let paths = daemon_paths(config);
     tokio::fs::create_dir_all(&paths.dir).await?;
     recover_stale_state(&paths).await?;
@@ -331,6 +331,10 @@ async fn daemon_start(config: &openstack_config::Config) -> Result<()> {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(err));
+
+        if studio {
+            cmd.arg("--studio");
+        }
 
         #[cfg(unix)]
         {
@@ -442,7 +446,8 @@ async fn daemon_stop(config: &openstack_config::Config) -> Result<()> {
 
 async fn daemon_restart(config: &openstack_config::Config) -> Result<()> {
     daemon_stop(config).await?;
-    daemon_start(config).await
+    let studio = std::env::var("STUDIO").is_ok_and(|v| v == "1" || v == "true");
+    daemon_start(config, studio).await
 }
 
 async fn daemon_logs(config: &openstack_config::Config, follow: bool) -> Result<()> {

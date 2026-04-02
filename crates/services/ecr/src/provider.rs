@@ -356,12 +356,16 @@ impl ServiceProvider for EcrProvider {
         let mut repositories = Vec::new();
         for entry in self.store.iter() {
             let store = entry.value();
+            let mut image_counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for img in store.images.values() {
+                *image_counts
+                    .entry(img.repository_name.as_str())
+                    .or_insert(0) += 1;
+            }
+
             for repo in store.repositories.values() {
-                let image_count = store
-                    .images
-                    .values()
-                    .filter(|img| img.repository_name == repo.name)
-                    .count();
+                let image_count = image_counts.get(repo.name.as_str()).copied().unwrap_or(0);
                 repositories.push(json!({
                     "id": repo.arn.clone(),
                     "kind": "repository",

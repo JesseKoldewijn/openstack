@@ -79,7 +79,8 @@ pub fn internal_api_router(state: ApiState) -> Router {
         )
         .route(
             "/_localstack/studio-api/transactions/{service}",
-            get(crate::studio_transactions::list_service_transactions),
+            get(crate::studio_transactions::list_service_transactions)
+                .delete(crate::studio_transactions::clear_service_transactions),
         )
         .route(
             "/_localstack/studio-api/transactions/record",

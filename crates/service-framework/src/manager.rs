@@ -144,10 +144,15 @@ impl ServicePluginManager {
     /// introspection.  Services that return `None` from
     /// `storage_snapshot()` are omitted.
     pub async fn storage_snapshots(&self) -> Vec<(String, serde_json::Value)> {
+        // Clone handles first so no DashMap iterator guard is held across await.
+        let containers: Vec<_> = self
+            .containers
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
         let mut out = Vec::new();
-        for entry in self.containers.iter() {
-            let service_name = entry.key().clone();
-            let container = entry.value().clone();
+        for (service_name, container) in containers {
             if let Some(snapshot) = container.provider.storage_snapshot().await {
                 out.push((service_name, snapshot));
             }

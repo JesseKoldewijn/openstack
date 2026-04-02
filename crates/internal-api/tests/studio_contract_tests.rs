@@ -14,7 +14,8 @@ fn test_config() -> Config {
     Config {
         gateway_listen: vec!["0.0.0.0:4566".parse().unwrap()],
         persistence: false,
-        services: openstack_config::ServicesConfig::from_env(),
+        // Keep contract tests hermetic: do not inherit enabled services from env.
+        services: openstack_config::ServicesConfig::only(Vec::<String>::new()),
         debug: false,
         log_level: openstack_config::LogLevel::Info,
         localstack_host: "localhost:4566".to_string(),

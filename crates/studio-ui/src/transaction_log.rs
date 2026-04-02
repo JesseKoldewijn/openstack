@@ -233,6 +233,15 @@ impl TransactionLog {
         self.entries.clear();
     }
 
+    /// Clear all entries belonging to a specific service.
+    ///
+    /// Returns the number of removed records.
+    pub fn clear_service(&mut self, service: &str) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|r| r.service != service);
+        before.saturating_sub(self.entries.len())
+    }
+
     /// Summary statistics for display in the Transactions tab header.
     pub fn summary(&self) -> TransactionSummary {
         let mut success = 0usize;

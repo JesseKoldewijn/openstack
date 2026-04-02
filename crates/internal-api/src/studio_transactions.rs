@@ -157,9 +157,11 @@ pub async fn record_transaction(
         return (StatusCode::CREATED, Json(json!({ "id": 0 }))).into_response();
     };
 
+    let canonical_service = to_provider_slug(&payload.service).to_string();
+
     let mut record = TransactionRecord::new(
         0,
-        payload.service,
+        canonical_service,
         payload.method,
         payload.path,
         payload.started_at_ms,
@@ -189,4 +191,18 @@ pub async fn clear_transactions(State(state): State<ApiState>) -> impl IntoRespo
     let count = log.len();
     log.clear();
     Json(json!({ "cleared": count }))
+}
+
+pub async fn clear_service_transactions(
+    State(state): State<ApiState>,
+    Path(service): Path<String>,
+) -> impl IntoResponse {
+    let canonical = to_provider_slug(&service).to_string();
+    let Some(log_arc) = &state.transaction_log else {
+        return Json(json!({ "cleared": 0, "service": canonical }));
+    };
+
+    let mut log = log_arc.lock().await;
+    let removed = log.clear_service(&canonical);
+    Json(json!({ "cleared": removed, "service": canonical }))
 }

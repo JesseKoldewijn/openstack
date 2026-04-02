@@ -2708,16 +2708,21 @@ impl ServiceProvider for S3Provider {
         use serde_json::json;
         let mut buckets = Vec::new();
         for entry in self.store.iter() {
-            let region = entry.key().region().to_string();
+            let key = entry.key();
+            let account = key.account_id().to_string();
+            let region = key.region().to_string();
             let store = entry.value();
             for (name, bucket) in &store.buckets {
                 let object_count = store.objects.get(name).map(|m| m.len()).unwrap_or(0);
+                let bucket_id = format!("{account}:{region}:{name}");
                 buckets.push(json!({
-                    "id": name,
+                    "id": bucket_id,
                     "kind": "bucket",
                     "created_at": bucket.creation_date.to_rfc3339(),
                     "attributes": [
-                        {"key": "region", "value": region},
+                        {"key": "name", "value": name.clone()},
+                        {"key": "account", "value": account.clone()},
+                        {"key": "region", "value": region.clone()},
                         {"key": "object_count", "value": object_count.to_string()},
                         {"key": "versioning", "value": bucket.versioning.clone()},
                     ]
@@ -2737,7 +2742,7 @@ impl ServiceProvider for S3Provider {
 fn derive_s3_operation_static(ctx: &RequestContext) -> &'static str {
     match derive_s3_operation(ctx) {
         Cow::Borrowed(s) => s,
-        // All arms in derive_s3_operation return Cow::Borrowed, so this is unreachable.
+        // Fallback for unrecognized method/path/query combinations.
         Cow::Owned(_) => "Unknown",
     }
 }

@@ -7,10 +7,33 @@
 /// Route: GET /_localstack/studio-api/runtime-config
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use serde_json::json;
 
 use crate::ApiState;
+
+fn forwarded_proto(headers: &HeaderMap) -> Option<&str> {
+    if let Some(proto) = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+    {
+        return Some(proto.trim());
+    }
+
+    // RFC 7239: Forwarded: for=1.2.3.4;proto=https;host=example.com
+    headers
+        .get("forwarded")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.split(';').find_map(|part| {
+                let part = part.trim();
+                part.strip_prefix("proto=")
+                    .map(|p| p.trim_matches('"').trim())
+            })
+        })
+}
 
 /// GET /_localstack/studio-api/runtime-config
 ///
@@ -19,11 +42,29 @@ use crate::ApiState;
 /// - credentials (static local test credentials)
 /// - default region
 /// - polling intervals for storage and transaction auto-refresh
-pub async fn get_runtime_config(State(state): State<ApiState>) -> impl IntoResponse {
-    // Determine the externally-reachable gateway base URL.
-    // If LOCALSTACK_HOST is set we use it; otherwise fall back to localhost:4566.
-    let host = state.config.localstack_host.trim_end_matches('/');
-    let endpoint = format!("http://{}", host);
+pub async fn get_runtime_config(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Derive externally visible endpoint origin from incoming request headers
+    // to preserve https/reverse-proxy deployments.
+    let host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or(state.config.localstack_host.trim_end_matches('/'));
+
+    let scheme = forwarded_proto(&headers).unwrap_or("http");
+    let endpoint = format!("{}://{}", scheme, host.trim_end_matches('/'));
 
     Json(json!({
         "schema_version": "1.0",
