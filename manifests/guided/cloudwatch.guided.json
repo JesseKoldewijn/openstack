@@ -2,12 +2,75 @@
   "schemaVersion": "1.2",
   "service": "cloudwatch",
   "protocol": "json_target",
+  "inputs": [
+    { "name": "metric_name",  "type": "string", "required": true, "description": "CloudWatch metric name" },
+    { "name": "alarm_name",   "type": "string", "required": false, "description": "Alarm name (default: studio-alarm)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Put metric","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"GraniteServiceVersion20100801.PutMetricData"},"body":"{\"Namespace\":\"openstack\",\"MetricData\":[{\"MetricName\":\"{{inputs.resource_name}}\",\"Value\":1}]}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"noop","title":"No-op cleanup","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"GraniteServiceVersion20100801.ListMetrics"},"body":"{}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "put-metric-data",
+          "title": "Put metric data",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "GraniteServiceVersion20100801.PutMetricData", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"Namespace\":\"openstack/studio\",\"MetricData\":[{\"MetricName\":\"{{inputs.metric_name}}\",\"Value\":42,\"Unit\":\"Count\",\"Dimensions\":[{\"Name\":\"Environment\",\"Value\":\"studio\"}]}]}"
+          },
+          "captures": [{ "name": "metric_name", "source": "inputs.metric_name" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "put-metric-alarm",
+          "title": "Put metric alarm",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "GraniteServiceVersion20100801.PutMetricAlarm", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"AlarmName\":\"{{inputs.alarm_name}}\",\"MetricName\":\"{{captures.metric_name}}\",\"Namespace\":\"openstack/studio\",\"Statistic\":\"Sum\",\"Period\":60,\"EvaluationPeriods\":1,\"Threshold\":100,\"ComparisonOperator\":\"GreaterThanThreshold\"}"
+          },
+          "captures": [{ "name": "alarm_name", "source": "inputs.alarm_name" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-alarms",
+          "title": "Describe alarms",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "GraniteServiceVersion20100801.DescribeAlarms", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"AlarmNames\":[\"{{captures.alarm_name}}\"]}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-metrics",
+          "title": "List metrics",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "GraniteServiceVersion20100801.ListMetrics", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"Namespace\":\"openstack/studio\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-alarms",
+          "title": "Delete alarms",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "GraniteServiceVersion20100801.DeleteAlarms", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"AlarmNames\":[\"{{captures.alarm_name}}\"]}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

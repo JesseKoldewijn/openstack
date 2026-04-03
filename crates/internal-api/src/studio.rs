@@ -6,14 +6,14 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use openstack_aws_protocol::AwsProtocol;
 use openstack_service_framework::ServiceState;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::ApiState;
 
 const GUIDED_MANIFEST_SCHEMA_VERSION: &str = "1.2";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GuidedManifestFile {
     schema_version: String,

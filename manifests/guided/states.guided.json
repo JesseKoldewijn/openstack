@@ -2,12 +2,87 @@
   "schemaVersion": "1.2",
   "service": "states",
   "protocol": "rest_json",
+  "inputs": [
+    { "name": "machine_name", "type": "string", "required": true, "description": "Step Functions state machine name" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create state machine","operation":{"method":"POST","path":"/","body":"{\"name\":\"{{inputs.resource_name}}\",\"definition\":\"{}\",\"roleArn\":\"arn:aws:iam::000000000000:role/dummy\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete state machine","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-state-machine",
+          "title": "Create state machine",
+          "operation": {
+            "method": "POST",
+            "path": "/stateMachines",
+            "headers": { "x-amz-target": "AmazonStatesService.CreateStateMachine", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"name\":\"{{inputs.machine_name}}\",\"definition\":\"{\\\"Comment\\\":\\\"Studio test\\\",\\\"StartAt\\\":\\\"Pass\\\",\\\"States\\\":{\\\"Pass\\\":{\\\"Type\\\":\\\"Pass\\\",\\\"End\\\":true}}}\",\"roleArn\":\"arn:aws:iam::000000000000:role/studio-sfn-role\",\"type\":\"STANDARD\"}"
+          },
+          "captures": [
+            { "name": "machine_arn", "source": "stateMachineArn" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "start-execution",
+          "title": "Start execution",
+          "operation": {
+            "method": "POST",
+            "path": "/executions",
+            "headers": { "x-amz-target": "AmazonStatesService.StartExecution", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"stateMachineArn\":\"{{captures.machine_arn}}\",\"name\":\"studio-exec-1\",\"input\":\"{\\\"key\\\":\\\"value\\\"}\"}"
+          },
+          "captures": [{ "name": "execution_arn", "source": "executionArn" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-execution",
+          "title": "Describe execution",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonStatesService.DescribeExecution", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"executionArn\":\"{{captures.execution_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-executions",
+          "title": "List executions",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonStatesService.ListExecutions", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"stateMachineArn\":\"{{captures.machine_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "stop-execution",
+          "title": "Stop execution",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonStatesService.StopExecution", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"executionArn\":\"{{captures.execution_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "delete-state-machine",
+          "title": "Delete state machine",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonStatesService.DeleteStateMachine", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"stateMachineArn\":\"{{captures.machine_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

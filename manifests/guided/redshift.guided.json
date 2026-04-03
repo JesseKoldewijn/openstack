@@ -1,13 +1,70 @@
 {
   "schemaVersion": "1.2",
   "service": "redshift",
-  "protocol": "rest_json",
+  "protocol": "query",
+  "inputs": [
+    { "name": "cluster_id", "type": "string", "required": true, "description": "Redshift cluster identifier (lowercase, no underscores)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create cluster","operation":{"method":"POST","path":"/","body":"{\"ClusterIdentifier\":\"{{inputs.resource_name}}\",\"NodeType\":\"dc2.large\",\"MasterUsername\":\"admin\",\"MasterUserPassword\":\"Passw0rd!\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete cluster","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-cluster",
+          "title": "Create cluster",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateCluster&ClusterIdentifier={{inputs.cluster_id}}&NodeType=dc2.large&MasterUsername=admin&MasterUserPassword=Passw0rd%21&NumberOfNodes=1&Version=2012-12-01"
+          },
+          "captures": [{ "name": "cluster_id", "source": "ClusterIdentifier" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-clusters",
+          "title": "Describe clusters",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DescribeClusters&ClusterIdentifier={{captures.cluster_id}}&Version=2012-12-01"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "create-cluster-snapshot",
+          "title": "Create cluster snapshot",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateClusterSnapshot&ClusterIdentifier={{captures.cluster_id}}&SnapshotIdentifier={{captures.cluster_id}}-snap&Version=2012-12-01"
+          },
+          "captures": [{ "name": "snapshot_id", "source": "SnapshotIdentifier" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-cluster-snapshot",
+          "title": "Delete snapshot",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteClusterSnapshot&SnapshotIdentifier={{captures.snapshot_id}}&Version=2012-12-01"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "delete-cluster",
+          "title": "Delete cluster",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteCluster&ClusterIdentifier={{captures.cluster_id}}&SkipFinalClusterSnapshot=true&Version=2012-12-01"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

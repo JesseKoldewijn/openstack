@@ -484,4 +484,30 @@ impl ServiceProvider for Ec2Provider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut instances = Vec::new();
+        let mut vpcs = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for inst in store.instances.values() {
+                instances.push(json!({
+                    "id": inst.instance_id, "kind": "instance",
+                    "attributes": [
+                        {"key": "type", "value": inst.instance_type.clone()},
+                        {"key": "state", "value": inst.state.clone()},
+                        {"key": "vpc_id", "value": inst.vpc_id.clone()},
+                    ]
+                }));
+            }
+            for vpc in store.vpcs.values() {
+                vpcs.push(json!({
+                    "id": vpc.vpc_id, "kind": "vpc",
+                    "attributes": [{"key": "cidr", "value": vpc.cidr_block.clone()}]
+                }));
+            }
+        }
+        Some(json!({ "kind": "ec2", "instances": instances, "vpcs": vpcs }))
+    }
 }

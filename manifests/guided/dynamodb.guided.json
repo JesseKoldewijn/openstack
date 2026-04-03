@@ -2,35 +2,98 @@
   "schemaVersion": "1.2",
   "service": "dynamodb",
   "protocol": "json_target",
+  "inputs": [
+    { "name": "table_name", "type": "string", "required": true, "description": "DynamoDB table name" },
+    { "name": "item_id",    "type": "string", "required": false, "description": "Primary key value for test item (default: studio-item-1)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
       "steps": [
         {
-          "id": "create",
+          "id": "create-table",
           "title": "Create table",
           "operation": {
             "method": "POST",
             "path": "/",
-            "headers": {"x-amz-target": "DynamoDB_20120810.CreateTable", "content-type": "application/x-amz-json-1.0"},
-            "body": "{\"TableName\":\"{{inputs.resource_name}}\",\"KeySchema\":[],\"AttributeDefinitions\":[],\"BillingMode\":\"PAY_PER_REQUEST\"}"
+            "headers": { "x-amz-target": "DynamoDB_20120810.CreateTable", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"TableName\":\"{{inputs.table_name}}\",\"KeySchema\":[{\"AttributeName\":\"id\",\"KeyType\":\"HASH\"}],\"AttributeDefinitions\":[{\"AttributeName\":\"id\",\"AttributeType\":\"S\"}],\"BillingMode\":\"PAY_PER_REQUEST\"}"
           },
-          "captures": [{"name":"resource_name","source":"inputs.resource_name"}],
-          "assertions": [{"kind":"status","target":"status","expected":"200"}]
+          "captures": [
+            { "name": "table_name",  "source": "TableDescription.TableName" },
+            { "name": "table_arn",   "source": "TableDescription.TableArn" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "put-item",
+          "title": "Put item",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "DynamoDB_20120810.PutItem", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"TableName\":\"{{captures.table_name}}\",\"Item\":{\"id\":{\"S\":\"{{inputs.item_id}}\"},\"value\":{\"S\":\"hello from studio\"}}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-item",
+          "title": "Get item",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "DynamoDB_20120810.GetItem", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"TableName\":\"{{captures.table_name}}\",\"Key\":{\"id\":{\"S\":\"{{inputs.item_id}}\"}}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }],
+          "error_guidance": "Item not found — verify put-item step succeeded."
+        },
+        {
+          "id": "query",
+          "title": "Query table",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "DynamoDB_20120810.Query", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"TableName\":\"{{captures.table_name}}\",\"KeyConditionExpression\":\"id = :v\",\"ExpressionAttributeValues\":{\":v\":{\"S\":\"{{inputs.item_id}}\"}}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-table",
+          "title": "Describe table",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "DynamoDB_20120810.DescribeTable", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"TableName\":\"{{captures.table_name}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ],
       "cleanup": [
         {
-          "id": "delete",
+          "id": "delete-item",
+          "title": "Delete item",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "DynamoDB_20120810.DeleteItem", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"TableName\":\"{{captures.table_name}}\",\"Key\":{\"id\":{\"S\":\"{{inputs.item_id}}\"}}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "delete-table",
           "title": "Delete table",
           "operation": {
             "method": "POST",
             "path": "/",
-            "headers": {"x-amz-target": "DynamoDB_20120810.DeleteTable", "content-type": "application/x-amz-json-1.0"},
-            "body": "{\"TableName\":\"{{captures.resource_name}}\"}"
+            "headers": { "x-amz-target": "DynamoDB_20120810.DeleteTable", "content-type": "application/x-amz-json-1.0" },
+            "body": "{\"TableName\":\"{{captures.table_name}}\"}"
           },
-          "assertions": [{"kind":"status","target":"status","expected":"200"}]
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ]
     }

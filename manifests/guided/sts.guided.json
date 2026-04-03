@@ -2,23 +2,65 @@
   "schemaVersion": "1.2",
   "service": "sts",
   "protocol": "query",
+  "inputs": [
+    { "name": "role_arn",     "type": "string", "required": false, "description": "Role ARN to assume (default: arn:aws:iam::000000000000:role/studio-role)" },
+    { "name": "session_name", "type": "string", "required": false, "description": "Role session name (default: studio-session)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
       "steps": [
         {
-          "id": "identity",
+          "id": "get-caller-identity",
           "title": "Get caller identity",
-          "operation": { "method": "POST", "path": "/", "body": "Action=GetCallerIdentity&Version=2011-06-15" },
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=GetCallerIdentity&Version=2011-06-15"
+          },
+          "captures": [
+            { "name": "account_id", "source": "Account" },
+            { "name": "user_id",    "source": "UserId" },
+            { "name": "arn",        "source": "Arn" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "assume-role",
+          "title": "Assume role",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=AssumeRole&RoleArn={{inputs.role_arn}}&RoleSessionName={{inputs.session_name}}&Version=2011-06-15"
+          },
+          "captures": [
+            { "name": "access_key_id",     "source": "AccessKeyId" },
+            { "name": "assumed_role_arn",   "source": "AssumedRoleUser.Arn" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }],
+          "error_guidance": "AssumeRole may fail if the role does not exist. Create the IAM role first or use GetCallerIdentity only."
+        },
+        {
+          "id": "get-session-token",
+          "title": "Get session token",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=GetSessionToken&DurationSeconds=3600&Version=2011-06-15"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ],
       "cleanup": [
         {
-          "id": "noop",
-          "title": "No-op cleanup",
-          "operation": { "method": "POST", "path": "/", "body": "Action=GetCallerIdentity&Version=2011-06-15" },
+          "id": "get-caller-identity-verify",
+          "title": "Verify identity (cleanup verify)",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=GetCallerIdentity&Version=2011-06-15"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ]

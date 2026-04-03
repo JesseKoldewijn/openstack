@@ -2,25 +2,68 @@
   "schemaVersion": "1.2",
   "service": "s3",
   "protocol": "rest_xml",
+  "inputs": [
+    { "name": "bucket_name", "type": "string", "required": true, "description": "Globally unique S3 bucket name" },
+    { "name": "object_key",  "type": "string", "required": false, "description": "Object key to write (default: studio-test.txt)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
       "steps": [
         {
-          "id": "create",
+          "id": "create-bucket",
           "title": "Create bucket",
-          "operation": { "method": "PUT", "path": "/{{inputs.resource_name}}" },
-          "captures": [{ "name": "resource_name", "source": "inputs.resource_name" }],
+          "operation": { "method": "PUT", "path": "/{{inputs.bucket_name}}" },
+          "captures": [{ "name": "bucket_name", "source": "inputs.bucket_name" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "put-object",
+          "title": "Put object",
+          "operation": {
+            "method": "PUT",
+            "path": "/{{captures.bucket_name}}/{{inputs.object_key}}",
+            "headers": { "content-type": "text/plain" },
+            "body": "hello from openstack studio"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-object",
+          "title": "Get object",
+          "operation": {
+            "method": "GET",
+            "path": "/{{captures.bucket_name}}/{{inputs.object_key}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }],
+          "error_guidance": "Object may not exist — ensure put-object step succeeded first."
+        },
+        {
+          "id": "list-objects",
+          "title": "List objects",
+          "operation": {
+            "method": "GET",
+            "path": "/{{captures.bucket_name}}?list-type=2"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ],
       "cleanup": [
         {
-          "id": "delete",
+          "id": "delete-object",
+          "title": "Delete object",
+          "operation": {
+            "method": "DELETE",
+            "path": "/{{captures.bucket_name}}/{{inputs.object_key}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "204" }]
+        },
+        {
+          "id": "delete-bucket",
           "title": "Delete bucket",
-          "operation": { "method": "DELETE", "path": "/{{captures.resource_name}}" },
-          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+          "operation": { "method": "DELETE", "path": "/{{captures.bucket_name}}" },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "204" }]
         }
       ]
     }

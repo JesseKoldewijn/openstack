@@ -501,4 +501,34 @@ impl ServiceProvider for EcrProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut repositories = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            let mut image_counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for img in store.images.values() {
+                *image_counts
+                    .entry(img.repository_name.as_str())
+                    .or_insert(0) += 1;
+            }
+
+            for repo in store.repositories.values() {
+                let image_count = image_counts.get(repo.name.as_str()).copied().unwrap_or(0);
+                repositories.push(json!({
+                    "id": repo.arn.clone(),
+                    "kind": "repository",
+                    "created_at": repo.created.to_rfc3339(),
+                    "attributes": [
+                        {"key": "name", "value": repo.name.clone()},
+                        {"key": "uri", "value": repo.uri.clone()},
+                        {"key": "image_count", "value": image_count.to_string()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "ecr", "repositories": repositories }))
+    }
 }

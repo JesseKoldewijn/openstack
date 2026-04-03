@@ -14,7 +14,8 @@ fn test_config() -> Config {
     Config {
         gateway_listen: vec!["0.0.0.0:4566".parse().unwrap()],
         persistence: false,
-        services: openstack_config::ServicesConfig::from_env(),
+        // Keep contract tests hermetic: do not inherit enabled services from env.
+        services: openstack_config::ServicesConfig::only(Vec::<String>::new()),
         debug: false,
         log_level: openstack_config::LogLevel::Info,
         localstack_host: "localhost:4566".to_string(),
@@ -42,9 +43,13 @@ fn test_config() -> Config {
 }
 
 fn make_state(config: Config) -> ApiState {
+    make_state_with_studio(config, false)
+}
+
+fn make_state_with_studio(config: Config, studio: bool) -> ApiState {
     let (shutdown_tx, _) = broadcast::channel(1);
     let plugin_manager = ServicePluginManager::new(config.clone());
-    let mut state = ApiState::new(config, plugin_manager, shutdown_tx);
+    let mut state = ApiState::new_with_studio(config, plugin_manager, shutdown_tx, studio);
     state.session_id = "studio-contracts".to_string();
     state.start_time = Arc::new(Instant::now());
     state
@@ -120,4 +125,434 @@ async fn studio_flow_coverage_contract_contains_metrics() {
     assert!(body["counts"]["guided_services"].is_u64());
     assert!(body["counts"]["supported_services"].is_u64());
     assert!(body["services"].is_array());
+}
+
+// ---------------------------------------------------------------------------
+// Operations catalogue
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn studio_operations_all_returns_schema_version_and_services() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/operations").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], "1.0");
+    assert!(body["services"].is_array());
+    // At least one service with operations should be present (static catalog)
+    let services = body["services"].as_array().unwrap();
+    assert!(!services.is_empty());
+    let first = &services[0];
+    assert!(first["service"].is_string());
+    assert!(first["total"].is_u64());
+    assert!(first["guided_count"].is_u64());
+    assert!(first["operations"].is_array());
+}
+
+#[tokio::test]
+async fn studio_operations_s3_contains_expected_operations() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/operations/s3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["service"], "s3");
+    let ops = body["operations"].as_array().unwrap();
+    assert!(!ops.is_empty());
+    // Every operation entry must have the required fields
+    for op in ops {
+        assert!(op["name"].is_string(), "operation.name should be string");
+        assert!(
+            op["method"].is_string(),
+            "operation.method should be string"
+        );
+        assert!(op["path"].is_string(), "operation.path should be string");
+        assert!(
+            op["has_guided_flow"].is_boolean(),
+            "operation.has_guided_flow should be bool"
+        );
+    }
+    // PutObject must be present
+    let names: Vec<&str> = ops.iter().filter_map(|o| o["name"].as_str()).collect();
+    assert!(
+        names.contains(&"PutObject"),
+        "PutObject should be in S3 operations"
+    );
+    assert!(
+        names.contains(&"GetObject"),
+        "GetObject should be in S3 operations"
+    );
+}
+
+#[tokio::test]
+async fn studio_operations_unknown_service_returns_404() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/operations/nonexistent").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "service_not_found");
+    assert_eq!(body["service"], "nonexistent");
+}
+
+// ---------------------------------------------------------------------------
+// Storage snapshots
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn studio_storage_all_returns_schema_version() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/storage").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], "1.0");
+    assert!(body["snapshots"].is_array());
+    // No services are registered in test config, so snapshots array is empty
+    assert_eq!(body["snapshots"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn studio_storage_unregistered_service_returns_404() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/storage/s3").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "service_not_found");
+}
+
+// ---------------------------------------------------------------------------
+// Transaction log
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn studio_transactions_all_returns_summary_and_empty_log() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], "1.0");
+    assert!(body["summary"]["total"].is_u64());
+    assert!(body["transactions"].is_array());
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn studio_transactions_record_and_retrieve() {
+    use axum::http::Method;
+
+    let state = make_state_with_studio(test_config(), true);
+    let router = internal_api_router(state);
+
+    // POST a transaction record
+    let payload = serde_json::json!({
+        "service": "s3",
+        "operation": "PutObject",
+        "method": "PUT",
+        "path": "/my-bucket/my-key",
+        "status": 200,
+        "requestBodyPreview": null,
+        "responseBodyPreview": "<PutObjectResult/>",
+        "startedAtMs": 1000,
+        "durationMs": 42,
+        "fromGuidedFlow": false,
+    });
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/_localstack/studio-api/transactions/record")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(body["id"].as_u64().is_some());
+
+    // Now list all transactions and verify the entry is present
+    let (status, list_body) = get_json(&router, "/_localstack/studio-api/transactions").await;
+    assert_eq!(status, StatusCode::OK);
+    let txns = list_body["transactions"].as_array().unwrap();
+    assert_eq!(txns.len(), 1);
+    assert_eq!(txns[0]["service"], "s3");
+    assert_eq!(txns[0]["status"], 200);
+    assert_eq!(txns[0]["outcome"], "success");
+
+    // List by service
+    let (status, svc_body) = get_json(&router, "/_localstack/studio-api/transactions/s3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(svc_body["service"], "s3");
+    assert_eq!(svc_body["transactions"].as_array().unwrap().len(), 1);
+
+    // Different service should return empty list (not 404)
+    let (status, empty_body) = get_json(&router, "/_localstack/studio-api/transactions/sqs").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty_body["transactions"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn studio_transactions_clear_empties_log() {
+    use axum::http::Method;
+
+    let state = make_state_with_studio(test_config(), true);
+    let router = internal_api_router(state);
+
+    // Insert a record
+    let payload = serde_json::json!({
+        "service": "sqs", "method": "POST", "path": "/",
+        "status": 200, "startedAtMs": 0, "durationMs": 5,
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/_localstack/studio-api/transactions/record")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+    router.clone().oneshot(req).await.unwrap();
+
+    // DELETE the log
+    let del_req = Request::builder()
+        .method(Method::DELETE)
+        .uri("/_localstack/studio-api/transactions")
+        .body(Body::empty())
+        .unwrap();
+    let del_resp = router.clone().oneshot(del_req).await.unwrap();
+    assert_eq!(del_resp.status(), StatusCode::OK);
+    let del_bytes = axum::body::to_bytes(del_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let del_body: Value = serde_json::from_slice(&del_bytes).unwrap();
+    assert_eq!(del_body["cleared"], 1);
+
+    // Log should now be empty
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime config
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn studio_runtime_config_contract() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/runtime-config").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], "1.0");
+    assert!(body["endpoint"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(body["credentials"]["access_key_id"], "test");
+    assert_eq!(body["credentials"]["secret_access_key"], "test");
+    assert!(body["region"].as_str().is_some());
+    assert!(
+        body["polling"]["storage_interval_ms"]
+            .as_u64()
+            .is_some_and(|v| v > 0)
+    );
+    assert!(
+        body["polling"]["transactions_interval_ms"]
+            .as_u64()
+            .is_some_and(|v| v > 0)
+    );
+    assert!(body["studio"]["api_base"].as_str().is_some());
+    assert!(body["studio"]["spa_base"].as_str().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Slug normalization
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn studio_operations_events_alias_resolves_to_eventbridge() {
+    let router = internal_api_router(make_state(test_config()));
+    // "events" is the manifest slug, "eventbridge" is the provider slug — both should work
+    let (status_events, body_events) =
+        get_json(&router, "/_localstack/studio-api/operations/events").await;
+    let (status_eb, body_eb) =
+        get_json(&router, "/_localstack/studio-api/operations/eventbridge").await;
+    assert_eq!(status_events, StatusCode::OK);
+    assert_eq!(status_eb, StatusCode::OK);
+    assert_eq!(body_events["service"], "eventbridge");
+    assert_eq!(body_eb["service"], "eventbridge");
+    assert_eq!(body_events["total"], body_eb["total"]);
+}
+
+#[tokio::test]
+async fn studio_operations_states_alias_resolves_to_stepfunctions() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status_states, body_states) =
+        get_json(&router, "/_localstack/studio-api/operations/states").await;
+    let (status_sf, body_sf) =
+        get_json(&router, "/_localstack/studio-api/operations/stepfunctions").await;
+    assert_eq!(status_states, StatusCode::OK);
+    assert_eq!(status_sf, StatusCode::OK);
+    assert_eq!(body_states["service"], "stepfunctions");
+    assert_eq!(body_sf["service"], "stepfunctions");
+    assert_eq!(body_states["total"], body_sf["total"]);
+}
+
+// ===========================================================================
+// Studio-disabled mode (default / benchmark mode)
+// ===========================================================================
+
+#[tokio::test]
+async fn studio_disabled_tx_list_returns_empty_not_error() {
+    // Default state has studio_enabled = false → transaction_log = None.
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
+    assert_eq!(body["summary"]["total"], 0);
+    // Disabled mode signals itself via _studio_disabled flag.
+    assert_eq!(body["_studio_disabled"], true);
+}
+
+#[tokio::test]
+async fn studio_disabled_tx_service_returns_empty_not_error() {
+    let router = internal_api_router(make_state(test_config()));
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions/s3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn studio_disabled_tx_record_is_silent_noop() {
+    use axum::body::Body;
+    let router = internal_api_router(make_state(test_config()));
+    let payload = serde_json::json!({
+        "service": "s3", "method": "GET", "path": "/",
+        "status": 200, "startedAtMs": 0, "durationMs": 5,
+    });
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/_localstack/studio-api/transactions/record")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    // Should return 201 Created even in disabled mode (silent no-op).
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // And the log should still be empty.
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn studio_disabled_tx_clear_returns_zero_cleared() {
+    let router = internal_api_router(make_state(test_config()));
+    let req = axum::http::Request::builder()
+        .method("DELETE")
+        .uri("/_localstack/studio-api/transactions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["cleared"], 0);
+}
+
+// ===========================================================================
+// Studio-enabled mode (explicit studio=true)
+// ===========================================================================
+
+#[tokio::test]
+async fn studio_enabled_tx_log_is_active() {
+    use axum::body::Body;
+    let router = internal_api_router(make_state_with_studio(test_config(), true));
+
+    // Record two transactions.
+    for (svc, status) in [("s3", 200u16), ("sqs", 404u16)] {
+        let payload = serde_json::json!({
+            "service": svc, "method": "POST", "path": "/",
+            "status": status, "startedAtMs": 0, "durationMs": 10,
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_localstack/studio-api/transactions/record")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap();
+    }
+
+    let (status, body) = get_json(&router, "/_localstack/studio-api/transactions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 2);
+    assert_eq!(body["summary"]["total"], 2);
+    assert_eq!(body["summary"]["success"], 1);
+    assert_eq!(body["summary"]["client_error"], 1);
+    // Enabled mode must NOT have _studio_disabled flag.
+    assert!(body["_studio_disabled"].is_null());
+}
+
+#[tokio::test]
+async fn studio_enabled_tx_outcome_filter_works() {
+    use axum::body::Body;
+    let router = internal_api_router(make_state_with_studio(test_config(), true));
+
+    for status in [200u16, 200, 404, 500] {
+        let payload = serde_json::json!({
+            "service": "s3", "method": "GET", "path": "/",
+            "status": status, "startedAtMs": 0, "durationMs": 1,
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_localstack/studio-api/transactions/record")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap();
+    }
+
+    let (status, body) = get_json(
+        &router,
+        "/_localstack/studio-api/transactions?outcome=success",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 2);
+
+    let (status, body) = get_json(
+        &router,
+        "/_localstack/studio-api/transactions?outcome=client_error",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["transactions"].as_array().unwrap().len(), 1);
+}
+
+// ===========================================================================
+// ApiState::studio_enabled flag
+// ===========================================================================
+
+#[test]
+fn api_state_default_has_studio_disabled() {
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let config = test_config();
+    let plugin_manager = ServicePluginManager::new(config.clone());
+    let state = ApiState::new(config, plugin_manager, shutdown_tx);
+    assert!(!state.studio_enabled);
+    assert!(state.transaction_log.is_none());
+}
+
+#[test]
+fn api_state_with_studio_true_allocates_log() {
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let config = test_config();
+    let plugin_manager = ServicePluginManager::new(config.clone());
+    let state = ApiState::new_with_studio(config, plugin_manager, shutdown_tx, true);
+    assert!(state.studio_enabled);
+    assert!(state.transaction_log.is_some());
+}
+
+#[test]
+fn api_state_debug_config_enables_studio() {
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let mut config = test_config();
+    config.debug = true;
+    let plugin_manager = ServicePluginManager::new(config.clone());
+    let state = ApiState::new(config, plugin_manager, shutdown_tx);
+    // debug = true should auto-enable studio.
+    assert!(state.studio_enabled);
+    assert!(state.transaction_log.is_some());
 }

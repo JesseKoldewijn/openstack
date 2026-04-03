@@ -2,12 +2,76 @@
   "schemaVersion": "1.2",
   "service": "ecr",
   "protocol": "rest_json",
+  "inputs": [
+    { "name": "repo_name", "type": "string", "required": true, "description": "ECR repository name" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create repository","operation":{"method":"POST","path":"/","body":"{\"repositoryName\":\"{{inputs.resource_name}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete repository","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-repository",
+          "title": "Create repository",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerRegistry_V20150921.CreateRepository", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"repositoryName\":\"{{inputs.repo_name}}\"}"
+          },
+          "captures": [
+            { "name": "repo_name", "source": "repository.repositoryName" },
+            { "name": "repo_arn",  "source": "repository.repositoryArn" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-repositories",
+          "title": "Describe repositories",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerRegistry_V20150921.DescribeRepositories", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"repositoryNames\":[\"{{captures.repo_name}}\"]}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-authorization-token",
+          "title": "Get authorization token",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken", "content-type": "application/x-amz-json-1.1" },
+            "body": "{}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-images",
+          "title": "List images",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerRegistry_V20150921.ListImages", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"repositoryName\":\"{{captures.repo_name}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-repository",
+          "title": "Delete repository",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerRegistry_V20150921.DeleteRepository", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"repositoryName\":\"{{captures.repo_name}}\",\"force\":true}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

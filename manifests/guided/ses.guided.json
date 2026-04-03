@@ -1,13 +1,71 @@
 {
   "schemaVersion": "1.2",
   "service": "ses",
-  "protocol": "rest_json",
+  "protocol": "query",
+  "inputs": [
+    { "name": "email_address", "type": "string", "required": true, "description": "Email address to verify (e.g. test@example.com)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Verify email","operation":{"method":"POST","path":"/","body":"{\"EmailAddress\":\"{{inputs.resource_name}}@example.com\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete identity","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "verify-email-identity",
+          "title": "Verify email identity",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=VerifyEmailIdentity&EmailAddress={{inputs.email_address}}&Version=2010-12-01"
+          },
+          "captures": [{ "name": "email_address", "source": "inputs.email_address" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-identity-verification",
+          "title": "Get verification attributes",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=GetIdentityVerificationAttributes&Identities.member.1={{captures.email_address}}&Version=2010-12-01"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "send-email",
+          "title": "Send email",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=SendEmail&Source={{captures.email_address}}&Destination.ToAddresses.member.1={{captures.email_address}}&Message.Subject.Data=Studio+Test&Message.Body.Text.Data=Hello+from+openstack+studio&Version=2010-12-01"
+          },
+          "captures": [{ "name": "message_id", "source": "MessageId" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }],
+          "error_guidance": "Send may fail if the identity is not verified. In local mode, SES accepts any verified identity."
+        },
+        {
+          "id": "list-identities",
+          "title": "List identities",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=ListIdentities&Version=2010-12-01"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-identity",
+          "title": "Delete identity",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteIdentity&Identity={{captures.email_address}}&Version=2010-12-01"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

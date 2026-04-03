@@ -922,4 +922,24 @@ impl ServiceProvider for KinesisProvider {
             )),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut streams = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for stream in store.streams.values() {
+                streams.push(json!({
+                    "id": stream.stream_arn.clone(),
+                    "kind": "stream",
+                    "attributes": [
+                        {"key": "name", "value": stream.stream_name.clone()},
+                        {"key": "status", "value": format!("{:?}", stream.status)},
+                        {"key": "shard_count", "value": stream.shard_count.to_string()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "kinesis", "streams": streams }))
+    }
 }

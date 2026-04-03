@@ -615,4 +615,18 @@ impl ServiceProvider for ApiGatewayProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut apis = Vec::new();
+        for entry in self.store.iter() {
+            for api in entry.value().apis.values() {
+                apis.push(json!({
+                    "id": api.id, "kind": "rest_api",
+                    "attributes": [{"key": "name", "value": api.name.clone()}]
+                }));
+            }
+        }
+        Some(json!({ "kind": "apigateway", "rest_apis": apis }))
+    }
 }

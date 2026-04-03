@@ -2795,6 +2795,15 @@ impl ServiceProvider for S3Provider {
         "s3"
     }
 
+    /// S3 uses rest-xml — there is no X-Amz-Target, so derive the operation
+    /// name from the HTTP method + path shape + query params instead.
+    fn derive_operation(&self, ctx: &RequestContext) -> Option<&str> {
+        // derive_s3_operation returns a Cow<'static, str>.
+        // We can't return a reference into it from this fn with lifetime 'a,
+        // so we compute a &'static str via the same match logic and return that.
+        Some(derive_s3_operation_static(ctx))
+    }
+
     async fn start(&self) -> Result<(), anyhow::Error> {
         let dir = self.s3_objects_dir.clone();
         let store = self
@@ -2820,17 +2829,16 @@ impl ServiceProvider for S3Provider {
 
     async fn dispatch(&self, ctx: &RequestContext) -> Result<DispatchResponse, DispatchError> {
         let op_start = std::time::Instant::now();
+        // S3 uses rest-xml. Derive the operation from method + path + query params.
+        let op = derive_s3_operation(ctx);
+
         debug!(
             service = "s3",
-            operation = %ctx.operation,
+            operation = %op,
             path = %ctx.path,
             method = %ctx.method,
             "S3 dispatch"
         );
-
-        // Determine what operation this is. S3 uses rest-xml so there's no
-        // X-Amz-Target — we derive the operation from method + path + query params.
-        let op = derive_s3_operation(ctx);
 
         // For read operations we use get() (read lock); mutations use get_or_create() (write lock).
         let response = match op.as_ref() {
@@ -3147,11 +3155,58 @@ impl ServiceProvider for S3Provider {
 
         Ok(response)
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut buckets = Vec::new();
+        for entry in self.store.iter() {
+            let key = entry.key();
+            let account = key.account_id().to_string();
+            let region = key.region().to_string();
+            let store = entry.value();
+            for (name, bucket) in &store.buckets {
+                let object_count = store
+                    .objects
+                    .get(name)
+                    .map(|objects| {
+                        objects
+                            .values()
+                            .filter(|obj| obj.current().is_some_and(|v| !v.delete_marker))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let bucket_id = format!("{account}:{region}:{name}");
+                buckets.push(json!({
+                    "id": bucket_id,
+                    "kind": "bucket",
+                    "created_at": bucket.creation_date.to_rfc3339(),
+                    "attributes": [
+                        {"key": "name", "value": name.clone()},
+                        {"key": "account", "value": account.clone()},
+                        {"key": "region", "value": region.clone()},
+                        {"key": "object_count", "value": object_count.to_string()},
+                        {"key": "versioning", "value": bucket.versioning.clone()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "s3", "buckets": buckets }))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Operation derivation from HTTP method + path + query params
 // ---------------------------------------------------------------------------
+
+/// Same logic as `derive_s3_operation` but returns `&'static str` so callers
+/// with a lifetime bound (e.g. `ServiceProvider::derive_operation`) can use it.
+fn derive_s3_operation_static(ctx: &RequestContext) -> &'static str {
+    match derive_s3_operation(ctx) {
+        Cow::Borrowed(s) => s,
+        // Fallback for unrecognized method/path/query combinations.
+        Cow::Owned(_) => "Unknown",
+    }
+}
 
 fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
     let method = ctx.method.as_str();

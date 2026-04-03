@@ -332,4 +332,22 @@ impl ServiceProvider for FirehoseProvider {
             )),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut streams = Vec::new();
+        for entry in self.store.iter() {
+            for stream in entry.value().streams.values() {
+                streams.push(json!({
+                    "id": stream.arn, "kind": "delivery_stream",
+                    "created_at": stream.created.to_rfc3339(),
+                    "attributes": [
+                        {"key": "name", "value": stream.name.clone()},
+                        {"key": "status", "value": format!("{:?}", stream.status)},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "firehose", "delivery_streams": streams }))
+    }
 }

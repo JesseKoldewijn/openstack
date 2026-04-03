@@ -2,12 +2,76 @@
   "schemaVersion": "1.2",
   "service": "firehose",
   "protocol": "json_target",
+  "inputs": [
+    { "name": "stream_name", "type": "string", "required": true, "description": "Firehose delivery stream name" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create delivery stream","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"Firehose_20150804.CreateDeliveryStream"},"body":"{\"DeliveryStreamName\":\"{{inputs.resource_name}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete delivery stream","operation":{"method":"POST","path":"/","headers":{"x-amz-target":"Firehose_20150804.DeleteDeliveryStream"},"body":"{\"DeliveryStreamName\":\"{{captures.resource_name}}\"}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-delivery-stream",
+          "title": "Create delivery stream",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Firehose_20150804.CreateDeliveryStream", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"DeliveryStreamName\":\"{{inputs.stream_name}}\",\"DeliveryStreamType\":\"DirectPut\",\"S3DestinationConfiguration\":{\"BucketARN\":\"arn:aws:s3:::studio-firehose-bucket\",\"RoleARN\":\"arn:aws:iam::000000000000:role/firehose-role\",\"BufferingHints\":{\"SizeInMBs\":1,\"IntervalInSeconds\":60}}}"
+          },
+          "captures": [
+            { "name": "stream_arn",  "source": "DeliveryStreamARN" },
+            { "name": "stream_name", "source": "inputs.stream_name" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "put-record",
+          "title": "Put record",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Firehose_20150804.PutRecord", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"DeliveryStreamName\":\"{{captures.stream_name}}\",\"Record\":{\"Data\":\"aGVsbG8gZnJvbSBzdHVkaW8=\"}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-delivery-stream",
+          "title": "Describe delivery stream",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Firehose_20150804.DescribeDeliveryStream", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"DeliveryStreamName\":\"{{captures.stream_name}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-delivery-streams",
+          "title": "List delivery streams",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Firehose_20150804.ListDeliveryStreams", "content-type": "application/x-amz-json-1.1" },
+            "body": "{}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-delivery-stream",
+          "title": "Delete delivery stream",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "Firehose_20150804.DeleteDeliveryStream", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"DeliveryStreamName\":\"{{captures.stream_name}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

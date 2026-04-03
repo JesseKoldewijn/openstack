@@ -295,4 +295,24 @@ impl ServiceProvider for SsmProvider {
             )),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut parameters = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for param in store.parameters.values() {
+                parameters.push(json!({
+                    "id": param.arn.clone(),
+                    "kind": "parameter",
+                    "attributes": [
+                        {"key": "name", "value": param.name.clone()},
+                        {"key": "type", "value": format!("{:?}", param.type_)},
+                        {"key": "version", "value": param.version.to_string()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "ssm", "parameters": parameters }))
+    }
 }

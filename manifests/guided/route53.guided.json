@@ -1,13 +1,66 @@
 {
   "schemaVersion": "1.2",
   "service": "route53",
-  "protocol": "rest_json",
+  "protocol": "rest_xml",
+  "inputs": [
+    { "name": "zone_name", "type": "string", "required": true, "description": "DNS zone name (e.g. example.com)" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create hosted zone","operation":{"method":"POST","path":"/","body":"{\"Name\":\"{{inputs.resource_name}}.example.com\",\"CallerReference\":\"{{timestamp()}}\"}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete hosted zone","operation":{"method":"DELETE","path":"/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-hosted-zone",
+          "title": "Create hosted zone",
+          "operation": {
+            "method": "POST",
+            "path": "/2013-04-01/hostedzone",
+            "headers": { "content-type": "text/xml" },
+            "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CreateHostedZoneRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\"><Name>{{inputs.zone_name}}</Name><CallerReference>studio-{{inputs.zone_name}}</CallerReference></CreateHostedZoneRequest>"
+          },
+          "captures": [{ "name": "zone_id", "source": "Id" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "201" }]
+        },
+        {
+          "id": "get-hosted-zone",
+          "title": "Get hosted zone",
+          "operation": {
+            "method": "GET",
+            "path": "{{captures.zone_id}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-hosted-zones",
+          "title": "List hosted zones",
+          "operation": {
+            "method": "GET",
+            "path": "/2013-04-01/hostedzone"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-resource-record-sets",
+          "title": "List resource record sets",
+          "operation": {
+            "method": "GET",
+            "path": "{{captures.zone_id}}/rrset"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-hosted-zone",
+          "title": "Delete hosted zone",
+          "operation": {
+            "method": "DELETE",
+            "path": "{{captures.zone_id}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
     }
   ]
 }

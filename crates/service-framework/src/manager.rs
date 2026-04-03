@@ -80,6 +80,20 @@ impl ServicePluginManager {
         container.provider.dispatch(ctx).await
     }
 
+    /// Derive the effective operation name for a request, allowing rest-xml
+    /// services (like S3) to override `ctx.operation` with the correct name.
+    ///
+    /// Returns `None` if the service is not registered or if the provider
+    /// returns `None` (i.e., the operation is already set correctly).
+    pub fn derive_operation(&self, ctx: &RequestContext) -> Option<String> {
+        let service_key = ctx.service.to_ascii_lowercase();
+        let container = self.containers.get(&service_key)?;
+        container
+            .provider
+            .derive_operation(ctx)
+            .map(ToOwned::to_owned)
+    }
+
     /// Returns the current state of all registered services.
     pub async fn service_states(&self) -> Vec<(String, ServiceState)> {
         let mut states = Vec::new();
@@ -127,6 +141,26 @@ impl ServicePluginManager {
                 error!("Failed to stop service '{}': {}", name, e);
             }
         }
+    }
+
+    /// Collect storage snapshots from all registered services that support
+    /// introspection.  Services that return `None` from
+    /// `storage_snapshot()` are omitted.
+    pub async fn storage_snapshots(&self) -> Vec<(String, serde_json::Value)> {
+        // Clone handles first so no DashMap iterator guard is held across await.
+        let containers: Vec<_> = self
+            .containers
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        let mut out = Vec::new();
+        for (service_name, container) in containers {
+            if let Some(snapshot) = container.provider.storage_snapshot().await {
+                out.push((service_name, snapshot));
+            }
+        }
+        out
     }
 }
 

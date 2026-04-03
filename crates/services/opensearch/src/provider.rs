@@ -258,4 +258,22 @@ impl ServiceProvider for OpenSearchProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut domains = Vec::new();
+        for entry in self.store.iter() {
+            for domain in entry.value().domains.values() {
+                domains.push(json!({
+                    "id": domain.arn, "kind": "domain",
+                    "attributes": [
+                        {"key": "name", "value": domain.domain_name.clone()},
+                        {"key": "status", "value": domain.status.clone()},
+                        {"key": "engine", "value": domain.engine_version.clone()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "opensearch", "domains": domains }))
+    }
 }

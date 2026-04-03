@@ -193,4 +193,9 @@ impl ServiceProvider for StsProvider {
             )),
         }
     }
+
+    // STS is stateless — no persistent resources to inspect.
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        None
+    }
 }

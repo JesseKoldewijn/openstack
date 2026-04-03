@@ -2,31 +2,66 @@
   "schemaVersion": "1.2",
   "service": "sqs",
   "protocol": "query",
+  "inputs": [
+    { "name": "queue_name", "type": "string", "required": true, "description": "SQS queue name" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
       "steps": [
         {
-          "id": "create",
+          "id": "create-queue",
           "title": "Create queue",
           "operation": {
             "method": "POST",
             "path": "/",
-            "body": "Action=CreateQueue&QueueName={{inputs.resource_name}}&Version=2012-11-05"
+            "body": "Action=CreateQueue&QueueName={{inputs.queue_name}}&Version=2012-11-05"
           },
-          "captures": [{ "name": "resource_name", "source": "inputs.resource_name" }],
+          "captures": [{ "name": "queue_url", "source": "QueueUrl" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "send-message",
+          "title": "Send message",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=SendMessage&QueueUrl={{captures.queue_url}}&MessageBody=hello+from+studio&Version=2012-11-05"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "receive-message",
+          "title": "Receive message",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=ReceiveMessage&QueueUrl={{captures.queue_url}}&MaxNumberOfMessages=1&Version=2012-11-05"
+          },
+          "captures": [{ "name": "receipt_handle", "source": "ReceiptHandle" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }],
+          "error_guidance": "No messages returned — verify send-message step succeeded."
+        },
+        {
+          "id": "get-queue-attributes",
+          "title": "Get queue attributes",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=GetQueueAttributes&QueueUrl={{captures.queue_url}}&AttributeName.1=All&Version=2012-11-05"
+          },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }
       ],
       "cleanup": [
         {
-          "id": "delete",
+          "id": "delete-queue",
           "title": "Delete queue",
           "operation": {
             "method": "POST",
             "path": "/",
-            "body": "Action=DeleteQueue&QueueUrl={{captures.resource_name}}&Version=2012-11-05"
+            "body": "Action=DeleteQueue&QueueUrl={{captures.queue_url}}&Version=2012-11-05"
           },
           "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
         }

@@ -723,4 +723,31 @@ impl ServiceProvider for StepFunctionsProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut state_machines = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for sm in store.state_machines.values() {
+                let execution_count = store
+                    .executions
+                    .values()
+                    .filter(|e| e.state_machine_arn == sm.state_machine_arn)
+                    .count();
+                state_machines.push(json!({
+                    "id": sm.state_machine_arn.clone(),
+                    "kind": "state_machine",
+                    "created_at": sm.created.to_rfc3339(),
+                    "attributes": [
+                        {"key": "name", "value": sm.name.clone()},
+                        {"key": "status", "value": sm.status.clone()},
+                        {"key": "type", "value": sm.machine_type.clone()},
+                        {"key": "execution_count", "value": execution_count.to_string()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "step_functions", "state_machines": state_machines }))
+    }
 }

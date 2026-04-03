@@ -2,12 +2,70 @@
   "schemaVersion": "1.2",
   "service": "lambda",
   "protocol": "rest_json",
+  "inputs": [
+    { "name": "function_name", "type": "string", "required": true, "description": "Lambda function name" }
+  ],
   "flows": [
     {
       "id": "l1-basic",
       "level": "L1",
-      "steps": [{"id":"create","title":"Create function","operation":{"method":"POST","path":"/2015-03-31/functions","body":"{\"FunctionName\":\"{{inputs.resource_name}}\",\"Runtime\":\"python3.11\",\"Role\":\"arn:aws:iam::000000000000:role/lambda\",\"Handler\":\"index.handler\",\"Code\":{\"ZipFile\":\"UEsDBAoAAAAAA\"}}"},"captures":[{"name":"resource_name","source":"inputs.resource_name"}],"assertions":[{"kind":"status","target":"status","expected":"200"}]}],
-      "cleanup": [{"id":"delete","title":"Delete function","operation":{"method":"DELETE","path":"/2015-03-31/functions/{{captures.resource_name}}"},"assertions":[{"kind":"status","target":"status","expected":"200"}]}]
+      "steps": [
+        {
+          "id": "create-function",
+          "title": "Create function",
+          "operation": {
+            "method": "POST",
+            "path": "/2015-03-31/functions",
+            "body": "{\"FunctionName\":\"{{inputs.function_name}}\",\"Runtime\":\"python3.11\",\"Role\":\"arn:aws:iam::000000000000:role/lambda-role\",\"Handler\":\"index.handler\",\"Code\":{\"ZipFile\":\"UEsDBAoAAAAAAGptB1kAAAAAAAAAAAAAAAAIAAAAaW5kZXgucHlkZWYgaGFuZGxlcihldmVudCwgY29udGV4dCk6CiAgICByZXR1cm4geyJzdGF0dXNDb2RlIjogMjAwLCAiYm9keSI6ICJoZWxsbyJ9ClBLAQIUAAoAAAAAAGptB1kAAAAAAAAAAAAAAAAIAAAAAAAAAAAAEADtAQAAAABpbmRleC5weVBLBQYAAAAAAQABADYAAAAmAAAAAAA=\"}}"
+          },
+          "captures": [
+            { "name": "function_name", "source": "FunctionName" },
+            { "name": "function_arn",  "source": "FunctionArn" }
+          ],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "invoke-function",
+          "title": "Invoke function",
+          "operation": {
+            "method": "POST",
+            "path": "/2015-03-31/functions/{{captures.function_name}}/invocations",
+            "headers": { "x-amz-invocation-type": "RequestResponse" },
+            "body": "{\"key\":\"value\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }],
+          "error_guidance": "Invocation failed — check function code and runtime. Lambda container must be running."
+        },
+        {
+          "id": "get-function",
+          "title": "Get function",
+          "operation": {
+            "method": "GET",
+            "path": "/2015-03-31/functions/{{captures.function_name}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-functions",
+          "title": "List functions",
+          "operation": {
+            "method": "GET",
+            "path": "/2015-03-31/functions"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-function",
+          "title": "Delete function",
+          "operation": {
+            "method": "DELETE",
+            "path": "/2015-03-31/functions/{{captures.function_name}}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "204" }]
+        }
+      ]
     }
   ]
 }

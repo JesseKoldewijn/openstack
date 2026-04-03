@@ -663,4 +663,21 @@ impl ServiceProvider for CloudFormationProvider {
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut stacks = Vec::new();
+        for entry in self.store.iter() {
+            for stack in entry.value().stacks.values() {
+                stacks.push(json!({
+                    "id": stack.stack_id, "kind": "stack",
+                    "attributes": [
+                        {"key": "name", "value": stack.stack_name.clone()},
+                        {"key": "status", "value": format!("{:?}", stack.status)},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "cloudformation", "stacks": stacks }))
+    }
 }

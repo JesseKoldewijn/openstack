@@ -711,4 +711,25 @@ impl ServiceProvider for KmsProvider {
             )),
         }
     }
+
+    async fn storage_snapshot(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let mut keys = Vec::new();
+        for entry in self.store.iter() {
+            let store = entry.value();
+            for key in store.keys.values() {
+                keys.push(json!({
+                    "id": key.key_id.clone(),
+                    "kind": "key",
+                    "created_at": key.created.to_rfc3339(),
+                    "attributes": [
+                        {"key": "arn", "value": key.arn.clone()},
+                        {"key": "state", "value": format!("{:?}", key.key_state)},
+                        {"key": "description", "value": key.description.clone()},
+                    ]
+                }));
+            }
+        }
+        Some(json!({ "kind": "kms", "keys": keys }))
+    }
 }

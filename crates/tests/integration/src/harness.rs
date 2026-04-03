@@ -41,7 +41,7 @@ pub struct TestHarness {
 impl TestHarness {
     /// Start a server on a random free port with all services enabled.
     pub async fn start() -> Self {
-        Self::start_with_config(None).await
+        Self::start_with_config(None, false).await
     }
 
     /// Start a server with only the specified services enabled (comma-separated).
@@ -52,10 +52,21 @@ impl TestHarness {
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty()),
         );
-        Self::start_with_config(Some(svc_config)).await
+        Self::start_with_config(Some(svc_config), false).await
     }
 
-    async fn start_with_config(svc_config: Option<ServicesConfig>) -> Self {
+    /// Start a server with Studio subsystem enabled (TX log, operation catalog active).
+    pub async fn start_with_studio(services: &str) -> Self {
+        let svc_config = ServicesConfig::only(
+            services
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty()),
+        );
+        Self::start_with_config(Some(svc_config), true).await
+    }
+
+    async fn start_with_config(svc_config: Option<ServicesConfig>, studio: bool) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind random port");
@@ -75,7 +86,11 @@ impl TestHarness {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let gateway = Gateway::new(config.clone(), plugin_manager.clone());
+        let gateway = if studio {
+            Gateway::new_with_studio(config.clone(), plugin_manager.clone())
+        } else {
+            Gateway::new(config.clone(), plugin_manager.clone())
+        };
         tokio::spawn(async move {
             gateway.run_with_listener(listener, shutdown_rx).await.ok();
         });
