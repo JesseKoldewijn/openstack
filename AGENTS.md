@@ -52,5 +52,9 @@ ci: <description>
 ## Pull requests
 
 - All PRs must target `develop`
+- **All CI checks must pass before a PR may be merged.** The CI workflow enforces this via two aggregate gate jobs:
+  - `Required checks (non-main target)` — must pass for PRs targeting `develop`
+  - `Required checks (main target)` — must pass for PRs targeting `main`
+  These gates cover: formatting, clippy, tests, build artifact verification, harness coverage, studio checks, parity core, parity all-services smoke, and benchmark.
 - Do not force-push to `main` without explicit maintainer approval
 - Merge strategy for `develop` → `main` is **rebase** (no squash) to keep history reconcilable
