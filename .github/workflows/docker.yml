@@ -49,20 +49,30 @@ jobs:
             type=raw,value=beta,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
             type=ref,event=pr
 
-  build-amd64:
-    name: Build amd64 image
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.suffix }} image
+    runs-on: ${{ matrix.runner }}
     needs: metadata
     permissions:
       contents: read
       packages: write
-    outputs:
-      image_ref: ${{ steps.refs.outputs.image_ref }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            # Native ARM runner — no QEMU emulation required.
+            # Note: ubuntu-24.04-arm is free for public repositories only.
+            # Private repos require GitHub Team or Enterprise.
+            runner: ubuntu-24.04-arm
+            suffix: arm64
 
     steps:
       - uses: actions/checkout@v4
         with:
-          # Keep schedule semantics deterministic regardless of default branch.
           ref: ${{ github.event_name == 'schedule' && 'refs/heads/main' || github.ref }}
 
       - name: Set up Docker Buildx
@@ -81,101 +91,24 @@ jobs:
         run: |
           image_repo="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           image_repo="$(printf '%s' "$image_repo" | tr '[:upper:]' '[:lower:]')"
-          echo "image_ref=${image_repo}:${{ env.TEMP_TAG_PREFIX }}-amd64" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${image_repo}:${{ env.TEMP_TAG_PREFIX }}-${{ matrix.suffix }}" >> "$GITHUB_OUTPUT"
 
-      - name: Build amd64 image
+      - name: Build ${{ matrix.suffix }} image
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.refs.outputs.image_ref }}
           labels: ${{ needs.metadata.outputs.labels }}
-          cache-from: type=gha,scope=docker-amd64
-          cache-to: type=gha,mode=max,scope=docker-amd64
+          cache-from: type=gha,scope=docker-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.suffix }}
 
-  build-arm64:
-    name: Build arm64 image
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    needs: metadata
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      image_ref: ${{ steps.refs.outputs.image_ref }}
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Keep schedule semantics deterministic regardless of default branch.
-          ref: ${{ github.event_name == 'schedule' && 'refs/heads/main' || github.ref }}
-
-      - name: Set up QEMU (for arm64 emulation)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set temporary image ref
-        id: refs
-        run: |
-          image_repo="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          image_repo="$(printf '%s' "$image_repo" | tr '[:upper:]' '[:lower:]')"
-          echo "image_ref=${image_repo}:${{ env.TEMP_TAG_PREFIX }}-arm64" >> "$GITHUB_OUTPUT"
-
-      - name: Build arm64 image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.refs.outputs.image_ref }}
-          labels: ${{ needs.metadata.outputs.labels }}
-          cache-from: type=gha,scope=docker-arm64
-          cache-to: type=gha,mode=max,scope=docker-arm64
-
-  publish-amd64-fast:
-    name: Publish amd64 tags (fast path)
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    needs: [metadata, build-amd64]
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish amd64 tags
-        run: |
-          while IFS= read -r tag; do
-            [ -z "$tag" ] && continue
-            docker buildx imagetools create \
-              -t "$tag" \
-              "${{ needs.build-amd64.outputs.image_ref }}"
-          done <<< "${{ needs.metadata.outputs.tags }}"
-
-  publish-manifest:
+  publish:
     name: Publish multi-arch manifest
-    if: github.event_name == 'schedule'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    needs: [metadata, build-amd64, build-arm64]
+    needs: [metadata, build]
     permissions:
       contents: read
       packages: write
@@ -190,18 +123,44 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create manifest tags
+      - name: Verify temp images exist
+        id: verify
         run: |
+          image_repo="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          image_repo="$(printf '%s' "$image_repo" | tr '[:upper:]' '[:lower:]')"
+          amd64_ref="${image_repo}:${{ env.TEMP_TAG_PREFIX }}-amd64"
+          arm64_ref="${image_repo}:${{ env.TEMP_TAG_PREFIX }}-arm64"
+          skip=false
+          if ! docker buildx imagetools inspect "$amd64_ref" >/dev/null 2>&1; then
+            echo "::warning::amd64 temp image not found ($amd64_ref) — skipping publish"
+            skip=true
+          fi
+          if ! docker buildx imagetools inspect "$arm64_ref" >/dev/null 2>&1; then
+            echo "::warning::arm64 temp image not found ($arm64_ref) — skipping publish"
+            skip=true
+          fi
+          echo "skip=${skip}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push multi-arch manifest
+        if: steps.verify.outputs.skip != 'true'
+        run: |
+          image_repo="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          image_repo="$(printf '%s' "$image_repo" | tr '[:upper:]' '[:lower:]')"
+          amd64_ref="${image_repo}:${{ env.TEMP_TAG_PREFIX }}-amd64"
+          arm64_ref="${image_repo}:${{ env.TEMP_TAG_PREFIX }}-arm64"
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             docker buildx imagetools create \
               -t "$tag" \
-              "${{ needs.build-amd64.outputs.image_ref }}" \
-              "${{ needs.build-arm64.outputs.image_ref }}"
+              "$amd64_ref" \
+              "$arm64_ref"
           done <<< "${{ needs.metadata.outputs.tags }}"
 
       - name: Validate manifest platforms
+        if: steps.verify.outputs.skip != 'true'
         run: |
+          image_repo="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          image_repo="$(printf '%s' "$image_repo" | tr '[:upper:]' '[:lower:]')"
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             manifest="$(docker buildx imagetools inspect "$tag")"
@@ -213,7 +172,7 @@ jobs:
     name: Cleanup temporary CI tags
     if: always() && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    needs: [publish-amd64-fast, publish-manifest]
+    needs: [publish]
     permissions:
       packages: write
     steps:
