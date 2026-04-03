@@ -102,7 +102,9 @@ jobs:
           tags: ${{ steps.refs.outputs.image_ref }}
           labels: ${{ needs.metadata.outputs.labels }}
           cache-from: type=gha,scope=docker-${{ matrix.suffix }}
-          cache-to: type=gha,mode=max,scope=docker-${{ matrix.suffix }}
+          # PRs must not write to the shared GHA cache — they could poison
+          # the layer cache used by production push builds.
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=docker-{0}', matrix.suffix) || '' }}
 
   publish:
     name: Publish multi-arch manifest
@@ -130,19 +132,23 @@ jobs:
           image_repo="$(printf '%s' "$image_repo" | tr '[:upper:]' '[:lower:]')"
           amd64_ref="${image_repo}:${{ env.TEMP_TAG_PREFIX }}-amd64"
           arm64_ref="${image_repo}:${{ env.TEMP_TAG_PREFIX }}-arm64"
-          skip=false
-          if ! docker buildx imagetools inspect "$amd64_ref" >/dev/null 2>&1; then
-            echo "::warning::amd64 temp image not found ($amd64_ref) — skipping publish"
-            skip=true
-          fi
-          if ! docker buildx imagetools inspect "$arm64_ref" >/dev/null 2>&1; then
-            echo "::warning::arm64 temp image not found ($arm64_ref) — skipping publish"
-            skip=true
-          fi
-          echo "skip=${skip}" >> "$GITHUB_OUTPUT"
+          # Retry up to 5 times with 15s between attempts to allow for GHCR
+          # propagation delay after a multi-architecture push.
+          for attempt in 1 2 3 4 5; do
+            missing=0
+            docker buildx imagetools inspect "$amd64_ref" >/dev/null 2>&1 || missing=1
+            docker buildx imagetools inspect "$arm64_ref" >/dev/null 2>&1 || missing=1
+            if [ "$missing" -eq 0 ]; then
+              echo "Both temp images verified on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Attempt ${attempt}/5: one or more temp images not yet visible — waiting 15s..."
+            sleep 15
+          done
+          echo "::error::Temporary images did not become visible in GHCR after 5 attempts (amd64: ${amd64_ref}, arm64: ${arm64_ref})"
+          exit 1
 
       - name: Create and push multi-arch manifest
-        if: steps.verify.outputs.skip != 'true'
         run: |
           image_repo="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           image_repo="$(printf '%s' "$image_repo" | tr '[:upper:]' '[:lower:]')"
@@ -157,7 +163,6 @@ jobs:
           done <<< "${{ needs.metadata.outputs.tags }}"
 
       - name: Validate manifest platforms
-        if: steps.verify.outputs.skip != 'true'
         run: |
           image_repo="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           image_repo="$(printf '%s' "$image_repo" | tr '[:upper:]' '[:lower:]')"
