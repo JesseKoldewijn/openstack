@@ -55,6 +55,12 @@ jobs:
     needs: metadata
     permissions:
       contents: read
+      # packages: write is required on non-pull_request events: this job pushes
+      # per-arch temporary staging tags (ci-<sha>-amd64 / ci-<sha>-arm64) to
+      # GHCR so the publish job can assemble the final multi-arch manifest.
+      # Login and push are both gated on `github.event_name != 'pull_request'`,
+      # so the permission is unused on PRs — but GitHub Actions does not
+      # support per-event permission scoping within a single job definition.
       packages: write
     strategy:
       fail-fast: false
