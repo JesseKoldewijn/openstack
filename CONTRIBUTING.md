@@ -64,9 +64,20 @@ Prefixes: `feat`, `fix`, `chore`, `refactor`, `test`, `docs`, `perf`, `ci`.
 
 ---
 
-## main ← develop merges
+## Merge strategy
 
-Merges from `develop` into `main` are performed by maintainers. The merge strategy is **rebase** (no squash) to preserve commit history and keep branch histories reconcilable.
+The merge strategy depends on the target branch:
+
+| PR target | Strategy | Why |
+|-----------|----------|-----|
+| `develop` | **Squash and merge** | Keeps `develop` history clean — one commit per PR. |
+| `main` | **Create a merge commit** | Preserves original commit SHAs from `develop`. Never squash or rebase. |
+
+### Why not rebase for `develop` → `main`?
+
+GitHub's "Rebase and merge" button replays commits and creates new commit objects with different SHAs. Both branches then have the same content but diverged histories, which causes spurious merge conflicts the next time a `develop` → `main` PR is opened.
+
+"Create a merge commit" preserves the original commit SHAs from `develop` and adds a single merge commit on top of `main`. Git can then identify the shared history correctly and future syncs are conflict-free.
 
 ---
 
