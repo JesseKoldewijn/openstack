@@ -737,12 +737,18 @@ impl ServiceProvider for SnsProvider {
         let mut topics = Vec::new();
         for entry in self.store.iter() {
             let store = entry.value();
+
+            let mut sub_counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for sub in store.subscriptions.values() {
+                *sub_counts.entry(sub.topic_arn.as_str()).or_insert(0) += 1;
+            }
+
             for topic in store.topics.values() {
-                let sub_count = store
-                    .subscriptions
-                    .values()
-                    .filter(|s| s.topic_arn == topic.topic_arn)
-                    .count();
+                let sub_count = sub_counts
+                    .get(topic.topic_arn.as_str())
+                    .copied()
+                    .unwrap_or(0);
                 topics.push(json!({
                     "id": topic.topic_arn,
                     "kind": "topic",
