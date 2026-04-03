@@ -16,7 +16,10 @@ This project uses a two-branch model. Agents must respect it:
 **Features, fixes, refactors, and all other changes must be proposed against `develop`.**
 `main` is only updated by merging from `develop` — never directly.
 
-When creating commits or branches, always branch from and target `develop` unless a maintainer explicitly instructs otherwise.
+**Never commit directly to `develop` or `main`.**
+All work must go through a feature branch and be merged into `develop` via a pull request. Direct commits to `develop` bypass review and are not permitted.
+
+When creating commits or branches, always branch from `develop` and open a PR targeting `develop`. Never push commits directly to `develop` or `main` unless a maintainer explicitly instructs otherwise.
 
 ---
 

@@ -16,6 +16,9 @@ This project follows a two-branch model:
 **All pull requests must target `develop`.**
 Direct PRs to `main` will not be accepted unless they are hotfixes explicitly approved by a maintainer.
 
+**Never commit directly to `develop` or `main`.**
+All work — features, fixes, refactors, documentation — must arrive via a feature-branch PR. Direct pushes to `develop` are not permitted.
+
 ---
 
 ## Workflow
@@ -33,6 +36,9 @@ Direct PRs to `main` will not be accepted unless they are hotfixes explicitly ap
    cargo test
    ```
 5. Open a pull request targeting **`develop`**.
+6. Once reviewed and merged into `develop`, the change will eventually be promoted to `main` by a maintainer.
+
+> `develop` is a shared integration branch. Committing to it directly bypasses review and risks destabilising it for other contributors.
 
 ---
 
