@@ -187,7 +187,7 @@ openstack is configured entirely through environment variables, fully compatible
 | `PERSISTENCE` | `0` | Enable state persistence to `DATA_DIR` |
 | `DATA_DIR` | `/var/lib/localstack` | Directory for persisted state |
 | `LS_LOG` | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`) |
-| `DEBUG` | `0` | Enable debug mode (exposes `/_localstack/diagnose`) |
+| `DEBUG` | `0` | Enable debug mode (exposes `/_localstack/diagnose`; also enables Studio by default) |
 | `DNS_ADDRESS` | `0.0.0.0` | DNS server bind address |
 | `DNS_PORT` | `53` | DNS server port |
 | `DNS_RESOLVE_IP` | `127.0.0.1` | IP that `*.localhost.localstack.cloud` resolves to |
@@ -197,8 +197,38 @@ openstack is configured entirely through environment variables, fully compatible
 | `SNAPSHOT_LOAD_STRATEGY` | `ON_STARTUP` | When to load persisted state |
 | `ALLOW_NONSTANDARD_REGIONS` | `0` | Allow arbitrary region names |
 | `EAGER_SERVICE_LOADING` | `0` | Start all services at boot instead of lazily |
+| `STUDIO` | `0` | Enable Studio UI/transaction capture (`1`/`true`) |
 
 ---
+
+## Studio UI
+
+Studio is embedded in the gateway and available at:
+
+- `/_localstack/studio` (SPA)
+- `/_localstack/studio/assets/*` (static assets)
+
+Enable it explicitly:
+
+```bash
+openstack start --studio
+# or
+STUDIO=1 openstack start
+```
+
+Behavior by mode:
+
+- **Studio disabled (default/headless benchmark mode):**
+  - transaction log allocation is skipped
+  - transaction recording endpoints are silent no-ops
+- **Studio enabled:**
+  - live transaction recording (including guided/raw interactions)
+  - operation catalog + guided flow explorer + storage/transactions tabs
+
+Notes:
+
+- S3 supports both **path-style** and **virtual-hosted-style** request forms.
+- Studio-origin requests are marked internally to avoid duplicate transaction rows.
 
 ## Internal API
 
@@ -213,6 +243,12 @@ The following management endpoints are available (LocalStack-compatible):
 | `GET /_localstack/plugins` | Registered service providers |
 | `GET /_localstack/diagnose` | Config + diagnostics (DEBUG=1 only) |
 | `GET /_localstack/config` | Runtime config read/update |
+| `GET /_localstack/studio-api/runtime-config` | Studio runtime endpoint/credentials/polling config |
+| `GET /_localstack/studio-api/operations[/{service}]` | Per-service operation catalog |
+| `GET /_localstack/studio-api/storage[/{service}]` | Live storage snapshots |
+| `GET /_localstack/studio-api/transactions[/{service}]` | Transaction history |
+| `POST /_localstack/studio-api/transactions/record` | Record transaction entry |
+| `DELETE /_localstack/studio-api/transactions[/{service}]` | Clear all or service-scoped transactions |
 
 ---
 
@@ -228,7 +264,7 @@ crates/
 ├── state/              AccountRegionBundle, persistence, snapshots
 ├── internal-api/       /_localstack/* management endpoints
 ├── dns/                Embedded hickory-dns server
-├── studio-ui/          Web management UI (Node/TypeScript)
+├── studio-ui/          Studio data/model crate + protocol adapters + tests
 ├── services/           One crate per AWS service (24 crates, 26 APIs)
 └── tests/integration/  Integration test harness
 ```
