@@ -13,11 +13,34 @@ use tracing::warn;
 
 use crate::ApiState;
 
+fn normalize_protocol_alias(mut value: serde_json::Value) -> serde_json::Value {
+    // Some guided manifests still use legacy protocol alias names (e.g. "ec2").
+    // OperationCatalog expects ProtocolClass variants from studio-ui.
+    if let Some(protocol) = value
+        .get_mut("protocol")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+    {
+        let normalized = match protocol.as_str() {
+            "ec2" => "query",
+            // Backward-compatible aliases (if encountered)
+            "json" => "json_target",
+            "restxml" => "rest_xml",
+            "restjson" => "rest_json",
+            _ => protocol.as_str(),
+        };
+        if let Some(p) = value.get_mut("protocol") {
+            *p = serde_json::Value::String(normalized.to_string());
+        }
+    }
+    value
+}
+
 fn build_catalog(state: &ApiState) -> OperationCatalog {
     let mut manifests: Vec<openstack_studio_ui::GuidedManifest> = Vec::new();
 
     for (service, raw) in &state.guided_manifest_inventory {
         match serde_json::to_value(raw)
+            .map(normalize_protocol_alias)
             .and_then(serde_json::from_value::<openstack_studio_ui::GuidedManifest>)
         {
             Ok(manifest) => manifests.push(manifest),
@@ -91,5 +114,25 @@ pub async fn get_service_operations(
             })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn normalize_protocol_alias_maps_ec2_to_query() {
+        let raw = serde_json::json!({
+            "schemaVersion": "1.2",
+            "service": "ec2",
+            "protocol": "ec2",
+            "flows": []
+        });
+
+        let normalized = super::normalize_protocol_alias(raw);
+        assert_eq!(normalized["protocol"], "query");
+
+        let parsed = serde_json::from_value::<openstack_studio_ui::GuidedManifest>(normalized)
+            .expect("normalized manifest should decode");
+        assert_eq!(parsed.service, "ec2");
     }
 }
