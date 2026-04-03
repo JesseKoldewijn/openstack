@@ -67,3 +67,18 @@ Prefixes: `feat`, `fix`, `chore`, `refactor`, `test`, `docs`, `perf`, `ci`.
 ## main ← develop merges
 
 Merges from `develop` into `main` are performed by maintainers. The merge strategy is **rebase** (no squash) to preserve commit history and keep branch histories reconcilable.
+
+---
+
+## CI requirements
+
+**All CI checks must pass before a PR may be merged** into either `develop` or `main`. The CI workflow exposes two aggregate gate jobs that enforce this:
+
+| Gate | Applies to |
+|------|------------|
+| `Required checks (non-main target)` | PRs targeting `develop` |
+| `Required checks (main target)` | PRs targeting `main` |
+
+These gates cover: formatting (`cargo fmt`), linting (`cargo clippy`), tests, release build verification, harness coverage, Studio UI/asset/coverage checks, parity (core and all-services smoke), and benchmark.
+
+Do not attempt to merge a PR while any required check is pending or failing.
