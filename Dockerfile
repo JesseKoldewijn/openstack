@@ -92,6 +92,15 @@ RUN useradd -ms /bin/bash openstack
 USER openstack
 WORKDIR /home/openstack
 
+# OCI image metadata — static values baked into the image.
+# Dynamic values (version, revision, created) are injected at build time
+# via --label flags by docker/metadata-action in the CI workflow.
+LABEL org.opencontainers.image.title="openstack" \
+      org.opencontainers.image.description="A Rust-based LocalStack drop-in replacement" \
+      org.opencontainers.image.url="https://github.com/JesseKoldewijn/openstack" \
+      org.opencontainers.image.source="https://github.com/JesseKoldewijn/openstack" \
+      org.opencontainers.image.licenses="MIT"
+
 COPY --from=builder /build/target/release/openstack /usr/local/bin/openstack
 
 # LocalStack-compatible port (main edge API)

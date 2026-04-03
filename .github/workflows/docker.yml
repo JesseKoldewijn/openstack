@@ -48,6 +48,9 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' }}
             type=raw,value=beta,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
             type=ref,event=pr
+          labels: |
+            org.opencontainers.image.title=openstack
+            org.opencontainers.image.description=A Rust-based LocalStack drop-in replacement
 
   build:
     name: Build ${{ matrix.suffix }} image
