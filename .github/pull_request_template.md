@@ -32,7 +32,6 @@
 ## Checklist
 
 - [ ] This PR targets **`develop`**, not `main`
-- [ ] This PR is from a **feature branch**, not from `develop` directly
 - [ ] Code is formatted with `cargo fmt`
 - [ ] No new Clippy warnings introduced
 - [ ] Tests added or updated where appropriate
