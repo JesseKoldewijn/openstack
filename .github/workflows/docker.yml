@@ -166,6 +166,11 @@ jobs:
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             docker buildx imagetools create \
+              --annotation "index:org.opencontainers.image.title=openstack" \
+              --annotation "index:org.opencontainers.image.description=A Rust-based LocalStack drop-in replacement" \
+              --annotation "index:org.opencontainers.image.url=https://github.com/JesseKoldewijn/openstack" \
+              --annotation "index:org.opencontainers.image.source=https://github.com/JesseKoldewijn/openstack" \
+              --annotation "index:org.opencontainers.image.licenses=MIT" \
               -t "$tag" \
               "$amd64_ref" \
               "$arm64_ref"
