@@ -57,6 +57,8 @@ ci: <description>
   - `Required checks (main target)` — must pass for PRs targeting `main`
   These gates cover: formatting, clippy, tests, build artifact verification, harness coverage, studio checks, parity core, parity all-services smoke, and benchmark.
 - Do not force-push to `main` without explicit maintainer approval
-- Merge strategy for `develop` → `main` is **merge commit only** — never squash, never rebase.
-  GitHub's "Rebase and merge" button rewrites commit SHAs, causing false conflicts on the next
-  sync. Always use "Create a merge commit" when merging `develop` into `main`.
+- Merge strategy depends on target branch:
+  - **PRs → `develop`**: use **Squash and merge** — one clean commit per PR on `develop`.
+  - **`develop` → `main`**: use **Create a merge commit** — never squash, never rebase.
+    GitHub's "Rebase and merge" button rewrites commit SHAs, causing false conflicts on the next
+    sync. Always use "Create a merge commit" when merging `develop` into `main`.
