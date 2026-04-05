@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/JesseKoldewijn/openstack/compare/v0.1.1...v0.1.2) - 2026-04-05
+
+### Added
+
+- *(studio)* full tab-based service explorer with SigV4, polling, and multi-step guided flows ([#15](https://github.com/JesseKoldewijn/openstack/pull/15))
+
+### Other
+
+- *(release)* release-plz
+- *(readme)* add stable/rc badges and align crate readme badge set
+- Merge pull request #4 from JesseKoldewijn/feat/perf-improvements-io
+
 ## [0.1.1](https://github.com/JesseKoldewijn/openstack/compare/v0.1.0...v0.1.1) - 2026-04-05
 
 ### Added
