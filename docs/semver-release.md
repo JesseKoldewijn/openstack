@@ -56,6 +56,10 @@ Release channels:
   - Trigger: push to `develop`
   - Output: next RC tag on current develop head (`v<stable>-rc-<n>`)
 
+- **RC badge automation**: `.github/workflows/rc-badge.yml`
+  - Trigger: pushes to `develop` and `v*-rc-*` tag events
+  - Output: updates `gh-pages/badges/rc.json` (Shields endpoint badge source)
+
 - **PR version label automation**: `.github/workflows/pr-version-label.yml`
   - Trigger: PR opened/synchronized/reopened
   - Output: updates PR label `@version:v<base-rc>.pr-<number>`

@@ -3,7 +3,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/JesseKoldewijn/openstack/ci.yml?branch=main&label=CI&logo=github)](https://github.com/JesseKoldewijn/openstack/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/github/actions/workflow/status/JesseKoldewijn/openstack/docker.yml?branch=main&label=Docker&logo=docker&logoColor=white)](https://github.com/JesseKoldewijn/openstack/actions/workflows/docker.yml)
 [![Stable release](https://img.shields.io/github/v/release/JesseKoldewijn/openstack?sort=semver&label=stable%20release)](https://github.com/JesseKoldewijn/openstack/releases)
-[![RC tag](https://img.shields.io/github/v/tag/JesseKoldewijn/openstack?filter=v*-rc-*&label=rc%20tag)](https://github.com/JesseKoldewijn/openstack/tags)
+[![RC tag](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/JesseKoldewijn/openstack/gh-pages/badges/rc.json)](https://github.com/JesseKoldewijn/openstack/tags)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
 Shared Studio domain crate used by the embedded Studio experience in `openstack`.
