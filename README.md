@@ -275,10 +275,10 @@ crates/
 
 openstack uses an automated SemVer release-PR flow via `release-plz`.
 
-- Workflow: `.github/workflows/release-plz.yml`
+- Release PR workflow: `.github/workflows/release-plz.yml` (pushes to `develop`)
+- Release workflow: `.github/workflows/release.yml` (pushes to `main`)
 - Config: `.release-plz.toml`
-- Trigger: pushes to `main` (or manual `workflow_dispatch`)
-- Output: a release PR that bumps versions + changelog using conventional commit semantics
+- Output: automated release PR(s), version/changelog updates, and SemVer tag/release automation
 
 Conventional commit guidance (used for SemVer bump decisions):
 
@@ -293,6 +293,8 @@ feat(gateway): add virtual-hosted-style S3 rewrite
 fix(studio): avoid duplicate transaction rows
 feat!: remove deprecated config field
 ```
+
+See also: [`docs/semver-release.md`](docs/semver-release.md) for full human/agent release guidance.
 
 ## Development
 

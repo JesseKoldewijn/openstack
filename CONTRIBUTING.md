@@ -44,7 +44,10 @@ All work — features, fixes, refactors, documentation — must arrive via a fea
 
 ## Commit style
 
-Use concise, lowercase imperative commit messages:
+This repo uses Conventional Commit semantics for automated SemVer versioning.
+Because PRs to `develop` are squash-merged, **your PR title should follow the same format**.
+
+Use concise, lowercase imperative commit messages / PR titles:
 
 ```
 feat: add SQS dead-letter queue support
@@ -53,6 +56,11 @@ chore: update dependencies
 ```
 
 Prefixes: `feat`, `fix`, `chore`, `refactor`, `test`, `docs`, `perf`, `ci`.
+
+SemVer mapping:
+- `feat` → minor
+- `fix` / `perf` → patch
+- `!` or `BREAKING CHANGE` footer → major
 
 ---
 
@@ -93,3 +101,11 @@ GitHub's "Rebase and merge" button replays commits and creates new commit object
 These gates cover: formatting (`cargo fmt`), linting (`cargo clippy`), tests, release build verification, harness coverage, Studio UI/asset/coverage checks, parity (core and all-services smoke), and benchmark.
 
 Do not attempt to merge a PR while any required check is pending or failing.
+
+## Release pipeline
+
+- `release-plz` release PR automation runs on pushes to `develop`
+- release automation runs on pushes to `main`
+- tag-driven binary builds run on `v*.*.*` tags
+
+See [`docs/semver-release.md`](docs/semver-release.md) for the full release flow and token requirements.

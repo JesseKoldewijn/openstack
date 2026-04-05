@@ -13,6 +13,8 @@
 
 ## Summary
 
+<!-- Use a Conventional Commit-style title for this PR (important for automated SemVer). -->
+
 <!-- Briefly describe what this PR does and why. -->
 
 ## Changes
@@ -32,6 +34,7 @@
 ## Checklist
 
 - [ ] This PR targets **`develop`**, not `main`
+- [ ] PR title follows Conventional Commit style (`feat:`, `fix:`, `perf:`, etc.)
 - [ ] Code is formatted with `cargo fmt`
 - [ ] No new Clippy warnings introduced
 - [ ] Tests added or updated where appropriate

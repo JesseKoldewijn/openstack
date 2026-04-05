@@ -25,7 +25,10 @@ When creating commits or branches, always branch from `develop` and open a PR ta
 
 ## Commit style
 
-Use lowercase imperative prefix commits:
+This repo uses Conventional Commit semantics for automated SemVer versioning.
+Because PRs to `develop` are squash-merged, **PR title is the effective release signal**.
+
+Use lowercase imperative prefix commits / PR titles:
 
 ```
 feat: <description>
@@ -37,6 +40,11 @@ docs: <description>
 perf: <description>
 ci: <description>
 ```
+
+SemVer mapping:
+- feat -> minor
+- fix/perf -> patch
+- breaking (`!` or `BREAKING CHANGE`) -> major
 
 ---
 
@@ -62,3 +70,12 @@ ci: <description>
   - **`develop` → `main`**: use **Create a merge commit** — never squash, never rebase.
     GitHub's "Rebase and merge" button rewrites commit SHAs, causing false conflicts on the next
     sync. Always use "Create a merge commit" when merging `develop` into `main`.
+
+## Release automation context (for agents)
+
+- Release PR automation: `.github/workflows/release-plz.yml` (develop)
+- Release execution: `.github/workflows/release.yml` (main)
+- Tag build pipeline: `.github/workflows/cross-compile.yml` (`v*.*.*` tags)
+
+When preparing PRs, keep titles semantic and avoid vague titles like "updates".
+Refer to `docs/semver-release.md` for full details.

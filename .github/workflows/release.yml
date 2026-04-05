@@ -1,8 +1,8 @@
-name: Release PR (SemVer)
+name: Release (tag + GitHub release)
 
 on:
   push:
-    branches: ["develop"]
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -10,12 +10,12 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: release-plz-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  release-pr:
-    name: Create/Update release PR (develop)
+  release:
+    name: Run release-plz release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,10 +26,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run release-plz (release-pr)
+      - name: Run release-plz (release)
         uses: release-plz/action@v0.5
         with:
-          command: release-pr
+          command: release
           config: .release-plz.toml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer a PAT so tag pushes can trigger downstream tag workflows
+          # (e.g. cross-compile on v* tags). Falls back to GITHUB_TOKEN.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
