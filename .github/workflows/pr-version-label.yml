@@ -8,7 +8,6 @@ on:
 permissions:
   contents: read
   issues: write
-  pull-requests: write
 
 concurrency:
   group: pr-version-label-${{ github.event.pull_request.number }}
@@ -29,7 +28,7 @@ jobs:
         id: compute
         run: |
           set -euo pipefail
-          git fetch --tags --force >/dev/null 2>&1 || true
+          git fetch --tags --force
 
           base_rc_tag="$(git tag --list 'v*-rc-*' --sort=-version:refname | head -n 1)"
           if [[ -z "$base_rc_tag" ]]; then

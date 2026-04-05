@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   create-rc-tag:
+    if: github.ref == 'refs/heads/develop'
     name: Create RC tag for develop head
     runs-on: ubuntu-latest
     steps:
@@ -28,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          git fetch --tags --force >/dev/null 2>&1 || true
+          git fetch --tags --force
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -39,21 +40,18 @@ jobs:
             exit 0
           fi
 
-          # Stable base comes from latest stable semver tag (no -rc suffix).
-          # Important: allow empty result when no stable tags exist yet.
-          base_stable="$({
-            git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-              | head -n 1;
-          } || true)"
-
-          if [[ -z "$base_stable" ]]; then
-            workspace_version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
-            base_stable="v${workspace_version}"
-            echo "No stable tags found; using workspace version base: ${base_stable}" >&2
-          else
-            echo "Using latest stable tag base: ${base_stable}" >&2
-          fi
+          # RC stream is based on workspace semantic version.
+          workspace_version="$(awk -F '"' '
+            /^\[workspace\.package\]$/ { in_workspace_package=1; next }
+            /^\[/ { in_workspace_package=0 }
+            in_workspace_package && /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          [[ -n "$workspace_version" ]] || {
+            echo "Unable to determine [workspace.package].version from Cargo.toml" >&2
+            exit 1
+          }
+          base_stable="v${workspace_version}"
+          echo "Using workspace version base: ${base_stable}" >&2
 
           # Find highest existing rc number for this stable base.
           highest=0
