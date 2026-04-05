@@ -280,6 +280,7 @@ Mainline release automation is currently being reworked.
 - Legacy `release-plz`/RC helper workflows were removed from `main`.
 - CI and Docker workflows remain active.
 - Use PR checks as merge gates (`Required checks (main target)` / `Required checks (non-main target)`).
+- Branch policy: promote `develop` to `main` via **fast-forward only** (no merge/squash/rebase into `main`).
 
 See also: [`docs/semver-release.md`](docs/semver-release.md) for current release notes and migration status.
 

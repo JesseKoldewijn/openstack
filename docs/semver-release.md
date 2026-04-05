@@ -7,6 +7,7 @@
 - Legacy `release-plz` + RC helper workflows were removed from `main`.
 - CI remains the merge safety gate (`Required checks (main target)` / `Required checks (non-main target)`).
 - Docker publishing and tag-based binary builds remain active through their dedicated workflows.
+- `develop` is promoted to `main` using **fast-forward only** (`git merge --ff-only origin/develop`).
 
 ## Why this doc is short
 

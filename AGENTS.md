@@ -67,9 +67,14 @@ SemVer mapping:
 - Do not force-push to `main` without explicit maintainer approval
 - Merge strategy depends on target branch:
   - **PRs → `develop`**: use **Squash and merge** — one clean commit per PR on `develop`.
-  - **`develop` → `main`**: use **Create a merge commit** — never squash, never rebase.
-    GitHub's "Rebase and merge" button rewrites commit SHAs, causing false conflicts on the next
-    sync. Always use "Create a merge commit" when merging `develop` into `main`.
+  - **`develop` → `main`**: **fast-forward only** (no PR merge button).
+    - Do not squash/rebase/merge-commit into `main`.
+    - Promotion procedure:
+      1. `git fetch origin`
+      2. `git checkout main && git reset --hard origin/main`
+      3. `git merge --ff-only origin/develop`
+      4. `git push origin main`
+    This guarantees `develop` is always ahead of or equal to `main`.
 
 ## Release automation context (for agents)
 

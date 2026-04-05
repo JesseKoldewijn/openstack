@@ -79,13 +79,23 @@ The merge strategy depends on the target branch:
 | PR target | Strategy | Why |
 |-----------|----------|-----|
 | `develop` | **Squash and merge** | Keeps `develop` history clean — one commit per PR. |
-| `main` | **Create a merge commit** | Preserves original commit SHAs from `develop`. Never squash or rebase. |
+| `main` | **Fast-forward only** | Guarantees `develop` is always ahead of or equal to `main`. |
 
-### Why not rebase for `develop` → `main`?
+### `develop` → `main` promotion (fast-forward only)
 
-GitHub's "Rebase and merge" button replays commits and creates new commit objects with different SHAs. Both branches then have the same content but diverged histories, which causes spurious merge conflicts the next time a `develop` → `main` PR is opened.
+Do **not** use GitHub PR merge buttons for `main` promotion.
 
-"Create a merge commit" preserves the original commit SHAs from `develop` and adds a single merge commit on top of `main`. Git can then identify the shared history correctly and future syncs are conflict-free.
+Use:
+
+```bash
+git fetch origin
+git checkout main
+git reset --hard origin/main
+git merge --ff-only origin/develop
+git push origin main
+```
+
+If `git merge --ff-only` fails, `main` has drifted and must be reconciled before promotion.
 
 ---
 
