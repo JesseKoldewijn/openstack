@@ -58,7 +58,7 @@ jobs:
           command: release-pr
           config: .release-plz.toml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
 
   cleanup-stale-release-plz-branches:
     name: Cleanup stale release-plz branches
