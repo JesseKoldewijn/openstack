@@ -29,6 +29,8 @@ jobs:
           set -euo pipefail
 
           git fetch --tags --force >/dev/null 2>&1 || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           # Skip if this commit is already tagged as an RC.
           existing_for_head="$(git tag --points-at HEAD 'v*-rc-*' | head -n 1)"
