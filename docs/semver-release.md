@@ -36,6 +36,7 @@ Release channels:
 - `main` = **stable** channel (container tags `stable`, `latest`)
 - `develop` = **RC** channel (container tags `rc`, `rc-<short-sha>`)
 - `pull_request` = **RC preview** tag style (`rc-pr-<short-sha>`, same-repo PRs)
+  - preview tags are ephemeral and removed during the workflow cleanup cycle
 
 ## Workflows
 

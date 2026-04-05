@@ -281,6 +281,7 @@ openstack uses an automated SemVer release-PR flow via `release-plz`.
   - `main` → stable (`stable`, `latest`, + semver tags on `v*.*.*`)
   - `develop` → RC (`rc`, `rc-<short-sha>`)
   - `pull_request` → RC preview tag pattern (`rc-pr-<short-sha>`, published for same-repo PRs)
+    - preview tags are ephemeral and cleaned in the same GHCR cleanup cycle
 - Config: `.release-plz.toml`
 - Output: automated release PR(s), version/changelog updates, and SemVer tag/release automation
 

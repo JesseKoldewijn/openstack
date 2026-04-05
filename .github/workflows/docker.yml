@@ -198,14 +198,14 @@ jobs:
           done <<< "${{ needs.metadata.outputs.tags }}"
 
   cleanup-temp-tags:
-    name: Cleanup temporary CI tags
+    name: Cleanup temporary CI + PR preview tags
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     needs: [publish]
     permissions:
       packages: write
     steps:
-      - name: Delete temporary staging tags from GHCR
+      - name: Delete temporary staging + PR preview tags from GHCR
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -214,9 +214,20 @@ jobs:
           PACKAGE_NAME="openstack"
           OWNER="${{ github.repository_owner }}"
 
-          for suffix in amd64 arm64; do
-            TAG="ci-${{ github.sha }}-${suffix}"
-            echo "Looking up temp tag: ${TAG}" >&2
+          tags_to_cleanup=(
+            "ci-${{ github.sha }}-amd64"
+            "ci-${{ github.sha }}-arm64"
+          )
+
+          # PR preview channel tags are ephemeral: remove them in the same
+          # cleanup cycle as staging tags.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            short_sha="$(printf '%s' "${{ github.sha }}" | cut -c1-7)"
+            tags_to_cleanup+=("rc-pr-${short_sha}")
+          fi
+
+          for TAG in "${tags_to_cleanup[@]}"; do
+            echo "Looking up temp/preview tag: ${TAG}" >&2
 
             VERSION_ID=$(gh api \
               "/users/${OWNER}/packages/container/${PACKAGE_NAME}/versions" \
