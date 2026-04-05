@@ -53,45 +53,53 @@ jobs:
             const newLabel = `@version:${process.env.PR_RC_TAG}`;
 
             try {
-              await github.rest.issues.getLabel({ owner, repo, name: newLabel });
-            } catch (err) {
-              if (err.status === 404) {
-                await github.rest.issues.createLabel({
-                  owner,
-                  repo,
-                  name: newLabel,
-                  color: '1d76db',
-                  description: 'Computed RC preview version for this PR',
-                });
-              } else {
-                throw err;
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: newLabel });
+              } catch (err) {
+                if (err.status === 404) {
+                  await github.rest.issues.createLabel({
+                    owner,
+                    repo,
+                    name: newLabel,
+                    color: '1d76db',
+                    description: 'Computed RC preview version for this PR',
+                  });
+                } else {
+                  throw err;
+                }
               }
-            }
 
-            const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
-              owner,
-              repo,
-              issue_number,
-            });
-
-            for (const l of currentLabels) {
-              if (l.name.startsWith('@version:') && l.name !== newLabel) {
-                await github.rest.issues.removeLabel({
-                  owner,
-                  repo,
-                  issue_number,
-                  name: l.name,
-                });
-              }
-            }
-
-            if (!currentLabels.some(l => l.name === newLabel)) {
-              await github.rest.issues.addLabels({
+              const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
                 owner,
                 repo,
                 issue_number,
-                labels: [newLabel],
               });
-            }
 
-            core.notice(`PR #${issue_number} version label set to ${newLabel}`);
+              for (const l of currentLabels) {
+                if (l.name.startsWith('@version:') && l.name !== newLabel) {
+                  await github.rest.issues.removeLabel({
+                    owner,
+                    repo,
+                    issue_number,
+                    name: l.name,
+                  });
+                }
+              }
+
+              if (!currentLabels.some(l => l.name === newLabel)) {
+                await github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number,
+                  labels: [newLabel],
+                });
+              }
+
+              core.notice(`PR #${issue_number} version label set to ${newLabel}`);
+            } catch (err) {
+              if (err?.status === 403) {
+                core.warning(`Skipping PR version label update due to token restrictions (403): ${err.message}`);
+                return;
+              }
+              throw err;
+            }
