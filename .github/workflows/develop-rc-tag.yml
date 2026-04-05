@@ -40,11 +40,19 @@ jobs:
           fi
 
           # Stable base comes from latest stable semver tag (no -rc suffix).
-          base_stable="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)"
+          # Important: allow empty result when no stable tags exist yet.
+          base_stable="$({
+            git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | head -n 1;
+          } || true)"
 
           if [[ -z "$base_stable" ]]; then
             workspace_version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
             base_stable="v${workspace_version}"
+            echo "No stable tags found; using workspace version base: ${base_stable}" >&2
+          else
+            echo "Using latest stable tag base: ${base_stable}" >&2
           fi
 
           # Find highest existing rc number for this stable base.
