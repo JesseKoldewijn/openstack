@@ -273,42 +273,15 @@ crates/
 
 ---
 
-## Automated SemVer Versioning
+## Release Automation Status
 
-openstack uses an automated SemVer release-PR flow via `release-plz`.
+Mainline release automation is currently being reworked.
 
-- Release PR workflow: `.github/workflows/release-plz.yml` (pushes to `develop`)
-- Develop RC tagging workflow: `.github/workflows/develop-rc-tag.yml` (pushes to `develop`)
-- Release workflow: `.github/workflows/release.yml` (pushes to `main`)
-- Docker channel policy (`.github/workflows/docker.yml`):
-  - `main` → stable (`stable`, `latest`, + semver tags on `v*.*.*`)
-  - `develop` → RC (`rc`, `rc-<short-sha>`)
-  - `pull_request` → RC preview tags (published for same-repo PRs):
-    - immutable: `v<base-rc>.pr-<number>` (e.g. `v1.0.0-rc-2.pr-33`)
-    - mutable PR pointer: `pr-<number>` (always updated to latest image for that PR)
-    - PR label: `@version:<immutable-tag>` (updated on each PR push via `pr-version-label.yml`)
-    - stale preview versions are cleaned in the same GHCR cleanup cycle
-- Config: `.release-plz.toml`
-- Output: automated release PR(s), version/changelog updates, and SemVer tag/release automation
-- Build metadata propagation:
-  - binary `openstack --version` includes build tag/sha when provided by CI
-  - internal API exposes `version_display` and structured `build` metadata
+- Legacy `release-plz`/RC helper workflows were removed from `main`.
+- CI and Docker workflows remain active.
+- Use PR checks as merge gates (`Required checks (main target)` / `Required checks (non-main target)`).
 
-Conventional commit guidance (used for SemVer bump decisions):
-
-- `feat: ...` → **minor**
-- `fix: ...` / `perf: ...` → **patch**
-- `feat!: ...` or `BREAKING CHANGE:` footer → **major**
-
-Example:
-
-```text
-feat(gateway): add virtual-hosted-style S3 rewrite
-fix(studio): avoid duplicate transaction rows
-feat!: remove deprecated config field
-```
-
-See also: [`docs/semver-release.md`](docs/semver-release.md) for full human/agent release guidance.
+See also: [`docs/semver-release.md`](docs/semver-release.md) for current release notes and migration status.
 
 ## Development
 

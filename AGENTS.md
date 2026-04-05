@@ -73,14 +73,9 @@ SemVer mapping:
 
 ## Release automation context (for agents)
 
-- Release PR automation: `.github/workflows/release-plz.yml` (develop)
-- Develop RC tagging: `.github/workflows/develop-rc-tag.yml` (develop)
-- Release execution: `.github/workflows/release.yml` (main)
-- Docker channels: `.github/workflows/docker.yml`
-  - main = stable (`stable`, `latest` + semver tags)
-  - develop = RC (`rc`, `rc-<short-sha>`)
-  - pull_request = RC preview style (`v<base-rc>.pr-<number>` + mutable `pr-<number>`, same-repo PRs)
+- Legacy `release-plz`/RC helper workflows were removed from `main`.
+- CI and Docker workflows remain the required source of truth for merge safety.
 - Tag build pipeline: `.github/workflows/cross-compile.yml` (`v*.*.*` tags)
 
 When preparing PRs, keep titles semantic and avoid vague titles like "updates".
-Refer to `docs/semver-release.md` for full details.
+Refer to `docs/semver-release.md` for current release-flow status.
