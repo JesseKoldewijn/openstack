@@ -58,3 +58,63 @@ jobs:
           config: .release-plz.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup-stale-release-plz-branches:
+    name: Cleanup stale release-plz branches
+    if: always()
+    needs: [release-pr]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Delete release-plz-* branches without open PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Gather open PR head branches first.
+            const openHeadBranches = new Set();
+            for await (const res of github.paginate.iterator(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            })) {
+              for (const pr of res.data) {
+                if (pr.head?.repo?.full_name === `${owner}/${repo}` && pr.head?.ref) {
+                  openHeadBranches.add(pr.head.ref);
+                }
+              }
+            }
+
+            // List candidate branches.
+            const branches = await github.paginate(github.rest.repos.listBranches, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+
+            const candidates = branches
+              .map(b => b.name)
+              .filter(name => name.startsWith('release-plz-'));
+
+            let deleted = 0;
+            for (const branch of candidates) {
+              if (openHeadBranches.has(branch)) {
+                core.info(`Keeping ${branch}: linked to open PR`);
+                continue;
+              }
+
+              await github.rest.git.deleteRef({
+                owner,
+                repo,
+                ref: `heads/${branch}`,
+              });
+              core.notice(`Deleted stale branch: ${branch}`);
+              deleted += 1;
+            }
+
+            core.notice(`Cleanup complete. Deleted ${deleted} stale release-plz branch(es).`);

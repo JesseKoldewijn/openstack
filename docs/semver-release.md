@@ -48,7 +48,9 @@ Release channels:
   - Trigger: push to `develop`
   - Command: `release-plz release-pr`
   - Output: release PR with version/changelog updates
-  - Guardrail: auto-creates required PR labels (`release`, `semver`) before running
+  - Guardrails:
+    - auto-creates required PR labels (`release`, `semver`) before running
+    - cleans up stale `release-plz-*` branches that are not linked to open PRs
 
 - **Develop RC tag automation**: `.github/workflows/develop-rc-tag.yml`
   - Trigger: push to `develop`
