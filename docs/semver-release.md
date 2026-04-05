@@ -35,7 +35,8 @@ feat!: remove deprecated localstack_host fallback
 Release channels:
 - `main` = **stable** channel (container tags `stable`, `latest`)
 - `develop` = **RC** channel (container tags `rc`, `rc-<short-sha>`)
-- `pull_request` = **RC preview** tag style (`rc-pr-<short-sha>`, same-repo PRs)
+- `pull_request` = **RC preview** tag style (`v<base-rc>.pr-<short-sha>`, same-repo PRs)
+  - example: `v1.0.0-rc-1.pr-a1b2c3d`
   - preview tags are ephemeral and removed during the workflow cleanup cycle
 
 ## Workflows
@@ -55,7 +56,7 @@ Release channels:
   - Output:
     - `main`: `stable`, `latest` (+ semver tags on tag events)
     - `develop`: `rc`, `rc-<short-sha>`
-    - `pull_request`: `rc-pr-<short-sha>` preview tag style (same-repo PRs)
+    - `pull_request`: `v<base-rc>.pr-<short-sha>` preview tag style (same-repo PRs)
 
 - **Tag-based builds**: `.github/workflows/cross-compile.yml`
   - Trigger: `v*.*.*` tags

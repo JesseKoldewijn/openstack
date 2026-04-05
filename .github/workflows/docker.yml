@@ -39,7 +39,35 @@ jobs:
     outputs:
       tags: ${{ steps.meta.outputs.tags }}
       labels: ${{ steps.meta.outputs.labels }}
+      pr_rc_tag: ${{ steps.pr_rc.outputs.pr_rc_tag }}
     steps:
+      - name: Checkout (for tag discovery)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute PR RC preview tag
+        id: pr_rc
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --tags --force >/dev/null 2>&1 || true
+
+          # Base PR preview tags on the latest rc tag available in the repo.
+          # Example output: v1.0.0-rc-1.pr-abc1234
+          base_rc_tag="$(git tag --list 'v*-rc-*' --sort=-version:refname | head -n 1)"
+
+          if [[ -z "$base_rc_tag" ]]; then
+            workspace_version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
+            base_rc_tag="v${workspace_version}-rc-1"
+          fi
+
+          short_sha="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
+          pr_rc_tag="${base_rc_tag}.pr-${short_sha}"
+
+          echo "pr_rc_tag=${pr_rc_tag}" >> "$GITHUB_OUTPUT"
+          echo "Computed PR RC tag: ${pr_rc_tag}"
+
       - name: Extract Docker metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
@@ -57,7 +85,7 @@ jobs:
             type=raw,value=rc,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
             type=sha,format=short,prefix=rc-,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
             # PR RC preview tags (rc-based with commit hash suffix)
-            type=sha,format=short,prefix=rc-pr-,enable=${{ github.event_name == 'pull_request' }}
+            type=raw,value=${{ steps.pr_rc.outputs.pr_rc_tag }},enable=${{ github.event_name == 'pull_request' }}
           labels: |
             org.opencontainers.image.title=openstack
             org.opencontainers.image.description=A Rust-based LocalStack drop-in replacement
@@ -219,11 +247,9 @@ jobs:
             "ci-${{ github.sha }}-arm64"
           )
 
-          # PR preview channel tags are ephemeral: remove them in the same
-          # cleanup cycle as staging tags.
+          short_sha=""
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             short_sha="$(printf '%s' "${{ github.sha }}" | cut -c1-7)"
-            tags_to_cleanup+=("rc-pr-${short_sha}")
           fi
 
           for TAG in "${tags_to_cleanup[@]}"; do
@@ -243,3 +269,25 @@ jobs:
               echo "  Tag ${TAG} not found — skipping." >&2
             fi
           done
+
+          # PR preview tags follow: vX.Y.Z-rc-N.pr-<shortsha>
+          # Remove any tag ending with .pr-<shortsha> in this cleanup cycle.
+          if [[ -n "$short_sha" ]]; then
+            echo "Looking up PR preview tags ending with .pr-${short_sha}" >&2
+            VERSION_IDS=$(gh api \
+              "/users/${OWNER}/packages/container/${PACKAGE_NAME}/versions" \
+              --paginate \
+              --jq ".[] | select(any(.metadata.container.tags[]?; test(\"\\.pr-${short_sha}$\"))) | .id")
+
+            if [[ -n "$VERSION_IDS" ]]; then
+              while IFS= read -r VERSION_ID; do
+                [[ -z "$VERSION_ID" ]] && continue
+                echo "Deleting PR preview version ${VERSION_ID} (.pr-${short_sha})" >&2
+                gh api -X DELETE \
+                  "/users/${OWNER}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID}" \
+                  && echo "  Deleted." >&2 || echo "  Failed to delete." >&2
+              done <<< "$VERSION_IDS"
+            else
+              echo "No PR preview versions found for .pr-${short_sha}" >&2
+            fi
+          fi
