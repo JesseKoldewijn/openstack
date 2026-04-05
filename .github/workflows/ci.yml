@@ -20,12 +20,32 @@ env:
   PARITY_MOTO_IMAGE: motoserver/moto:5.1.22
   PARITY_DOCKER_NETWORK_MODE: bridge
   OHA_VERSION: 1.14.0
+  OPENSTACK_BUILD_TAG: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  OPENSTACK_BUILD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
+  semver-pr-title:
+    name: SemVer PR Title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title (Conventional Commit style)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          pattern='^(feat|fix|chore|refactor|test|docs|perf|ci)(\([^)]+\))?!?: .+'
+          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
+            echo "Invalid PR title: '$PR_TITLE'"
+            echo "Expected format: type(scope?): description"
+            echo "Examples: 'feat(gateway): add X', 'fix: correct Y', 'feat!: remove Z'"
+            exit 1
+          fi
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -594,6 +614,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       [
+        semver-pr-title,
         fmt,
         clippy,
         test,
@@ -617,6 +638,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       [
+        semver-pr-title,
         fmt,
         clippy,
         test,
@@ -640,6 +662,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       [
+        semver-pr-title,
         fmt,
         clippy,
         test,
@@ -681,6 +704,7 @@ jobs:
               "",
               "| Check | Result |",
               "|---|---|",
+              f"| SemVer PR Title | `{os.environ.get('SEMVER_TITLE_RESULT', 'unknown')}` |",
               f"| Rustfmt | `{os.environ.get('FMT_RESULT', 'unknown')}` |",
               f"| Clippy | `{os.environ.get('CLIPPY_RESULT', 'unknown')}` |",
               f"| Tests | `{os.environ.get('TEST_RESULT', 'unknown')}` |",
@@ -727,6 +751,7 @@ jobs:
               out.write(content + "\n")
           PY
         env:
+          SEMVER_TITLE_RESULT: ${{ needs.semver-pr-title.result }}
           FMT_RESULT: ${{ needs.fmt.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           TEST_RESULT: ${{ needs.test.result }}

@@ -18,6 +18,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  OPENSTACK_BUILD_TAG: ${{ github.ref_name }}
+  OPENSTACK_BUILD_SHA: ${{ github.sha }}
 
 jobs:
   cross-compile:

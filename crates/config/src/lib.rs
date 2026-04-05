@@ -1,6 +1,7 @@
 pub mod directories;
 pub mod logging;
 pub mod services;
+pub mod version;
 
 use std::net::SocketAddr;
 use std::time::Duration;

@@ -13,6 +13,12 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /build
 
+# Build metadata injected by CI/workflows and embedded into the binary.
+ARG OPENSTACK_BUILD_TAG=""
+ARG OPENSTACK_BUILD_SHA=""
+ENV OPENSTACK_BUILD_TAG=${OPENSTACK_BUILD_TAG}
+ENV OPENSTACK_BUILD_SHA=${OPENSTACK_BUILD_SHA}
+
 # Cache dependency compilation separately from source compilation.
 # Copy only manifests first.
 COPY Cargo.toml Cargo.lock ./
