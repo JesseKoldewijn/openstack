@@ -105,6 +105,7 @@ Do not attempt to merge a PR while any required check is pending or failing.
 ## Release pipeline
 
 - `release-plz` release PR automation runs on pushes to `develop`
+- develop RC tagging automation runs on pushes to `develop` (`v<stable>-rc-<n>`)
 - release automation runs on pushes to `main`
 - docker release channels:
   - `main` = stable (`stable`, `latest` + semver tags)

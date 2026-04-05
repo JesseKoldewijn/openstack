@@ -48,6 +48,15 @@ Release channels:
   - Trigger: push to `develop`
   - Command: `release-plz release-pr`
   - Output: release PR with version/changelog updates
+  - Guardrail: auto-creates required PR labels (`release`, `semver`) before running
+
+- **Develop RC tag automation**: `.github/workflows/develop-rc-tag.yml`
+  - Trigger: push to `develop`
+  - Output: next RC tag on current develop head (`v<stable>-rc-<n>`)
+
+- **PR version label automation**: `.github/workflows/pr-version-label.yml`
+  - Trigger: PR opened/synchronized/reopened
+  - Output: updates PR label `@version:v<base-rc>.pr-<number>`
 
 - **Release automation**: `.github/workflows/release.yml`
   - Trigger: push to `main` (or manual)
@@ -55,7 +64,7 @@ Release channels:
   - Output: git tag(s) + GitHub release(s)
 
 - **Docker publishing**: `.github/workflows/docker.yml`
-  - Trigger: `main`, `develop`, pull requests, and semver tags `v*.*.*`
+  - Trigger: `main`, `develop`, pull requests, and semver/rc tags `v*.*.*`
   - Output:
     - `main`: `stable`, `latest` (+ semver tags on tag events)
     - `develop`: `rc`, `rc-<short-sha>`
