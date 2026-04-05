@@ -1,0 +1,130 @@
+name: Update RC Badge
+
+on:
+  push:
+    branches: ["develop"]
+    tags: ["v*-rc-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc-badge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update-rc-badge:
+    name: Publish latest RC badge JSON
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update rc badge endpoint JSON on gh-pages
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const parseRc = (tag) => {
+              const m = /^v(\d+)\.(\d+)\.(\d+)-rc-(\d+)$/.exec(tag);
+              if (!m) return null;
+              return {
+                tag,
+                major: Number(m[1]),
+                minor: Number(m[2]),
+                patch: Number(m[3]),
+                rc: Number(m[4]),
+              };
+            };
+
+            const cmpDesc = (a, b) => {
+              if (a.major !== b.major) return b.major - a.major;
+              if (a.minor !== b.minor) return b.minor - a.minor;
+              if (a.patch !== b.patch) return b.patch - a.patch;
+              return b.rc - a.rc;
+            };
+
+            // Collect tags (up to 1000 via pagination; enough for this repo scale).
+            const tags = await github.paginate(github.rest.repos.listTags, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+
+            const rcTags = tags
+              .map(t => t.name)
+              .map(parseRc)
+              .filter(Boolean)
+              .sort(cmpDesc);
+
+            const latestRc = rcTags[0]?.tag ?? 'none';
+            const badge = {
+              schemaVersion: 1,
+              label: 'rc tag',
+              message: latestRc,
+              color: latestRc === 'none' ? 'lightgrey' : 'orange',
+            };
+            const content = JSON.stringify(badge, null, 2) + '\n';
+            const path = 'badges/rc.json';
+            const branch = 'gh-pages';
+
+            // Ensure gh-pages branch exists.
+            let branchExists = true;
+            try {
+              await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+            } catch (err) {
+              if (err.status === 404) {
+                branchExists = false;
+              } else {
+                throw err;
+              }
+            }
+
+            if (!branchExists) {
+              const repoData = await github.rest.repos.get({ owner, repo });
+              const defaultBranch = repoData.data.default_branch;
+              const baseRef = await github.rest.git.getRef({ owner, repo, ref: `heads/${defaultBranch}` });
+              await github.rest.git.createRef({
+                owner,
+                repo,
+                ref: `refs/heads/${branch}`,
+                sha: baseRef.data.object.sha,
+              });
+              core.notice(`Created ${branch} branch from ${defaultBranch}`);
+            }
+
+            // Read current file (if any) to avoid empty churn commits.
+            let sha;
+            try {
+              const existing = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
+              if (!Array.isArray(existing.data) && existing.data.type === 'file') {
+                sha = existing.data.sha;
+                const prev = Buffer.from(existing.data.content, 'base64').toString('utf8');
+                if (prev === content) {
+                  core.notice(`No change: latest RC badge already ${latestRc}`);
+                  return;
+                }
+              }
+            } catch (err) {
+              if (err.status !== 404) throw err;
+            }
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner,
+              repo,
+              path,
+              message: `chore(badges): update rc badge to ${latestRc}`,
+              content: Buffer.from(content, 'utf8').toString('base64'),
+              branch,
+              sha,
+              committer: {
+                name: 'github-actions[bot]',
+                email: '41898282+github-actions[bot]@users.noreply.github.com',
+              },
+              author: {
+                name: 'github-actions[bot]',
+                email: '41898282+github-actions[bot]@users.noreply.github.com',
+              },
+            });
+
+            core.notice(`Updated rc badge to ${latestRc}`);

@@ -104,13 +104,13 @@ Do not attempt to merge a PR while any required check is pending or failing.
 
 ## Release pipeline
 
-- semantic-release runs on pushes to `main` and `develop`
-  - `main` publishes stable releases
-  - `develop` publishes beta/canary prereleases
+- `release-plz` release PR automation runs on pushes to `develop`
+- develop RC tagging automation runs on pushes to `develop` (`v<stable>-rc-<n>`)
+- release automation runs on pushes to `main`
 - docker release channels:
-  - `main` = stable (`stable`, `latest`)
-  - `develop` = beta (`beta`, `beta-<short-sha>`)
-  - `pull_request` = validation build only (no published tags)
-- tag-driven binary builds run on `v*` tags
+  - `main` = stable (`stable`, `latest` + semver tags)
+  - `develop` = RC (`rc`, `rc-<short-sha>`)
+  - `pull_request` = RC preview tags (`v<base-rc>.pr-<number>` + mutable `pr-<number>`, same-repo PRs)
+- tag-driven binary builds run on `v*.*.*` tags
 
 See [`docs/semver-release.md`](docs/semver-release.md) for the full release flow and token requirements.
