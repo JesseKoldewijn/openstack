@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/JesseKoldewijn/openstack/compare/v0.1.2...v0.1.3) - 2026-04-05
+
+### Added
+
+- finalize native HTTP parity readiness ([#6](https://github.com/JesseKoldewijn/openstack/pull/6))
+
+### Other
+
+- *(release)* release-plz
+- *(release)* release-plz
+- project initialization
+
 ## [0.1.2](https://github.com/JesseKoldewijn/openstack/compare/v0.1.1...v0.1.2) - 2026-04-05
 
 ### Added
