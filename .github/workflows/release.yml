@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.ref == 'refs/heads/main'
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'chore(release): release-plz')) }}
     name: Run release-plz release
     runs-on: ubuntu-latest
     steps:
@@ -73,4 +73,20 @@ jobs:
             echo "## Release workflow"
             echo ""
             echo "Skipped release-plz: tag already exists (\`${{ steps.preflight.outputs.target_tag }}\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release-skipped:
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch' && !contains(github.event.head_commit.message, 'chore(release): release-plz') }}
+    name: Skip release (non release-plz merge)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain skip
+        run: |
+          {
+            echo "## Release workflow"
+            echo ""
+            echo "Skipped: head commit is not a merged release-plz PR."
+            echo ""
+            echo "Commit message:"
+            echo "\`${{ github.event.head_commit.message }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
