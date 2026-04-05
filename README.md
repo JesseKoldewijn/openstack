@@ -277,6 +277,9 @@ openstack uses an automated SemVer release-PR flow via `release-plz`.
 
 - Release PR workflow: `.github/workflows/release-plz.yml` (pushes to `develop`)
 - Release workflow: `.github/workflows/release.yml` (pushes to `main`)
+- Docker channel policy (`.github/workflows/docker.yml`):
+  - `main` → stable (`latest` + semver tags on `v*.*.*`)
+  - `develop` → RC (`rc`, `rc-<short-sha>`)
 - Config: `.release-plz.toml`
 - Output: automated release PR(s), version/changelog updates, and SemVer tag/release automation
 

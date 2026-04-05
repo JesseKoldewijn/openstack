@@ -106,6 +106,9 @@ Do not attempt to merge a PR while any required check is pending or failing.
 
 - `release-plz` release PR automation runs on pushes to `develop`
 - release automation runs on pushes to `main`
+- docker release channels:
+  - `main` = stable (`latest` + semver tags)
+  - `develop` = RC (`rc`, `rc-<short-sha>`)
 - tag-driven binary builds run on `v*.*.*` tags
 
 See [`docs/semver-release.md`](docs/semver-release.md) for the full release flow and token requirements.

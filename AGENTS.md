@@ -75,6 +75,9 @@ SemVer mapping:
 
 - Release PR automation: `.github/workflows/release-plz.yml` (develop)
 - Release execution: `.github/workflows/release.yml` (main)
+- Docker channels: `.github/workflows/docker.yml`
+  - main = stable (`latest` + semver tags)
+  - develop = RC (`rc`, `rc-<short-sha>`)
 - Tag build pipeline: `.github/workflows/cross-compile.yml` (`v*.*.*` tags)
 
 When preparing PRs, keep titles semantic and avoid vague titles like "updates".

@@ -30,7 +30,11 @@ feat!: remove deprecated localstack_host fallback
 - Feature/fix work lands in `develop` via PR.
 - `release-plz` creates/updates a release PR from `develop` changes.
 - `develop` is promoted to `main` via merge commit.
-- Release automation on `main` creates tags/releases.
+- Release automation on `main` creates stable tags/releases.
+
+Release channels:
+- `main` = **stable** channel
+- `develop` = **RC** channel (container tags `rc` + `rc-<short-sha>`)
 
 ## Workflows
 
@@ -43,6 +47,12 @@ feat!: remove deprecated localstack_host fallback
   - Trigger: push to `main` (or manual)
   - Command: `release-plz release`
   - Output: git tag(s) + GitHub release(s)
+
+- **Docker publishing**: `.github/workflows/docker.yml`
+  - Trigger: `main`, `develop`, and semver tags `v*.*.*`
+  - Output:
+    - `main`: `latest` (+ semver tags on tag events)
+    - `develop`: `rc`, `rc-<short-sha>`
 
 - **Tag-based builds**: `.github/workflows/cross-compile.yml`
   - Trigger: `v*.*.*` tags
