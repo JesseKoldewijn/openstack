@@ -271,6 +271,29 @@ crates/
 
 ---
 
+## Automated SemVer Versioning
+
+openstack uses an automated SemVer release-PR flow via `release-plz`.
+
+- Workflow: `.github/workflows/release-plz.yml`
+- Config: `.release-plz.toml`
+- Trigger: pushes to `main` (or manual `workflow_dispatch`)
+- Output: a release PR that bumps versions + changelog using conventional commit semantics
+
+Conventional commit guidance (used for SemVer bump decisions):
+
+- `feat: ...` → **minor**
+- `fix: ...` / `perf: ...` → **patch**
+- `feat!: ...` or `BREAKING CHANGE:` footer → **major**
+
+Example:
+
+```text
+feat(gateway): add virtual-hosted-style S3 rewrite
+fix(studio): avoid duplicate transaction rows
+feat!: remove deprecated config field
+```
+
 ## Development
 
 ```bash
