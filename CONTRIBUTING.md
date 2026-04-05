@@ -79,13 +79,23 @@ The merge strategy depends on the target branch:
 | PR target | Strategy | Why |
 |-----------|----------|-----|
 | `develop` | **Squash and merge** | Keeps `develop` history clean — one commit per PR. |
-| `main` | **Create a merge commit** | Preserves original commit SHAs from `develop`. Never squash or rebase. |
+| `main` | **Fast-forward only** | Guarantees `develop` is always ahead of or equal to `main`. |
 
-### Why not rebase for `develop` → `main`?
+### `develop` → `main` promotion (fast-forward only)
 
-GitHub's "Rebase and merge" button replays commits and creates new commit objects with different SHAs. Both branches then have the same content but diverged histories, which causes spurious merge conflicts the next time a `develop` → `main` PR is opened.
+Do **not** use GitHub PR merge buttons for `main` promotion.
 
-"Create a merge commit" preserves the original commit SHAs from `develop` and adds a single merge commit on top of `main`. Git can then identify the shared history correctly and future syncs are conflict-free.
+Use:
+
+```bash
+git fetch origin
+git checkout main
+git reset --hard origin/main
+git merge --ff-only origin/develop
+git push origin main
+```
+
+If `git merge --ff-only` fails, `main` has drifted and must be reconciled before promotion.
 
 ---
 
@@ -104,13 +114,10 @@ Do not attempt to merge a PR while any required check is pending or failing.
 
 ## Release pipeline
 
-- `release-plz` release PR automation runs on pushes to `develop`
-- develop RC tagging automation runs on pushes to `develop` (`v<stable>-rc-<n>`)
-- release automation runs on pushes to `main`
-- docker release channels:
-  - `main` = stable (`stable`, `latest` + semver tags)
-  - `develop` = RC (`rc`, `rc-<short-sha>`)
-  - `pull_request` = RC preview tags (`v<base-rc>.pr-<number>` + mutable `pr-<number>`, same-repo PRs)
+Release automation is currently being reworked on `main`.
+
+- legacy `release-plz`/RC helper workflows were removed
+- CI and Docker pipelines remain active and required
 - tag-driven binary builds run on `v*.*.*` tags
 
-See [`docs/semver-release.md`](docs/semver-release.md) for the full release flow and token requirements.
+See [`docs/semver-release.md`](docs/semver-release.md) for current release-flow status.

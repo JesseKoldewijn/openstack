@@ -67,20 +67,20 @@ SemVer mapping:
 - Do not force-push to `main` without explicit maintainer approval
 - Merge strategy depends on target branch:
   - **PRs → `develop`**: use **Squash and merge** — one clean commit per PR on `develop`.
-  - **`develop` → `main`**: use **Create a merge commit** — never squash, never rebase.
-    GitHub's "Rebase and merge" button rewrites commit SHAs, causing false conflicts on the next
-    sync. Always use "Create a merge commit" when merging `develop` into `main`.
+  - **`develop` → `main`**: **fast-forward only** (no PR merge button).
+    - Do not squash/rebase/merge-commit into `main`.
+    - Promotion procedure:
+      1. `git fetch origin`
+      2. `git checkout main && git reset --hard origin/main`
+      3. `git merge --ff-only origin/develop`
+      4. `git push origin main`
+    This guarantees `develop` is always ahead of or equal to `main`.
 
 ## Release automation context (for agents)
 
-- Release PR automation: `.github/workflows/release-plz.yml` (develop)
-- Develop RC tagging: `.github/workflows/develop-rc-tag.yml` (develop)
-- Release execution: `.github/workflows/release.yml` (main)
-- Docker channels: `.github/workflows/docker.yml`
-  - main = stable (`stable`, `latest` + semver tags)
-  - develop = RC (`rc`, `rc-<short-sha>`)
-  - pull_request = RC preview style (`v<base-rc>.pr-<number>` + mutable `pr-<number>`, same-repo PRs)
+- Legacy `release-plz`/RC helper workflows were removed from `main`.
+- CI and Docker workflows remain the required source of truth for merge safety.
 - Tag build pipeline: `.github/workflows/cross-compile.yml` (`v*.*.*` tags)
 
 When preparing PRs, keep titles semantic and avoid vague titles like "updates".
-Refer to `docs/semver-release.md` for full details.
+Refer to `docs/semver-release.md` for current release-flow status.
