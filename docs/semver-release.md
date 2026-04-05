@@ -62,6 +62,7 @@ Release channels:
 
 - **Release automation**: `.github/workflows/release.yml`
   - Trigger: push to `main` (or manual)
+  - Guard: on push events, runs only when the head commit message indicates a merged release-plz PR (`chore(release): release-plz`)
   - Command: `release-plz release`
   - Output: git tag(s) + GitHub release(s)
 
