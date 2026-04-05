@@ -36,9 +36,10 @@ Release channels:
 - `main` = **stable** channel (container tags `stable`, `latest`)
 - `develop` = **RC** channel (container tags `rc`, `rc-<short-sha>`)
 - `pull_request` = **RC preview** tags (same-repo PRs)
-  - immutable: `v<base-rc>.pr-<short-sha>`
+  - immutable: `v<base-rc>.pr-<number>`
   - mutable per-PR pointer: `pr-<number>` (updated on each PR build)
-  - example immutable tag: `v1.0.0-rc-1.pr-a1b2c3d`
+  - PR label: `@version:<immutable-tag>` (replaced/updated on each PR push)
+  - example immutable tag: `v1.0.0-rc-2.pr-33`
   - stale preview versions are removed during the workflow cleanup cycle
 
 ## Workflows
@@ -58,7 +59,7 @@ Release channels:
   - Output:
     - `main`: `stable`, `latest` (+ semver tags on tag events)
     - `develop`: `rc`, `rc-<short-sha>`
-    - `pull_request`: `v<base-rc>.pr-<short-sha>` + `pr-<number>` (same-repo PRs)
+    - `pull_request`: `v<base-rc>.pr-<number>` + `pr-<number>` (same-repo PRs)
   - Passes `OPENSTACK_BUILD_TAG` / `OPENSTACK_BUILD_SHA` build args into Docker builds so binary version output and API metadata match image channel/tag identity.
 
 - **Tag-based builds**: `.github/workflows/cross-compile.yml`
