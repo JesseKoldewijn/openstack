@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 concurrency:
   group: release-plz-${{ github.ref }}
@@ -25,6 +26,30 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Ensure release labels exist
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const labels = [
+              { name: 'release', color: '0e8a16', description: 'Release automation PR' },
+              { name: 'semver', color: '1d76db', description: 'SemVer-driven change' },
+            ];
+
+            for (const l of labels) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: l.name });
+              } catch (err) {
+                if (err.status === 404) {
+                  await github.rest.issues.createLabel({ owner, repo, ...l });
+                  core.notice(`Created missing label: ${l.name}`);
+                } else {
+                  throw err;
+                }
+              }
+            }
 
       - name: Run release-plz (release-pr)
         uses: release-plz/action@v0.5

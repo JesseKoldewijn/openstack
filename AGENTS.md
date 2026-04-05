@@ -74,6 +74,7 @@ SemVer mapping:
 ## Release automation context (for agents)
 
 - Release PR automation: `.github/workflows/release-plz.yml` (develop)
+- Develop RC tagging: `.github/workflows/develop-rc-tag.yml` (develop)
 - Release execution: `.github/workflows/release.yml` (main)
 - Docker channels: `.github/workflows/docker.yml`
   - main = stable (`stable`, `latest` + semver tags)

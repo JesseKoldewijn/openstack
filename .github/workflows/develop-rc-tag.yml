@@ -1,0 +1,69 @@
+name: Develop RC Tag
+
+on:
+  push:
+    branches: ["develop"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: develop-rc-tag-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  create-rc-tag:
+    name: Create RC tag for develop head
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute and push next RC tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force >/dev/null 2>&1 || true
+
+          # Skip if this commit is already tagged as an RC.
+          existing_for_head="$(git tag --points-at HEAD 'v*-rc-*' | head -n 1)"
+          if [[ -n "$existing_for_head" ]]; then
+            echo "HEAD already has RC tag: $existing_for_head"
+            exit 0
+          fi
+
+          # Stable base comes from latest stable semver tag (no -rc suffix).
+          base_stable="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)"
+
+          if [[ -z "$base_stable" ]]; then
+            workspace_version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
+            base_stable="v${workspace_version}"
+          fi
+
+          # Find highest existing rc number for this stable base.
+          highest=0
+          while IFS= read -r t; do
+            [[ -z "$t" ]] && continue
+            n="${t##*-rc-}"
+            if [[ "$n" =~ ^[0-9]+$ ]] && (( n > highest )); then
+              highest="$n"
+            fi
+          done < <(git tag --list "${base_stable}-rc-*" --sort=-version:refname)
+
+          next=$((highest + 1))
+          new_tag="${base_stable}-rc-${next}"
+
+          echo "Creating RC tag: ${new_tag}"
+          git tag -a "$new_tag" -m "RC release ${new_tag}"
+          git push origin "$new_tag"
+
+          {
+            echo "## Develop RC tag"
+            echo ""
+            echo "Created: \\`${new_tag}\\`"
+          } >> "$GITHUB_STEP_SUMMARY"
