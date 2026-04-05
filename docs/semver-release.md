@@ -33,8 +33,9 @@ feat!: remove deprecated localstack_host fallback
 - Release automation on `main` creates stable tags/releases.
 
 Release channels:
-- `main` = **stable** channel
-- `develop` = **RC** channel (container tags `rc` + `rc-<short-sha>`)
+- `main` = **stable** channel (container tags `stable`, `latest`)
+- `develop` = **RC** channel (container tags `rc`, `rc-<short-sha>`)
+- `pull_request` = **RC preview** tag style (`rc-pr-<short-sha>`, same-repo PRs)
 
 ## Workflows
 
@@ -49,10 +50,11 @@ Release channels:
   - Output: git tag(s) + GitHub release(s)
 
 - **Docker publishing**: `.github/workflows/docker.yml`
-  - Trigger: `main`, `develop`, and semver tags `v*.*.*`
+  - Trigger: `main`, `develop`, pull requests, and semver tags `v*.*.*`
   - Output:
-    - `main`: `latest` (+ semver tags on tag events)
+    - `main`: `stable`, `latest` (+ semver tags on tag events)
     - `develop`: `rc`, `rc-<short-sha>`
+    - `pull_request`: `rc-pr-<short-sha>` preview tag style (same-repo PRs)
 
 - **Tag-based builds**: `.github/workflows/cross-compile.yml`
   - Trigger: `v*.*.*` tags
