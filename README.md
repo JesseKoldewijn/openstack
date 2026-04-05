@@ -280,8 +280,10 @@ openstack uses an automated SemVer release-PR flow via `release-plz`.
 - Docker channel policy (`.github/workflows/docker.yml`):
   - `main` → stable (`stable`, `latest`, + semver tags on `v*.*.*`)
   - `develop` → RC (`rc`, `rc-<short-sha>`)
-  - `pull_request` → RC preview tag pattern (`v<base-rc>.pr-<short-sha>`, e.g. `v1.0.0-rc-1.pr-a1b2c3d`, published for same-repo PRs)
-    - preview tags are ephemeral and cleaned in the same GHCR cleanup cycle
+  - `pull_request` → RC preview tags (published for same-repo PRs):
+    - immutable: `v<base-rc>.pr-<short-sha>` (e.g. `v1.0.0-rc-1.pr-a1b2c3d`)
+    - mutable PR pointer: `pr-<number>` (always updated to latest image for that PR)
+    - stale preview versions are cleaned in the same GHCR cleanup cycle
 - Config: `.release-plz.toml`
 - Output: automated release PR(s), version/changelog updates, and SemVer tag/release automation
 

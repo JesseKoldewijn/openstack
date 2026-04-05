@@ -109,7 +109,7 @@ Do not attempt to merge a PR while any required check is pending or failing.
 - docker release channels:
   - `main` = stable (`stable`, `latest` + semver tags)
   - `develop` = RC (`rc`, `rc-<short-sha>`)
-  - `pull_request` = RC preview tag style (`v<base-rc>.pr-<short-sha>`, same-repo PRs)
+  - `pull_request` = RC preview tags (`v<base-rc>.pr-<short-sha>` + mutable `pr-<number>`, same-repo PRs)
 - tag-driven binary builds run on `v*.*.*` tags
 
 See [`docs/semver-release.md`](docs/semver-release.md) for the full release flow and token requirements.
