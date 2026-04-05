@@ -78,7 +78,7 @@ SemVer mapping:
 - Docker channels: `.github/workflows/docker.yml`
   - main = stable (`stable`, `latest` + semver tags)
   - develop = RC (`rc`, `rc-<short-sha>`)
-  - pull_request = RC preview style (`v<base-rc>.pr-<short-sha>` + mutable `pr-<number>`, same-repo PRs)
+  - pull_request = RC preview style (`v<base-rc>.pr-<number>` + mutable `pr-<number>`, same-repo PRs)
 - Tag build pipeline: `.github/workflows/cross-compile.yml` (`v*.*.*` tags)
 
 When preparing PRs, keep titles semantic and avoid vague titles like "updates".

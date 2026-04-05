@@ -283,7 +283,7 @@ openstack uses an automated SemVer release-PR flow via `release-plz`.
   - `main` → stable (`stable`, `latest`, + semver tags on `v*.*.*`)
   - `develop` → RC (`rc`, `rc-<short-sha>`)
   - `pull_request` → RC preview tags (published for same-repo PRs):
-    - immutable: `v<base-rc>.pr-<short-sha>` (e.g. `v1.0.0-rc-1.pr-a1b2c3d`)
+    - immutable: `v<base-rc>.pr-<number>` (e.g. `v1.0.0-rc-2.pr-33`)
     - mutable PR pointer: `pr-<number>` (always updated to latest image for that PR)
     - PR label: `@version:<immutable-tag>` (updated on each PR push)
     - stale preview versions are cleaned in the same GHCR cleanup cycle

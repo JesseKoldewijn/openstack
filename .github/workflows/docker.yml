@@ -57,7 +57,7 @@ jobs:
           git fetch --tags --force >/dev/null 2>&1 || true
 
           # Base PR preview tags on the latest rc tag available in the repo.
-          # Example output: v1.0.0-rc-1.pr-abc1234
+          # Example output: v1.0.0-rc-1.pr-32
           base_rc_tag="$(git tag --list 'v*-rc-*' --sort=-version:refname | head -n 1)"
 
           if [[ -z "$base_rc_tag" ]]; then
@@ -65,9 +65,9 @@ jobs:
             base_rc_tag="v${workspace_version}-rc-1"
           fi
 
-          short_sha="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
-          pr_rc_tag="${base_rc_tag}.pr-${short_sha}"
-          pr_latest_tag="pr-${{ github.event.pull_request.number }}"
+          pr_number="${{ github.event.pull_request.number }}"
+          pr_rc_tag="${base_rc_tag}.pr-${pr_number}"
+          pr_latest_tag="pr-${pr_number}"
 
           echo "pr_rc_tag=${pr_rc_tag}" >> "$GITHUB_OUTPUT"
           echo "pr_latest_tag=${pr_latest_tag}" >> "$GITHUB_OUTPUT"
@@ -347,11 +347,11 @@ jobs:
             "ci-${{ github.sha }}-arm64"
           )
 
-          short_sha=""
+          pr_number=""
           current_pr_rc_tag=""
           current_pr_latest_tag=""
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            short_sha="$(printf '%s' "${{ github.sha }}" | cut -c1-7)"
+            pr_number="${{ github.event.pull_request.number }}"
             current_pr_rc_tag="${{ needs.metadata.outputs.pr_rc_tag }}"
             current_pr_latest_tag="${{ needs.metadata.outputs.pr_latest_tag }}"
           fi
@@ -374,16 +374,17 @@ jobs:
             fi
           done
 
-          # PR preview tags follow: vX.Y.Z-rc-N.pr-<shortsha>
+          # PR preview tags follow: vX.Y.Z-rc-N.pr-<pr-number>
           # Keep the current PR image (which carries both current_pr_rc_tag and
           # current_pr_latest_tag), and prune older preview versions for this PR.
-          if [[ -n "$short_sha" ]]; then
-            echo "Looking up stale PR preview tags ending with .pr-*${short_sha}" >&2
+          if [[ -n "$pr_number" ]]; then
+            echo "Looking up stale PR preview tags ending with .pr-${pr_number}" >&2
             VERSION_IDS=$(gh api \
               "/users/${OWNER}/packages/container/${PACKAGE_NAME}/versions" \
               --paginate \
               --jq ".[]
-                | select(any(.metadata.container.tags[]?; test(\"\\.pr-[0-9a-f]{7}$\")))
+                | select(any(.metadata.container.tags[]?; test(\"\\.pr-${pr_number}$\")))
+                | select((.metadata.container.tags | index(\"${current_pr_rc_tag}\")) | not)
                 | select((.metadata.container.tags | index(\"${current_pr_latest_tag}\")) | not)
                 | .id")
 
