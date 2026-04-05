@@ -26,7 +26,9 @@ pub async fn get_diagnose(State(state): State<ApiState>) -> Response {
     let body = json!({
         "info": {
             "implementation": "openstack",
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": openstack_config::version::pkg_version(),
+            "version_display": openstack_config::version::display_version(),
+            "build": openstack_config::version::build_info_json(),
             "session_id": state.session_id,
             "uptime": state.start_time.elapsed().as_secs(),
         },

@@ -1,0 +1,2 @@
+[build.env]
+passthrough = ["OPENSTACK_BUILD_TAG", "OPENSTACK_BUILD_SHA"]

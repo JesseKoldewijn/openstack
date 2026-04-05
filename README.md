@@ -2,6 +2,8 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/JesseKoldewijn/openstack/ci.yml?branch=main&label=CI&logo=github)](https://github.com/JesseKoldewijn/openstack/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/github/actions/workflow/status/JesseKoldewijn/openstack/docker.yml?branch=main&label=Docker&logo=docker&logoColor=white)](https://github.com/JesseKoldewijn/openstack/actions/workflows/docker.yml)
+[![Stable release](https://img.shields.io/github/v/release/JesseKoldewijn/openstack?sort=semver&label=stable%20release)](https://github.com/JesseKoldewijn/openstack/releases)
+[![RC tag](https://img.shields.io/github/v/tag/JesseKoldewijn/openstack?filter=v*-rc-*&label=rc%20tag)](https://github.com/JesseKoldewijn/openstack/tags)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg?logo=rust)](https://www.rust-lang.org)
 [![Docker Image](https://img.shields.io/badge/ghcr.io-JesseKoldewijn%2Fopenstack-blue?logo=github)](https://github.com/JesseKoldewijn/openstack/pkgs/container/openstack)
@@ -270,6 +272,43 @@ crates/
 ```
 
 ---
+
+## Automated SemVer Versioning
+
+openstack uses an automated SemVer release-PR flow via `release-plz`.
+
+- Release PR workflow: `.github/workflows/release-plz.yml` (pushes to `develop`)
+- Develop RC tagging workflow: `.github/workflows/develop-rc-tag.yml` (pushes to `develop`)
+- Release workflow: `.github/workflows/release.yml` (pushes to `main`)
+- Docker channel policy (`.github/workflows/docker.yml`):
+  - `main` → stable (`stable`, `latest`, + semver tags on `v*.*.*`)
+  - `develop` → RC (`rc`, `rc-<short-sha>`)
+  - `pull_request` → RC preview tags (published for same-repo PRs):
+    - immutable: `v<base-rc>.pr-<number>` (e.g. `v1.0.0-rc-2.pr-33`)
+    - mutable PR pointer: `pr-<number>` (always updated to latest image for that PR)
+    - PR label: `@version:<immutable-tag>` (updated on each PR push via `pr-version-label.yml`)
+    - stale preview versions are cleaned in the same GHCR cleanup cycle
+- Config: `.release-plz.toml`
+- Output: automated release PR(s), version/changelog updates, and SemVer tag/release automation
+- Build metadata propagation:
+  - binary `openstack --version` includes build tag/sha when provided by CI
+  - internal API exposes `version_display` and structured `build` metadata
+
+Conventional commit guidance (used for SemVer bump decisions):
+
+- `feat: ...` → **minor**
+- `fix: ...` / `perf: ...` → **patch**
+- `feat!: ...` or `BREAKING CHANGE:` footer → **major**
+
+Example:
+
+```text
+feat(gateway): add virtual-hosted-style S3 rewrite
+fix(studio): avoid duplicate transaction rows
+feat!: remove deprecated config field
+```
+
+See also: [`docs/semver-release.md`](docs/semver-release.md) for full human/agent release guidance.
 
 ## Development
 
