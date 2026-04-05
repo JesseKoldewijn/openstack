@@ -21,7 +21,7 @@ env:
   PARITY_MOTO_IMAGE: motoserver/moto:5.1.22
   PARITY_DOCKER_NETWORK_MODE: bridge
   OHA_VERSION: 1.14.0
-  OPENSTACK_BUILD_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.ref == 'refs/heads/main' && 'stable' || github.ref == 'refs/heads/develop' && 'rc' || github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  OPENSTACK_BUILD_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.ref == 'refs/heads/main' && 'stable' || github.ref == 'refs/heads/develop' && 'beta' || github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
   OPENSTACK_BUILD_SHA: ${{ github.sha }}
 
 permissions:
