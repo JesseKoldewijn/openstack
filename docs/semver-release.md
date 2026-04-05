@@ -54,6 +54,10 @@ Release channels:
   - Trigger: push to `develop`
   - Output: next RC tag on current develop head (`v<stable>-rc-<n>`)
 
+- **PR version label automation**: `.github/workflows/pr-version-label.yml`
+  - Trigger: PR opened/synchronized/reopened
+  - Output: updates PR label `@version:v<base-rc>.pr-<number>`
+
 - **Release automation**: `.github/workflows/release.yml`
   - Trigger: push to `main` (or manual)
   - Command: `release-plz release`
