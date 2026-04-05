@@ -20,8 +20,8 @@ env:
   PARITY_MOTO_IMAGE: motoserver/moto:5.1.22
   PARITY_DOCKER_NETWORK_MODE: bridge
   OHA_VERSION: 1.14.0
-  OPENSTACK_BUILD_TAG: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
-  OPENSTACK_BUILD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+  OPENSTACK_BUILD_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.ref == 'refs/heads/main' && 'stable' || github.ref == 'refs/heads/develop' && 'rc' || github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  OPENSTACK_BUILD_SHA: ${{ github.sha }}
 
 permissions:
   contents: read
@@ -35,9 +35,12 @@ jobs:
     steps:
       - name: Validate PR title (Conventional Commit style)
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          PR_TITLE="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.title')"
           pattern='^(feat|fix|chore|refactor|test|docs|perf|ci)(\([^)]+\))?!?: .+'
           if [[ ! "$PR_TITLE" =~ $pattern ]]; then
             echo "Invalid PR title: '$PR_TITLE'"

@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   release-pr:
+    if: github.ref == 'refs/heads/develop'
     name: Create/Update release PR (develop)
     runs-on: ubuntu-latest
     steps:
@@ -61,7 +62,7 @@ jobs:
 
   cleanup-stale-release-plz-branches:
     name: Cleanup stale release-plz branches
-    if: always()
+    if: always() && github.ref == 'refs/heads/develop'
     needs: [release-pr]
     runs-on: ubuntu-latest
     permissions:

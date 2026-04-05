@@ -10,7 +10,7 @@ pub fn pkg_version() -> &'static str {
 /// Examples:
 /// - stable tag: `v1.2.3`
 /// - rc channel: `rc`
-/// - pr preview: `v1.2.3-rc-4.pr-a1b2c3d`
+/// - pr preview: `v1.2.3-rc-4.pr-123`
 pub fn build_tag() -> Option<&'static str> {
     option_env!("OPENSTACK_BUILD_TAG").and_then(|v| {
         let trimmed = v.trim();
@@ -38,8 +38,8 @@ pub fn build_sha() -> Option<&'static str> {
 ///
 /// Examples:
 /// - `0.1.0`
-/// - `0.1.0 (v1.0.0-rc-1.pr-a1b2c3d)`
-/// - `0.1.0 (v1.0.0-rc-1.pr-a1b2c3d, 8d6aa4f)`
+/// - `0.1.0 (v1.0.0-rc-1.pr-123)`
+/// - `0.1.0 (v1.0.0-rc-1.pr-123, 8d6aa4f)`
 pub fn display_version() -> String {
     match (build_tag(), build_sha()) {
         (Some(tag), Some(sha)) => format!("{} ({tag}, {sha})", pkg_version()),
