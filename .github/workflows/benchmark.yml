@@ -236,14 +236,22 @@ jobs:
           # Memory gate is skipped for the stress profile — RSS usage is
           # intentionally higher under load and has no fixed ceiling there.
           MEMORY_ARG=()
+          P95_MAX=10
+          OP_P95_MAX="s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=400,s3/get_object_10mb=250,s3/put_object_50mb=1600,s3/get_object_50mb=1000,s3/put_object_100mb=2000,s3/get_object_100mb=2000"
+
           if [[ "$BENCH_PROFILE" != "stress" ]]; then
             MEMORY_ARG=(--memory-max 100)
+          else
+            # Stress profile tolerates higher latency variance under heavy load.
+            P95_MAX=25
+            OP_P95_MAX="s3/put_object_1mb=120,s3/get_object_1mb=120,s3/put_object_10mb=700,s3/get_object_10mb=500,s3/put_object_50mb=2600,s3/get_object_50mb=1800,s3/put_object_100mb=3200,s3/get_object_100mb=3200"
           fi
+
           ./tests/bench/bench_gate.sh \
             --report benchmark-report.json \
-            --p95-max 10 \
+            --p95-max "$P95_MAX" \
             "${MEMORY_ARG[@]}" \
-            --op-p95-max "s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=400,s3/get_object_10mb=250,s3/put_object_50mb=1600,s3/get_object_50mb=1000,s3/put_object_100mb=2000,s3/get_object_100mb=2000" \
+            --op-p95-max "$OP_P95_MAX" \
             --output benchmark-gate.json
       - name: Benchmark report
         if: always()
