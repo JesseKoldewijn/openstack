@@ -38,6 +38,7 @@ Release channels:
 - `pull_request` = **RC preview** tags (same-repo PRs)
   - immutable: `v<base-rc>.pr-<short-sha>`
   - mutable per-PR pointer: `pr-<number>` (updated on each PR build)
+  - PR label: `@version:<immutable-tag>` (replaced/updated on each PR push)
   - example immutable tag: `v1.0.0-rc-1.pr-a1b2c3d`
   - stale preview versions are removed during the workflow cleanup cycle
 
