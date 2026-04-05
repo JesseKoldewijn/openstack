@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/JesseKoldewijn/openstack/compare/v0.1.5...v0.1.6) - 2026-04-05
+
+### Added
+
+- *(studio)* full tab-based service explorer with SigV4, polling, and multi-step guided flows ([#15](https://github.com/JesseKoldewijn/openstack/pull/15))
+- complete 13 partial service implementations with tests and parity scenarios ([#14](https://github.com/JesseKoldewijn/openstack/pull/14))
+- finalize native HTTP parity readiness ([#6](https://github.com/JesseKoldewijn/openstack/pull/6))
+- implement streaming IO benchmark overhaul and sync specs
+
+### Other
+
+- *(release)* release-plz
+- *(release)* release-plz
+- *(release)* release-plz ([#44](https://github.com/JesseKoldewijn/openstack/pull/44))
+- *(release)* release-plz
+- *(release)* release-plz
+- Tier 1–4 performance optimisations with DynamoDB perf integration tests ([#8](https://github.com/JesseKoldewijn/openstack/pull/8))
+- project initialization
+
 ## [0.1.5](https://github.com/JesseKoldewijn/openstack/compare/v0.1.4...v0.1.5) - 2026-04-05
 
 ### Added
