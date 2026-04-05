@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'chore(release): release-plz'))
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'chore(release): release-plz')) }}
     name: Run release-plz release
     runs-on: ubuntu-latest
     steps:
@@ -76,7 +76,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   release-skipped:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch' && !contains(github.event.head_commit.message, 'chore(release): release-plz')
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch' && !contains(github.event.head_commit.message, 'chore(release): release-plz') }}
     name: Skip release (non release-plz merge)
     runs-on: ubuntu-latest
     steps:
