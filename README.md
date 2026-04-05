@@ -286,6 +286,9 @@ openstack uses an automated SemVer release-PR flow via `release-plz`.
     - stale preview versions are cleaned in the same GHCR cleanup cycle
 - Config: `.release-plz.toml`
 - Output: automated release PR(s), version/changelog updates, and SemVer tag/release automation
+- Build metadata propagation:
+  - binary `openstack --version` includes build tag/sha when provided by CI
+  - internal API exposes `version_display` and structured `build` metadata
 
 Conventional commit guidance (used for SemVer bump decisions):
 

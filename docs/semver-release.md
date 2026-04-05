@@ -59,6 +59,7 @@ Release channels:
     - `main`: `stable`, `latest` (+ semver tags on tag events)
     - `develop`: `rc`, `rc-<short-sha>`
     - `pull_request`: `v<base-rc>.pr-<short-sha>` + `pr-<number>` (same-repo PRs)
+  - Passes `OPENSTACK_BUILD_TAG` / `OPENSTACK_BUILD_SHA` build args into Docker builds so binary version output and API metadata match image channel/tag identity.
 
 - **Tag-based builds**: `.github/workflows/cross-compile.yml`
   - Trigger: `v*.*.*` tags
@@ -73,6 +74,16 @@ Release channels:
   - git release enabled
   - git tag format `v{{ version }}`
   - crates.io publish disabled
+
+## Runtime version visibility
+
+With build metadata configured by CI/workflows:
+
+- `openstack --version` prints semantic version plus build identity
+- `/_localstack/health`, `/_localstack/info`, and `/_localstack/diagnose` include:
+  - `version` (Cargo package version)
+  - `version_display` (human-readable version including build metadata)
+  - `build` object (`tag`, `sha`)
 
 ## Token recommendation
 

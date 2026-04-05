@@ -25,7 +25,9 @@ pub async fn get_health(State(state): State<ApiState>) -> impl IntoResponse {
 
     let body = json!({
         "edition": "community",
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": openstack_config::version::pkg_version(),
+        "version_display": openstack_config::version::display_version(),
+        "build": openstack_config::version::build_info_json(),
         "services": services,
         "daemon": {
             "managed": std::env::var("OPENSTACK_DAEMON_CHILD").ok().as_deref() == Some("1"),

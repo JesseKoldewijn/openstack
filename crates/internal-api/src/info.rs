@@ -9,7 +9,9 @@ pub async fn get_info(State(state): State<ApiState>) -> impl IntoResponse {
     let uptime_secs = state.start_time.elapsed().as_secs();
 
     let body = json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": openstack_config::version::pkg_version(),
+        "version_display": openstack_config::version::display_version(),
+        "build": openstack_config::version::build_info_json(),
         "edition": "community",
         "is_license_activated": false,
         "session_id": state.session_id,

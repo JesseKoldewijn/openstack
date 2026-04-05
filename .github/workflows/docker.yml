@@ -41,6 +41,8 @@ jobs:
       labels: ${{ steps.meta.outputs.labels }}
       pr_rc_tag: ${{ steps.pr_rc.outputs.pr_rc_tag }}
       pr_latest_tag: ${{ steps.pr_rc.outputs.pr_latest_tag }}
+      build_tag: ${{ steps.build_meta.outputs.build_tag }}
+      build_sha: ${{ steps.build_meta.outputs.build_sha }}
     steps:
       - name: Checkout (for tag discovery)
         uses: actions/checkout@v4
@@ -71,6 +73,28 @@ jobs:
           echo "pr_latest_tag=${pr_latest_tag}" >> "$GITHUB_OUTPUT"
           echo "Computed PR RC tag: ${pr_rc_tag}"
           echo "Computed PR latest tag: ${pr_latest_tag}"
+
+      - name: Compute build metadata
+        id: build_meta
+        run: |
+          set -euo pipefail
+          build_sha="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            build_tag="${{ steps.pr_rc.outputs.pr_rc_tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            build_tag="${GITHUB_REF_NAME}"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            build_tag="stable"
+          elif [[ "${GITHUB_REF}" == "refs/heads/develop" ]]; then
+            build_tag="rc"
+          else
+            build_tag="${GITHUB_REF_NAME}"
+          fi
+
+          echo "build_tag=${build_tag}" >> "$GITHUB_OUTPUT"
+          echo "build_sha=${build_sha}" >> "$GITHUB_OUTPUT"
+          echo "Build metadata: tag=${build_tag}, sha=${build_sha}"
 
       - name: Extract Docker metadata (tags, labels)
         id: meta
@@ -154,6 +178,9 @@ jobs:
           push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           tags: ${{ steps.refs.outputs.image_ref }}
           labels: ${{ needs.metadata.outputs.labels }}
+          build-args: |
+            OPENSTACK_BUILD_TAG=${{ needs.metadata.outputs.build_tag }}
+            OPENSTACK_BUILD_SHA=${{ needs.metadata.outputs.build_sha }}
           cache-from: type=gha,scope=docker-${{ matrix.suffix }}
           # PRs must not write to the shared GHA cache — they could poison
           # the layer cache used by production push builds.

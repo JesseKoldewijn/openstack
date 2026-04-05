@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if command == CliCommand::Version {
-        println!("openstack {}", env!("CARGO_PKG_VERSION"));
+        println!("openstack {}", openstack_config::version::display_version());
         return Ok(());
     }
 
@@ -88,7 +88,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_server(config: openstack_config::Config, studio: bool) -> Result<()> {
-    info!("Starting openstack v{}", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting openstack v{}",
+        openstack_config::version::display_version()
+    );
     info!("Gateway listening on: {:?}", config.gateway_listen);
     if studio {
         info!("Studio UI subsystem enabled (transaction log + operation catalog active)");
@@ -177,7 +180,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
 }
 
 fn print_help() {
-    println!("openstack {}", env!("CARGO_PKG_VERSION"));
+    println!("openstack {}", openstack_config::version::display_version());
     println!("Usage: openstack [command] [options]");
     println!();
     println!("Commands:");

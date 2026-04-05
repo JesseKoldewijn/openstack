@@ -20,6 +20,8 @@ env:
   PARITY_MOTO_IMAGE: motoserver/moto:5.1.22
   PARITY_DOCKER_NETWORK_MODE: bridge
   OHA_VERSION: 1.14.0
+  OPENSTACK_BUILD_TAG: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  OPENSTACK_BUILD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
 permissions:
   contents: read
