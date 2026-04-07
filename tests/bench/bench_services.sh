@@ -1341,6 +1341,30 @@ if is_active "apigateway"; then
     -H "X-Amz-Date: 20260101T000000Z"
   )
 
+  bench_dynamic_targets "apigateway" "create_rest_api" POST \
+    "$OS_BASE/restapis" \
+    "$LS_BASE/restapis" \
+    "$MOTO_BASE/restapis" \
+    '{"name":"bench-api-{i}"}' \
+    -H "Content-Type: application/json"
+
+  _apigw_seed_os=$(curl -s -X POST "$OS_BASE/restapis" -H "Content-Type: application/json" -d '{"name":"bench-api-get-os"}' || true)
+  _apigw_seed_ls=$(curl -s -X POST "$LS_BASE/restapis" -H "Content-Type: application/json" -d '{"name":"bench-api-get-ls"}' || true)
+  _apigw_seed_moto=$(curl -s -X POST "$MOTO_BASE/restapis" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/apigateway/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy" \
+    -H "X-Amz-Date: 20260101T000000Z" \
+    -d '{"name":"bench-api-get-moto"}' || true)
+
+  _apigw_id_os=$(printf '%s' "$_apigw_seed_os" | jq -r '.id // empty' 2>/dev/null)
+  _apigw_id_ls=$(printf '%s' "$_apigw_seed_ls" | jq -r '.id // empty' 2>/dev/null)
+  _apigw_id_moto=$(printf '%s' "$_apigw_seed_moto" | jq -r '.id // empty' 2>/dev/null)
+
+  bench_targets "apigateway" "get_rest_api" GET \
+    "$OS_BASE/restapis/${_apigw_id_os:-missing}" \
+    "$LS_BASE/restapis/${_apigw_id_ls:-missing}" \
+    "$MOTO_BASE/restapis/${_apigw_id_moto:-missing}"
+
   bench_targets "apigateway" "get_rest_apis" GET \
     "$OS_BASE/restapis" \
     "$LS_BASE/restapis" \
@@ -1369,6 +1393,10 @@ fi
 if is_active "cloudwatch"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "CloudWatch (Query-XML)"
+
+  bench_targets "cloudwatch" "put_metric_data" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=PutMetricData&Version=2010-08-01&Namespace=OpenStackBench&MetricData.member.1.MetricName=Latency&MetricData.member.1.Value=1"
 
   bench_targets "cloudwatch" "list_metrics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     -H "Content-Type: application/x-www-form-urlencoded" \
@@ -1964,6 +1992,21 @@ if is_active "ssm"; then
   log_section "SSM (JSON)"
 
   SSM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
+
+  seed_all_targets "ssm" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.PutParameter" \
+    -d '{"Name":"/bench/static-param","Value":"seed","Type":"String","Overwrite":true}'
+
+  bench_targets "ssm" "put_parameter" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.PutParameter" \
+    -d '{"Name":"/bench/static-param","Value":"updated-benchmark-value","Type":"String","Overwrite":true}'
+
+  bench_targets "ssm" "get_parameter" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.GetParameter" \
+    -d '{"Name":"/bench/static-param"}'
 
   bench_targets "ssm" "describe_parameters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     "${SSM_HEADERS[@]}" \
