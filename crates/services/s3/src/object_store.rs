@@ -12,8 +12,6 @@
 //! directory name.
 
 use std::io;
-#[cfg(target_os = "linux")]
-use std::os::unix::io::{AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -609,6 +607,8 @@ where
     if let Some(len) = content_length
         && len > 0
     {
+        use std::os::unix::io::{AsRawFd, BorrowedFd};
+
         // Try to pre-allocate using fallocate(2) to mark blocks as used.
         // This is significantly more effective than set_len(2) on Linux
         // filesystems as it avoids zero-filling and ensures contiguous
