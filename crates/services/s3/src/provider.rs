@@ -44,17 +44,11 @@ fn inline_object_threshold() -> u64 {
 /// Returns the threshold (in bytes) below which GET responses backed by files
 /// are fully buffered in memory rather than streamed via `ReaderStream`.
 ///
-/// Defaults to the same threshold as [`inline_object_threshold()`] so PUT/GET
-/// behavior stays aligned. Advanced tuning can override only the GET side with
-/// `S3_GET_BUFFERED_THRESHOLD_BYTES` when needed.
+/// This is intentionally tied to [`inline_object_threshold()`] so PUT/GET
+/// behavior stays aligned under all configurations.
+#[inline]
 fn get_buffered_threshold() -> u64 {
-    static THRESHOLD: OnceLock<u64> = OnceLock::new();
-    *THRESHOLD.get_or_init(|| {
-        std::env::var("S3_GET_BUFFERED_THRESHOLD_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(inline_object_threshold)
-    })
+    inline_object_threshold()
 }
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
