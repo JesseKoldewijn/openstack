@@ -95,7 +95,7 @@ base64 = "0.22"
 hex = "0.4"
 sha2 = "0.10"
 digest = "0.10"
-md-5 = { version = "0.10", features = ["asm"] }
+md-5 = "0.10"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 hmac = "0.12"
 rand = "0.10"
