@@ -14,8 +14,8 @@
 use std::io;
 use std::os::unix::io::{AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use dashmap::DashSet;
 use sha2::{Digest, Sha256};
@@ -23,20 +23,6 @@ use tokio::fs;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, warn};
 use xxhash_rust::xxh3::xxh3_128;
-
-/// Dedicated thread pool for S3 I/O operations to prevent blocking pool
-/// saturation and stabilize p95/p99 tail latencies.
-fn io_pool() -> &'static tokio::runtime::Handle {
-    static POOL: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    POOL.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .thread_name("openstack-s3-io")
-            .worker_threads(4) // Dedicated S3 I/O workers
-            .build()
-            .expect("Failed to create S3 I/O pool")
-    })
-    .handle()
-}
 
 /// Process-wide counter used to generate unique temporary file names.
 ///
@@ -588,8 +574,8 @@ impl ObjectFileStore {
 /// |------------------|--------------|-------------------------------------|
 /// | < 1 MiB or None  | 512 KiB      | ≤ 2                                 |
 /// | 1 MiB – 50 MiB   | 4 MiB        | ≤ 13                                |
-/// | 50 MiB – 128 MiB | 16 MiB       | ≤ 8                                 |
-/// | > 128 MiB        | 32 MiB       | ≤ 4 per 128 MiB                     |
+/// | 50 MiB – 128 MiB | 8 MiB        | ≤ 16                                |
+/// | > 128 MiB        | 16 MiB       | ≤ 8 per 128 MiB                     |
 ///
 /// Fewer dispatches → fewer blocking-pool round-trips → lower p95 latency
 /// for large objects without extra heap allocation for small objects.
@@ -609,8 +595,8 @@ where
     // Read buffer stays at 1 MiB (fits L3 cache well).
     const READ_BUF: usize = 1024 * 1024; // 1 MiB
     let write_buf: usize = match content_length {
-        Some(len) if len > 128 * 1024 * 1024 => 32 * 1024 * 1024, // 32 MiB for > 128 MiB
-        Some(len) if len >= 50 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for >= 50 MiB
+        Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
+        Some(len) if len >= 50 * 1024 * 1024 => 8 * 1024 * 1024,  //  8 MiB for >= 50 MiB
         Some(len) if len >= 1024 * 1024 => 4 * 1024 * 1024,       //  4 MiB for >= 1 MiB
         _ => 512 * 1024,                                          // 512 KiB default
     };
@@ -627,19 +613,16 @@ where
         // filesystems as it avoids zero-filling and ensures contiguous
         // layout for the entire file.
         let fd = file.as_raw_fd();
-        let res = io_pool()
-            .spawn_blocking(move || {
-                // Safety: Borrowing the file descriptor for the duration of the call.
-                let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-                nix::fcntl::fallocate(
-                    borrowed_fd,
-                    nix::fcntl::FallocateFlags::empty(),
-                    0,
-                    len as nix::libc::off_t,
-                )
-            })
-            .await
-            .expect("S3 I/O pool panicked");
+        let res = {
+            // Safety: Borrowing the file descriptor for the duration of the call.
+            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+            nix::fcntl::fallocate(
+                borrowed_fd,
+                nix::fcntl::FallocateFlags::empty(),
+                0,
+                len as nix::libc::off_t,
+            )
+        };
 
         if let Err(e) = res {
             debug!(
