@@ -572,10 +572,10 @@ impl ObjectFileStore {
 ///
 /// | Content-Length    | Write buffer | Approx. `spawn_blocking` dispatches |
 /// |------------------|--------------|-------------------------------------|
-/// | < 4 MiB or None  | 2 MiB        | ≤ 2                                 |
-/// | 4 MiB – 50 MiB   | 4 MiB        | ≤ 13                                |
-/// | 50 MiB – 128 MiB | 8 MiB        | ≤ 16                                |
-/// | > 128 MiB        | 16 MiB       | ≤ 8 per 128 MiB                    |
+/// | < 1 MiB or None  | 512 KiB      | ≤ 2                                 |
+/// | 1 MiB – 50 MiB   | 4 MiB        | ≤ 13                                |
+/// | 50 MiB – 128 MiB | 16 MiB       | ≤ 8                                 |
+/// | > 128 MiB        | 32 MiB       | ≤ 4 per 128 MiB                     |
 ///
 /// Fewer dispatches → fewer blocking-pool round-trips → lower p95 latency
 /// for large objects without extra heap allocation for small objects.
@@ -595,10 +595,10 @@ where
     // Read buffer stays at 512 KiB (fits L2/L3 cache well).
     const READ_BUF: usize = 512 * 1024; // 512 KiB
     let write_buf: usize = match content_length {
-        Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
-        Some(len) if len >= 50 * 1024 * 1024 => 8 * 1024 * 1024,  //  8 MiB for >= 50 MiB
-        Some(len) if len > 4 * 1024 * 1024 => 4 * 1024 * 1024,    //  4 MiB for > 4 MiB
-        _ => 2 * 1024 * 1024,                                     //  2 MiB default
+        Some(len) if len > 128 * 1024 * 1024 => 32 * 1024 * 1024, // 32 MiB for > 128 MiB
+        Some(len) if len >= 50 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for >= 50 MiB
+        Some(len) if len >= 1024 * 1024 => 4 * 1024 * 1024,       //  4 MiB for >= 1 MiB
+        _ => 512 * 1024,                                          // 512 KiB default
     };
 
     let file = fs::File::create(tmp_path).await?;
