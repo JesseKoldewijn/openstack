@@ -612,7 +612,7 @@ where
         // filesystems as it avoids zero-filling and ensures contiguous
         // layout for the entire file.
         let fd = file.as_raw_fd();
-        let res = tokio::task::block_in_place(|| {
+        let res = {
             // Safety: Borrowing the file descriptor for the duration of the call.
             let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
             nix::fcntl::fallocate(
@@ -621,7 +621,7 @@ where
                 0,
                 len as nix::libc::off_t,
             )
-        });
+        };
 
         if let Err(e) = res {
             debug!(
