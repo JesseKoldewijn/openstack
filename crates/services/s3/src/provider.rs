@@ -847,7 +847,7 @@ async fn handle_get_object_async(
                         // (no channel allocation, no extra allocation per chunk).
                         match ObjectFileStore::read_object_at(&path).await {
                             Ok(file) => {
-                                const READ_BUF: usize = 1024 * 1024; // 1 MiB
+                                const READ_BUF: usize = 2 * 1024 * 1024; // 2 MiB
                                 let stream = ReaderStream::with_capacity(file, READ_BUF);
                                 ResponseBody::Streaming {
                                     stream: Box::pin(stream),
