@@ -604,6 +604,7 @@ where
     let file = fs::File::create(tmp_path).await?;
 
     // Pre-allocate to avoid block-level fragmentation on ext4/xfs.
+    #[cfg(target_os = "linux")]
     if let Some(len) = content_length
         && len > 0
     {
@@ -631,6 +632,13 @@ where
             );
             file.set_len(len).await?;
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if let Some(len) = content_length
+        && len > 0
+    {
+        file.set_len(len).await?;
     }
 
     let mut bw = tokio::io::BufWriter::with_capacity(write_buf, file);
