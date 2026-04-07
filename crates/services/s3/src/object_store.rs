@@ -15,7 +15,7 @@ use std::io;
 use std::os::unix::io::{AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashSet;
 use sha2::{Digest, Sha256};
@@ -23,6 +23,20 @@ use tokio::fs;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, warn};
 use xxhash_rust::xxh3::xxh3_128;
+
+/// Dedicated thread pool for S3 I/O operations to prevent blocking pool
+/// saturation and stabilize p95/p99 tail latencies.
+fn io_pool() -> &'static tokio::runtime::Handle {
+    static POOL: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    POOL.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_name("openstack-s3-io")
+            .worker_threads(4) // Dedicated S3 I/O workers
+            .build()
+            .expect("Failed to create S3 I/O pool")
+    })
+    .handle()
+}
 
 /// Process-wide counter used to generate unique temporary file names.
 ///
@@ -613,7 +627,7 @@ where
         // filesystems as it avoids zero-filling and ensures contiguous
         // layout for the entire file.
         let fd = file.as_raw_fd();
-        let res = {
+        let res = io_pool().spawn_blocking(move || {
             // Safety: Borrowing the file descriptor for the duration of the call.
             let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
             nix::fcntl::fallocate(
@@ -622,7 +636,7 @@ where
                 0,
                 len as nix::libc::off_t,
             )
-        };
+        }).await.expect("S3 I/O pool panicked");
 
         if let Err(e) = res {
             debug!(
