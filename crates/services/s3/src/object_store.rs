@@ -627,16 +627,19 @@ where
         // filesystems as it avoids zero-filling and ensures contiguous
         // layout for the entire file.
         let fd = file.as_raw_fd();
-        let res = io_pool().spawn_blocking(move || {
-            // Safety: Borrowing the file descriptor for the duration of the call.
-            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-            nix::fcntl::fallocate(
-                borrowed_fd,
-                nix::fcntl::FallocateFlags::empty(),
-                0,
-                len as nix::libc::off_t,
-            )
-        }).await.expect("S3 I/O pool panicked");
+        let res = io_pool()
+            .spawn_blocking(move || {
+                // Safety: Borrowing the file descriptor for the duration of the call.
+                let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+                nix::fcntl::fallocate(
+                    borrowed_fd,
+                    nix::fcntl::FallocateFlags::empty(),
+                    0,
+                    len as nix::libc::off_t,
+                )
+            })
+            .await
+            .expect("S3 I/O pool panicked");
 
         if let Err(e) = res {
             debug!(
@@ -657,9 +660,9 @@ where
 
     let mut bw = tokio::io::BufWriter::with_capacity(write_buf, file);
     let mut br = BufReader::with_capacity(READ_BUF, reader);
-    
+
     // Optimized copy loop to reduce Poll overhead and tail latency.
-    // By using a larger READ_BUF (1MiB) and BufReader, we minimize the 
+    // By using a larger READ_BUF (1MiB) and BufReader, we minimize the
     // number of async calls between the network and the disk writer.
     let bytes_written = tokio::io::copy_buf(&mut br, &mut bw).await?;
     bw.flush().await?;
