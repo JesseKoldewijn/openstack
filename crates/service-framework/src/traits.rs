@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::pin::Pin;
-use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;

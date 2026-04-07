@@ -37,7 +37,7 @@ fn inline_object_threshold() -> u64 {
         std::env::var("S3_INLINE_OBJECT_THRESHOLD_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(4 * 1024 * 1024) // 4 MiB default
+            .unwrap_or(1024 * 1024) // 1 MiB default
     })
 }
 
@@ -49,7 +49,7 @@ fn inline_object_threshold() -> u64 {
 ///
 /// At 6 concurrency × 10 MiB = 60 MiB peak from GET buffers, safely under
 /// the 100 MiB loaded-RSS gate.
-const GET_BUFFERED_THRESHOLD: u64 = 4 * 1024 * 1024; // 4 MiB
+const GET_BUFFERED_THRESHOLD: u64 = 1024 * 1024; // 1 MiB
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
