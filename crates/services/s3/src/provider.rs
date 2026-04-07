@@ -49,7 +49,7 @@ fn inline_object_threshold() -> u64 {
 ///
 /// At 6 concurrency × 10 MiB = 60 MiB peak from GET buffers, safely under
 /// the 100 MiB loaded-RSS gate.
-const GET_BUFFERED_THRESHOLD: u64 = 10 * 1024 * 1024; // 10 MiB
+const GET_BUFFERED_THRESHOLD: u64 = 4 * 1024 * 1024; // 4 MiB
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path

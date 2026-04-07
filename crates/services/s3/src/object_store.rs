@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashSet;
 use sha2::{Digest, Sha256};
+use std::os::unix::io::{AsRawFd, BorrowedFd};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
@@ -606,7 +607,30 @@ where
     if let Some(len) = content_length
         && len > 0
     {
-        file.set_len(len).await?;
+        // Try to pre-allocate using fallocate(2) to mark blocks as used.
+        // This is significantly more effective than set_len(2) on Linux
+        // filesystems as it avoids zero-filling and ensures contiguous
+        // layout for the entire file.
+        let fd = file.as_raw_fd();
+        let res = tokio::task::block_in_place(|| {
+            // Safety: Borrowing the file descriptor for the duration of the call.
+            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+            nix::fcntl::fallocate(
+                borrowed_fd,
+                nix::fcntl::FallocateFlags::empty(),
+                0,
+                len as nix::libc::off_t,
+            )
+        });
+
+        if let Err(e) = res {
+            debug!(
+                path = %tmp_path.display(),
+                error = %e,
+                "fallocate failed; falling back to set_len"
+            );
+            file.set_len(len).await?;
+        }
     }
 
     let mut bw = tokio::io::BufWriter::with_capacity(write_buf, file);

@@ -31,6 +31,7 @@ tempfile.workspace = true
 futures-core.workspace = true
 sha2.workspace = true
 xxhash-rust.workspace = true
+nix = { version = "0.31.2", features = ["fs"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
