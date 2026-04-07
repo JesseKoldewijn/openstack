@@ -23,6 +23,7 @@ tempfile.workspace = true
 futures-core.workspace = true
 pin-project-lite.workspace = true
 digest.workspace = true
+md5-asm = "0.5.2"
 
 [dev-dependencies]
 openstack-sqs.workspace = true
