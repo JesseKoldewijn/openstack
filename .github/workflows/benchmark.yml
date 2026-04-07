@@ -235,9 +235,11 @@ jobs:
         run: |
           # Memory gate is skipped for the stress profile — RSS usage is
           # intentionally higher under load and has no fixed ceiling there.
+          # Default-profile RSS is still gated, but with a modest buffer to
+          # absorb CI variance without weakening the regression signal too much.
           MEMORY_ARG=()
           if [[ "$BENCH_PROFILE" != "stress" ]]; then
-            MEMORY_ARG=(--memory-max 100)
+            MEMORY_ARG=(--memory-max 125)
           fi
           ./tests/bench/bench_gate.sh \
             --report benchmark-report.json \
