@@ -12,15 +12,15 @@
 //! directory name.
 
 use std::io;
+use std::os::unix::io::{AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use dashmap::DashSet;
 use sha2::{Digest, Sha256};
-use std::os::unix::io::{AsRawFd, BorrowedFd};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, warn};
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -302,8 +302,8 @@ impl ObjectFileStore {
         }
 
         // Adaptive write buffer: scale with expected object size to reduce
-        // write(2) syscall overhead. Read buffer stays at 512 KiB.
-        const READ_BUF: usize = 512 * 1024; // 512 KiB
+        // write(2) syscall overhead. Read buffer stays at 1 MiB.
+        const READ_BUF: usize = 1024 * 1024; // 1 MiB
         let write_buf: usize = match content_length {
             Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
             Some(len) if len >= 50 * 1024 * 1024 => 8 * 1024 * 1024,  //  8 MiB for >= 50 MiB
@@ -592,8 +592,8 @@ where
 {
     // Adaptive buffer sizing: scale the write buffer with expected object size
     // to reduce the number of spawn_blocking dispatches per object.
-    // Read buffer stays at 512 KiB (fits L2/L3 cache well).
-    const READ_BUF: usize = 512 * 1024; // 512 KiB
+    // Read buffer stays at 1 MiB (fits L3 cache well).
+    const READ_BUF: usize = 1024 * 1024; // 1 MiB
     let write_buf: usize = match content_length {
         Some(len) if len > 128 * 1024 * 1024 => 32 * 1024 * 1024, // 32 MiB for > 128 MiB
         Some(len) if len >= 50 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for >= 50 MiB
@@ -642,7 +642,11 @@ where
     }
 
     let mut bw = tokio::io::BufWriter::with_capacity(write_buf, file);
-    let mut br = tokio::io::BufReader::with_capacity(READ_BUF, reader);
+    let mut br = BufReader::with_capacity(READ_BUF, reader);
+    
+    // Optimized copy loop to reduce Poll overhead and tail latency.
+    // By using a larger READ_BUF (1MiB) and BufReader, we minimize the 
+    // number of async calls between the network and the disk writer.
     let bytes_written = tokio::io::copy_buf(&mut br, &mut bw).await?;
     bw.flush().await?;
     drop(bw); // close fd before caller renames
