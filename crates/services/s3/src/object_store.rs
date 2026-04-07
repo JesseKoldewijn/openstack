@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashSet;
 use sha2::{Digest, Sha256};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, warn};
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -301,8 +301,8 @@ impl ObjectFileStore {
         }
 
         // Adaptive write buffer: scale with expected object size to reduce
-        // write(2) syscall overhead. Read buffer stays at 512 KiB.
-        const READ_BUF: usize = 512 * 1024; // 512 KiB
+        // write(2) syscall overhead. Read buffer stays at 1 MiB.
+        const READ_BUF: usize = 1024 * 1024; // 1 MiB
         let write_buf: usize = match content_length {
             Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
             Some(len) if len >= 50 * 1024 * 1024 => 8 * 1024 * 1024,  //  8 MiB for >= 50 MiB
@@ -571,10 +571,10 @@ impl ObjectFileStore {
 ///
 /// | Content-Length    | Write buffer | Approx. `spawn_blocking` dispatches |
 /// |------------------|--------------|-------------------------------------|
-/// | < 4 MiB or None  | 2 MiB        | ≤ 2                                 |
-/// | 4 MiB – 50 MiB   | 4 MiB        | ≤ 13                                |
+/// | < 1 MiB or None  | 512 KiB      | ≤ 2                                 |
+/// | 1 MiB – 50 MiB   | 4 MiB        | ≤ 13                                |
 /// | 50 MiB – 128 MiB | 8 MiB        | ≤ 16                                |
-/// | > 128 MiB        | 16 MiB       | ≤ 8 per 128 MiB                    |
+/// | > 128 MiB        | 16 MiB       | ≤ 8 per 128 MiB                     |
 ///
 /// Fewer dispatches → fewer blocking-pool round-trips → lower p95 latency
 /// for large objects without extra heap allocation for small objects.
@@ -591,18 +591,51 @@ where
 {
     // Adaptive buffer sizing: scale the write buffer with expected object size
     // to reduce the number of spawn_blocking dispatches per object.
-    // Read buffer stays at 512 KiB (fits L2/L3 cache well).
-    const READ_BUF: usize = 512 * 1024; // 512 KiB
+    // Read buffer stays at 1 MiB (fits L3 cache well).
+    const READ_BUF: usize = 1024 * 1024; // 1 MiB
     let write_buf: usize = match content_length {
         Some(len) if len > 128 * 1024 * 1024 => 16 * 1024 * 1024, // 16 MiB for > 128 MiB
         Some(len) if len >= 50 * 1024 * 1024 => 8 * 1024 * 1024,  //  8 MiB for >= 50 MiB
-        Some(len) if len > 4 * 1024 * 1024 => 4 * 1024 * 1024,    //  4 MiB for > 4 MiB
-        _ => 2 * 1024 * 1024,                                     //  2 MiB default
+        Some(len) if len >= 1024 * 1024 => 4 * 1024 * 1024,       //  4 MiB for >= 1 MiB
+        _ => 512 * 1024,                                          // 512 KiB default
     };
 
     let file = fs::File::create(tmp_path).await?;
 
     // Pre-allocate to avoid block-level fragmentation on ext4/xfs.
+    #[cfg(target_os = "linux")]
+    if let Some(len) = content_length
+        && len > 0
+    {
+        use std::os::unix::io::{AsRawFd, BorrowedFd};
+
+        // Try to pre-allocate using fallocate(2) to mark blocks as used.
+        // This is significantly more effective than set_len(2) on Linux
+        // filesystems as it avoids zero-filling and ensures contiguous
+        // layout for the entire file.
+        let fd = file.as_raw_fd();
+        let res = {
+            // Safety: Borrowing the file descriptor for the duration of the call.
+            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+            nix::fcntl::fallocate(
+                borrowed_fd,
+                nix::fcntl::FallocateFlags::empty(),
+                0,
+                len as nix::libc::off_t,
+            )
+        };
+
+        if let Err(e) = res {
+            debug!(
+                path = %tmp_path.display(),
+                error = %e,
+                "fallocate failed; falling back to set_len"
+            );
+            file.set_len(len).await?;
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
     if let Some(len) = content_length
         && len > 0
     {
@@ -610,7 +643,11 @@ where
     }
 
     let mut bw = tokio::io::BufWriter::with_capacity(write_buf, file);
-    let mut br = tokio::io::BufReader::with_capacity(READ_BUF, reader);
+    let mut br = BufReader::with_capacity(READ_BUF, reader);
+
+    // Optimized copy loop to reduce Poll overhead and tail latency.
+    // By using a larger READ_BUF (1MiB) and BufReader, we minimize the
+    // number of async calls between the network and the disk writer.
     let bytes_written = tokio::io::copy_buf(&mut br, &mut bw).await?;
     bw.flush().await?;
     drop(bw); // close fd before caller renames
