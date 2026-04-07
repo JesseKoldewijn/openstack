@@ -28,6 +28,8 @@ use crate::store::{ListPagedResult, ObjectDataRef, S3Store};
 ///
 /// The value is read once from the `S3_INLINE_OBJECT_THRESHOLD_BYTES`
 /// environment variable on first call and cached for the process lifetime.
+/// This same threshold is also used for file-backed GET buffering so PUT/GET
+/// behavior stays aligned under all configurations.
 /// If the variable is unset or unparseable the default is **1 MiB**, which
 /// keeps tiny objects inline while pushing larger benchmark tiers through the
 /// streaming path.
