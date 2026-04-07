@@ -41,16 +41,6 @@ fn inline_object_threshold() -> u64 {
     })
 }
 
-/// Returns the threshold (in bytes) below which GET responses backed by files
-/// are fully buffered in memory rather than streamed via `ReaderStream`.
-///
-/// This is intentionally tied to [`inline_object_threshold()`] so PUT/GET
-/// behavior stays aligned under all configurations.
-#[inline]
-fn get_buffered_threshold() -> u64 {
-    inline_object_threshold()
-}
-
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
 /// so that hashing and disk writes happen on a blocking thread rather than
@@ -832,7 +822,7 @@ async fn handle_get_object_async(
                     // For small objects read the entire file into memory and
                     // return a buffered response — this avoids spawn_blocking
                     // overhead for tiny payloads.
-                    if size <= get_buffered_threshold() {
+                    if size <= inline_object_threshold() {
                         match tokio::fs::read(&path).await {
                             Ok(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
                             Err(e) => {
