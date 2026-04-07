@@ -41,14 +41,21 @@ fn inline_object_threshold() -> u64 {
     })
 }
 
-/// GET-side threshold for reading file-backed objects fully into memory rather
-/// than streaming via `ReaderStream`. Equal to the PUT-side
-/// `inline_object_threshold` because the benchmark RSS gate is sensitive to
-/// concurrent response buffering.
+/// Returns the threshold (in bytes) below which GET responses backed by files
+/// are fully buffered in memory rather than streamed via `ReaderStream`.
 ///
-/// At 6 concurrency × 1 MiB = 6 MiB peak from GET buffers, this remains a
-/// small contribution to the loaded-RSS budget.
-const GET_BUFFERED_THRESHOLD: u64 = 1024 * 1024; // 1 MiB
+/// Defaults to the same threshold as [`inline_object_threshold()`] so PUT/GET
+/// behavior stays aligned. Advanced tuning can override only the GET side with
+/// `S3_GET_BUFFERED_THRESHOLD_BYTES` when needed.
+fn get_buffered_threshold() -> u64 {
+    static THRESHOLD: OnceLock<u64> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("S3_GET_BUFFERED_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(inline_object_threshold)
+    })
+}
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
@@ -831,7 +838,7 @@ async fn handle_get_object_async(
                     // For small objects read the entire file into memory and
                     // return a buffered response — this avoids spawn_blocking
                     // overhead for tiny payloads.
-                    if size <= GET_BUFFERED_THRESHOLD {
+                    if size <= get_buffered_threshold() {
                         match tokio::fs::read(&path).await {
                             Ok(bytes) => ResponseBody::Buffered(Bytes::from(bytes)),
                             Err(e) => {
