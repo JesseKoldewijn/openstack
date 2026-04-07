@@ -23,14 +23,14 @@ use crate::object_store::{ObjectFileStore, ObjectLocation};
 use crate::store::{ListPagedResult, ObjectDataRef, S3Store};
 
 /// Returns the threshold (in bytes) below which objects are stored inline
-/// in memory rather than written to disk.  Objects at or below this size
+/// in memory rather than written to disk. Objects at or below this size
 /// use `ObjectDataRef::Inline`; larger objects are written to the filesystem.
 ///
 /// The value is read once from the `S3_INLINE_OBJECT_THRESHOLD_BYTES`
 /// environment variable on first call and cached for the process lifetime.
-/// If the variable is unset or unparseable the default is **4 MiB**, which
-/// covers the smallest common benchmark tier (1 MB) and keeps typical
-/// emulator workloads entirely in memory.
+/// If the variable is unset or unparseable the default is **1 MiB**, which
+/// keeps tiny objects inline while pushing larger benchmark tiers through the
+/// streaming path.
 fn inline_object_threshold() -> u64 {
     static THRESHOLD: OnceLock<u64> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {
@@ -42,13 +42,12 @@ fn inline_object_threshold() -> u64 {
 }
 
 /// GET-side threshold for reading file-backed objects fully into memory rather
-/// than streaming via `ReaderStream`.  Higher than the PUT-side
-/// `inline_object_threshold` because we only hold the buffer transiently
-/// during response serialisation — it is freed as soon as the response body
-/// is sent.
+/// than streaming via `ReaderStream`. Equal to the PUT-side
+/// `inline_object_threshold` because the benchmark RSS gate is sensitive to
+/// concurrent response buffering.
 ///
-/// At 6 concurrency × 10 MiB = 60 MiB peak from GET buffers, safely under
-/// the 100 MiB loaded-RSS gate.
+/// At 6 concurrency × 1 MiB = 6 MiB peak from GET buffers, this remains a
+/// small contribution to the loaded-RSS budget.
 const GET_BUFFERED_THRESHOLD: u64 = 1024 * 1024; // 1 MiB
 
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5

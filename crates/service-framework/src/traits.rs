@@ -49,11 +49,6 @@ pub struct RequestContext {
     /// Wrapped in a `Mutex` so that it can be locked and consumed
     /// (via `SpooledBody::into_reader()`) even when the provider receives
     /// `ctx: &RequestContext`.
-    /// Spooled request body (for large payloads, may be on disk).
-    ///
-    /// Wrapped in a `Mutex` so that it can be locked and consumed
-    /// (via `SpooledBody::into_reader()`) even when the provider receives
-    /// `ctx: &RequestContext`.
     ///
     /// This field is only used if `body_reader` is `None`.
     pub spooled_body: Option<std::sync::Mutex<SpooledBody>>,

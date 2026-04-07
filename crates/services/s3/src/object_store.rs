@@ -12,6 +12,7 @@
 //! directory name.
 
 use std::io;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::{AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
