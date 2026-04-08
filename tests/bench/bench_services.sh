@@ -1328,6 +1328,11 @@ if is_active "acm"; then
 
   ACM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
+  bench_dynamic_targets "acm" "request_certificate" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    '{"DomainName":"bench-acm-{i}.example.com","SubjectAlternativeNames":["www.bench-acm-{i}.example.com"]}' \
+    "${ACM_HEADERS[@]}" \
+    -H "X-Amz-Target: CertificateManager.RequestCertificate"
+
   bench_targets "acm" "list_certificates" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     "${ACM_HEADERS[@]}" \
     -H "X-Amz-Target: CertificateManager.ListCertificates" \
@@ -1588,6 +1593,11 @@ if is_active "kms"; then
 
   KMS_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
+  bench_dynamic_targets "kms" "create_key" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    '{"Description":"bench-key-{i}"}' \
+    "${KMS_HEADERS[@]}" \
+    -H "X-Amz-Target: TrentService.CreateKey"
+
   bench_targets "kms" "list_keys" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     "${KMS_HEADERS[@]}" \
     -H "X-Amz-Target: TrentService.ListKeys" \
@@ -1837,10 +1847,32 @@ if is_active "opensearch"; then
     -H "X-Amz-Date: 20260101T000000Z"
   )
 
-  bench_targets "opensearch" "list_domain_names" GET \
-    "$OS_BASE/2021-01-01/opensearch/domain" \
-    "$LS_BASE/2021-01-01/opensearch/domain" \
-    "$MOTO_BASE/2021-01-01/opensearch/domain"
+  if seed_all_targets "opensearch" POST \
+       "$OS_BASE/2021-01-01/opensearch/domain" \
+       "$LS_BASE/2021-01-01/opensearch/domain" \
+       "$MOTO_BASE/2021-01-01/opensearch/domain" \
+       -H "Content-Type: application/json" \
+       -d '{"DomainName":"bench-domain-'"$$"'"}'; then
+
+    bench_dynamic_targets "opensearch" "create_domain" POST \
+      "$OS_BASE/2021-01-01/opensearch/domain" \
+      "$LS_BASE/2021-01-01/opensearch/domain" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain" \
+      '{"DomainName":"bench-domain-create-'"$$"'-{i}"}' \
+      -H "Content-Type: application/json"
+
+    bench_targets "opensearch" "describe_domain" GET \
+      "$OS_BASE/2021-01-01/opensearch/domain/bench-domain-$$" \
+      "$LS_BASE/2021-01-01/opensearch/domain/bench-domain-$$" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain/bench-domain-$$"
+
+    bench_targets "opensearch" "list_domain_names" GET \
+      "$OS_BASE/2021-01-01/opensearch/domain" \
+      "$LS_BASE/2021-01-01/opensearch/domain" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain"
+  else
+    skip_service "opensearch" "Failed to create seed domain"
+  fi
 
   MOTO_EXTRA=()
 fi
@@ -1853,9 +1885,20 @@ if is_active "redshift"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "Redshift (Query-XML)"
 
-  bench_targets "redshift" "describe_clusters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Action=DescribeClusters&Version=2012-12-01"
+  if seed_all_targets "redshift" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "Action=CreateCluster&Version=2012-12-01&ClusterIdentifier=bench-cluster-$$&NodeType=dc2.large&MasterUsername=admin&MasterUserPassword=Password123!&DBName=benchdb"; then
+
+    bench_dynamic_targets "redshift" "create_cluster" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=CreateCluster&Version=2012-12-01&ClusterIdentifier=bench-cluster-create-$$-{i}&NodeType=dc2.large&MasterUsername=admin&MasterUserPassword=Password123!&DBName=benchdb" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_targets "redshift" "describe_clusters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=DescribeClusters&Version=2012-12-01"
+  else
+    skip_service "redshift" "Failed to create seed cluster"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1873,10 +1916,45 @@ if is_active "route53"; then
     -H "X-Amz-Date: 20260101T000000Z"
   )
 
-  bench_targets "route53" "list_hosted_zones" GET \
-    "$OS_BASE/2013-04-01/hostedzone" \
-    "$LS_BASE/2013-04-01/hostedzone" \
-    "$MOTO_BASE/2013-04-01/hostedzone"
+  _r53_seed_body='<CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><Name>bench.example.com</Name><CallerReference>bench-r53-$$</CallerReference></CreateHostedZoneRequest>'
+
+  SEED_OS=0; SEED_LS=0; SEED_MOTO=0
+  _r53_seed_os=$(curl -s -X POST "$OS_BASE/2013-04-01/hostedzone" -H "Content-Type: text/xml" -d "$_r53_seed_body" || true)
+  _r53_id_os=$(printf '%s' "$_r53_seed_os" | sed -n 's:.*<Id>/hostedzone/\([^<]*\)</Id>.*:\1:p')
+  [[ -n "$_r53_id_os" ]] && SEED_OS=1
+
+  if target_active ls; then
+    _r53_seed_ls=$(curl -s -X POST "$LS_BASE/2013-04-01/hostedzone" -H "Content-Type: text/xml" -d "$_r53_seed_body" || true)
+    _r53_id_ls=$(printf '%s' "$_r53_seed_ls" | sed -n 's:.*<Id>/hostedzone/\([^<]*\)</Id>.*:\1:p')
+    [[ -n "$_r53_id_ls" ]] && SEED_LS=1 || record_seed_failure "route53" "ls" "seed request failed"
+  fi
+
+  if target_active moto; then
+    _r53_seed_moto=$(curl -s -X POST "$MOTO_BASE/2013-04-01/hostedzone" -H "Content-Type: text/xml" "${MOTO_EXTRA[@]}" -d "$_r53_seed_body" || true)
+    _r53_id_moto=$(printf '%s' "$_r53_seed_moto" | sed -n 's:.*<Id>/hostedzone/\([^<]*\)</Id>.*:\1:p')
+    [[ -n "$_r53_id_moto" ]] && SEED_MOTO=1 || record_seed_failure "route53" "moto" "seed request failed"
+  fi
+
+  if [[ $SEED_OS -eq 1 ]]; then
+    bench_dynamic_targets "route53" "create_hosted_zone" POST \
+      "$OS_BASE/2013-04-01/hostedzone" \
+      "$LS_BASE/2013-04-01/hostedzone" \
+      "$MOTO_BASE/2013-04-01/hostedzone" \
+      '<CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><Name>bench-{i}.example.com</Name><CallerReference>bench-r53-{i}</CallerReference></CreateHostedZoneRequest>' \
+      -H "Content-Type: text/xml"
+
+    bench_targets "route53" "list_resource_record_sets" GET \
+      "$OS_BASE/2013-04-01/hostedzone/${_r53_id_os}/rrset" \
+      "$LS_BASE/2013-04-01/hostedzone/${_r53_id_ls:-missing}/rrset" \
+      "$MOTO_BASE/2013-04-01/hostedzone/${_r53_id_moto:-missing}/rrset"
+
+    bench_targets "route53" "list_hosted_zones" GET \
+      "$OS_BASE/2013-04-01/hostedzone" \
+      "$LS_BASE/2013-04-01/hostedzone" \
+      "$MOTO_BASE/2013-04-01/hostedzone"
+  else
+    skip_service "route53" "Failed to create seed hosted zone"
+  fi
 
   MOTO_EXTRA=()
 fi
@@ -1889,9 +1967,27 @@ if is_active "ses"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "SES (Query-XML)"
 
-  bench_targets "ses" "list_identities" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Action=ListIdentities&Version=2010-12-01"
+  _ses_sender="bench-sender-$$@example.com"
+  _ses_sender_enc=$(jq -nr --arg v "$_ses_sender" '$v|@uri')
+
+  if seed_all_targets "ses" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "Action=VerifyEmailIdentity&Version=2010-12-01&EmailAddress=${_ses_sender_enc}"; then
+
+    bench_dynamic_targets "ses" "verify_email_identity" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=VerifyEmailIdentity&Version=2010-12-01&EmailAddress=bench-verify-{i}%40example.com" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_targets "ses" "send_email" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=SendEmail&Version=2010-12-01&Source=${_ses_sender_enc}&Destination.ToAddresses.member.1=dest%40example.com&Message.Subject.Data=Benchmark&Message.Body.Text.Data=hello"
+
+    bench_targets "ses" "list_identities" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=ListIdentities&Version=2010-12-01"
+  else
+    skip_service "ses" "Failed to seed verified sender identity"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
