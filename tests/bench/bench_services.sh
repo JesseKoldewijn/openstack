@@ -1420,6 +1420,26 @@ if is_active "apigateway"; then
     "$LS_BASE/restapis" \
     "$MOTO_BASE/restapis"
 
+  if [[ -n "${_apigw_id_os:-}" ]]; then
+    log "  apigateway/create_resource (openstack)..."
+    bench "apigateway" "create_resource" "os" POST "$OS_BASE/restapis/${_apigw_id_os}/resources/$(printf '%s' "$_apigw_seed_os" | jq -r '.rootResourceId // empty')" \
+      -H "Content-Type: application/json" \
+      -d '{"pathPart":"bench-res"}'
+  fi
+  if target_active ls && [[ -n "${_apigw_id_ls:-}" ]]; then
+    log "  apigateway/create_resource (localstack)..."
+    bench "apigateway" "create_resource" "ls" POST "$LS_BASE/restapis/${_apigw_id_ls}/resources/$(printf '%s' "$_apigw_seed_ls" | jq -r '.rootResourceId // empty')" \
+      -H "Content-Type: application/json" \
+      -d '{"pathPart":"bench-res"}'
+  fi
+  if target_active moto && [[ -n "${_apigw_id_moto:-}" ]]; then
+    log "  apigateway/create_resource (moto)..."
+    bench "apigateway" "create_resource" "moto" POST "$MOTO_BASE/restapis/${_apigw_id_moto}/resources/$(printf '%s' "$_apigw_seed_moto" | jq -r '.rootResourceId // empty')" \
+      -H "Content-Type: application/json" \
+      -d '{"pathPart":"bench-res"}' \
+      "${MOTO_EXTRA[@]}"
+  fi
+
   MOTO_EXTRA=()
 fi
 
@@ -1450,6 +1470,10 @@ if is_active "cloudformation"; then
     bench_targets "cloudformation" "list_stacks" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=ListStacks&Version=2010-05-15"
+
+    bench_targets "cloudformation" "get_template" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=GetTemplate&Version=2010-05-15&StackName=bench-stack-$$"
   else
     skip_service "cloudformation" "Failed to create seed stack"
   fi
@@ -1911,6 +1935,13 @@ if is_active "opensearch"; then
       "$OS_BASE/2021-01-01/opensearch/domain" \
       "$LS_BASE/2021-01-01/opensearch/domain" \
       "$MOTO_BASE/2021-01-01/opensearch/domain"
+
+    bench_targets "opensearch" "update_domain_config" POST \
+      "$OS_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      "$LS_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      -H "Content-Type: application/json" \
+      -d '{"EngineVersion":"OpenSearch_2.11","ClusterConfig":{"InstanceType":"m6g.large.search","InstanceCount":2}}'
   else
     skip_service "opensearch" "Failed to create seed domain"
   fi

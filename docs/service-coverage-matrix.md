@@ -19,8 +19,8 @@ Notes:
 | service | implemented_ops | unit_tests | perf_tests | smoke_tests | bench_ops |
 |---|---:|---:|---:|---:|---:|
 | acm | 9 | 9 | 3 | 1 | 3 |
-| apigateway | 12 | 13 | 0 | 1 | 3 |
-| cloudformation | 7 | 13 | 0 | 1 | 3 |
+| apigateway | 12 | 13 | 3 | 1 | 4 |
+| cloudformation | 7 | 13 | 3 | 1 | 4 |
 | cloudwatch | 17 | 21 | 2 | 1 | 2 |
 | dynamodb | 19 | 29 | 8 | 1 | 4 |
 | ec2 | 11 | 12 | 3 | 1 | 3 |
@@ -31,7 +31,7 @@ Notes:
 | kinesis | 17 | 18 | 4 | 1 | 3 |
 | kms | 20 | 18 | 2 | 1 | 2 |
 | lambda | 26 | 31 | 3 | 1 | 6 |
-| opensearch | 6 | 8 | 0 | 1 | 3 |
+| opensearch | 6 | 8 | 3 | 1 | 4 |
 | redshift | 5 | 9 | 3 | 1 | 3 |
 | route53 | 8 | 8 | 3 | 1 | 4 |
 | s3 | 27 | 34 | 6 | 8 | 4 |
@@ -57,17 +57,17 @@ Notes:
 
 - implemented_ops (12): `CreateDeployment`, `CreateResource`, `CreateRestApi`, `DeleteRestApi`, `GetDeployments`, `GetMethod`, `GetResources`, `GetRestApi`, `GetRestApis`, `GetStages`, `PutIntegration`, `PutMethod`
 - unit_tests: 13
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_apigateway_lifecycle_with_latency_guardrail`
-- bench_ops (3): `create_rest_api`, `get_rest_api`, `get_rest_apis`
+- bench_ops (4): `create_resource`, `create_rest_api`, `get_rest_api`, `get_rest_apis`
 
 ### cloudformation
 
 - implemented_ops (7): `CreateStack`, `DeleteStack`, `DescribeStackResources`, `DescribeStacks`, `GetTemplate`, `ListStacks`, `UpdateStack`
 - unit_tests: 13
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_cloudformation_stack_lifecycle_with_latency_guardrail`
-- bench_ops (3): `create_stack`, `describe_stacks`, `list_stacks`
+- bench_ops (4): `create_stack`, `describe_stacks`, `get_template`, `list_stacks`
 
 ### cloudwatch
 
@@ -153,9 +153,9 @@ Notes:
 
 - implemented_ops (6): `CreateDomain`, `DeleteDomain`, `DescribeDomain`, `DescribeDomainConfig`, `ListDomainNames`, `UpdateDomainConfig`
 - unit_tests: 8
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_opensearch_domain_lifecycle_with_latency_guardrail`
-- bench_ops (3): `create_domain`, `describe_domain`, `list_domain_names`
+- bench_ops (4): `create_domain`, `describe_domain`, `list_domain_names`, `update_domain_config`
 
 ### redshift
 
@@ -241,10 +241,7 @@ Notes:
 
 Services still missing dedicated perf coverage, with especially thin benchmark breadth:
 
-- **apigateway** — perf_tests=0, bench_ops=3
-- **cloudformation** — perf_tests=0, bench_ops=3
 - **firehose** — perf_tests=0, bench_ops=3
 - **iam** — perf_tests=0, bench_ops=3
-- **opensearch** — perf_tests=0, bench_ops=3
 - **secretsmanager** — perf_tests=0, bench_ops=4
 - **sqs** — perf_tests=0, bench_ops=4
