@@ -1433,6 +1433,26 @@ if is_active "acm"; then
     "${ACM_HEADERS[@]}" \
     -H "X-Amz-Target: CertificateManager.ListCertificates" \
     -d '{}'
+
+  log "  acm/export_certificate (openstack)..."
+  bench "acm" "export_certificate" "os" POST "$OS_BASE" \
+    "${ACM_HEADERS[@]}" \
+    -H "X-Amz-Target: CertificateManager.ExportCertificate" \
+    -d "{\"CertificateArn\":\"${_acm_arn_os:-missing}\"}"
+  if target_active ls; then
+    log "  acm/export_certificate (localstack)..."
+    bench "acm" "export_certificate" "ls" POST "$LS_BASE" \
+      "${ACM_HEADERS[@]}" \
+      -H "X-Amz-Target: CertificateManager.ExportCertificate" \
+      -d "{\"CertificateArn\":\"${_acm_arn_ls:-missing}\"}"
+  fi
+  if target_active moto; then
+    log "  acm/export_certificate (moto)..."
+    bench "acm" "export_certificate" "moto" POST "$MOTO_BASE" \
+      "${ACM_HEADERS[@]}" \
+      -H "X-Amz-Target: CertificateManager.ExportCertificate" \
+      -d "{\"CertificateArn\":\"${_acm_arn_moto:-missing}\"}"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2103,6 +2123,10 @@ if is_active "redshift"; then
     bench_targets "redshift" "reboot_cluster" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=RebootCluster&Version=2012-12-01&ClusterIdentifier=bench-cluster-$$"
+
+    bench_targets "redshift" "modify_cluster" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=ModifyCluster&Version=2012-12-01&ClusterIdentifier=bench-cluster-$$&NodeType=ra3.xlplus&DBName=analytics&Port=15439"
   else
     skip_service "redshift" "Failed to create seed cluster"
   fi
@@ -2178,6 +2202,11 @@ if is_active "route53"; then
       "$OS_BASE/2013-04-01/hostedzone" \
       "$LS_BASE/2013-04-01/hostedzone" \
       "$MOTO_BASE/2013-04-01/hostedzone"
+
+    bench_targets "route53" "get_hosted_zone" GET \
+      "$OS_BASE/2013-04-01/hostedzone/${_r53_id_os}" \
+      "$LS_BASE/2013-04-01/hostedzone/${_r53_id_ls:-missing}" \
+      "$MOTO_BASE/2013-04-01/hostedzone/${_r53_id_moto:-missing}"
   else
     skip_service "route53" "Failed to create seed hosted zone"
   fi

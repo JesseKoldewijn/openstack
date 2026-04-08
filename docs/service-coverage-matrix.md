@@ -18,7 +18,7 @@ Notes:
 
 | service | implemented_ops | unit_tests | perf_tests | smoke_tests | bench_ops |
 |---|---:|---:|---:|---:|---:|
-| acm | 9 | 9 | 3 | 1 | 3 |
+| acm | 9 | 9 | 3 | 1 | 4 |
 | apigateway | 12 | 13 | 3 | 1 | 4 |
 | cloudformation | 7 | 13 | 3 | 1 | 4 |
 | cloudwatch | 17 | 21 | 3 | 1 | 4 |
@@ -32,8 +32,8 @@ Notes:
 | kms | 20 | 18 | 3 | 1 | 4 |
 | lambda | 26 | 31 | 3 | 1 | 6 |
 | opensearch | 6 | 8 | 3 | 1 | 4 |
-| redshift | 5 | 9 | 3 | 1 | 3 |
-| route53 | 8 | 8 | 3 | 1 | 4 |
+| redshift | 5 | 9 | 3 | 1 | 4 |
+| route53 | 8 | 8 | 3 | 1 | 5 |
 | s3 | 27 | 34 | 6 | 8 | 4 |
 | secretsmanager | 8 | 8 | 3 | 1 | 5 |
 | ses | 7 | 9 | 3 | 1 | 4 |
@@ -51,7 +51,7 @@ Notes:
 - unit_tests: 9
 - perf_tests: 3
 - smoke_tests (1): `smoke_acm_certificate_lifecycle_with_latency_guardrail`
-- bench_ops (3): `describe_certificate`, `list_certificates`, `request_certificate`
+- bench_ops (4): `describe_certificate`, `export_certificate`, `list_certificates`, `request_certificate`
 
 ### apigateway
 
@@ -163,7 +163,7 @@ Notes:
 - unit_tests: 9
 - perf_tests: 3
 - smoke_tests (1): `smoke_redshift_cluster_lifecycle_with_latency_guardrail`
-- bench_ops (3): `create_cluster`, `describe_clusters`, `reboot_cluster`
+- bench_ops (4): `create_cluster`, `describe_clusters`, `modify_cluster`, `reboot_cluster`
 
 ### route53
 
@@ -171,7 +171,7 @@ Notes:
 - unit_tests: 8
 - perf_tests: 3
 - smoke_tests (1): `smoke_route53_hosted_zone_lifecycle_with_latency_guardrail`
-- bench_ops (4): `change_resource_record_sets`, `create_hosted_zone`, `list_hosted_zones`, `list_resource_record_sets`
+- bench_ops (5): `change_resource_record_sets`, `create_hosted_zone`, `get_hosted_zone`, `list_hosted_zones`, `list_resource_record_sets`
 
 ### s3
 
