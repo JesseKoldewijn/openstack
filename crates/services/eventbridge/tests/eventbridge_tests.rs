@@ -65,6 +65,23 @@ async fn test_create_and_list_event_buses() {
 }
 
 #[tokio::test]
+async fn test_describe_event_bus() {
+    let p = EventBridgeProvider::new();
+    p.dispatch(&make_ctx("CreateEventBus", json!({ "Name": "desc-bus" })))
+        .await
+        .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx("DescribeEventBus", json!({ "Name": "desc-bus" })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body(&resp);
+    assert_eq!(b["Name"], "desc-bus");
+    assert!(b["Arn"].as_str().unwrap().contains("desc-bus"));
+}
+
+#[tokio::test]
 async fn test_delete_event_bus() {
     let p = EventBridgeProvider::new();
     p.dispatch(&make_ctx("CreateEventBus", json!({ "Name": "del-bus" })))

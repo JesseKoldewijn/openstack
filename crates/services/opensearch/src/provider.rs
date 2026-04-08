@@ -255,6 +255,55 @@ impl ServiceProvider for OpenSearchProvider {
                 })))
             }
 
+            // ----------------------------------------------------------------
+            // UpdateDomainConfig  POST /2021-01-01/opensearch/domain/{DomainName}/config
+            // ----------------------------------------------------------------
+            "UpdateDomainConfig" => {
+                let domain_name = ctx
+                    .path
+                    .trim_end_matches("/config")
+                    .split('/')
+                    .next_back()
+                    .unwrap_or("")
+                    .to_string();
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.domains.get_mut(&domain_name) {
+                    Some(domain) => {
+                        if let Some(engine_version) = str_param(ctx, "EngineVersion") {
+                            domain.engine_version = engine_version;
+                        }
+                        if let Some(cluster_config) = ctx.request_body.get("ClusterConfig") {
+                            if let Some(instance_type) =
+                                cluster_config.get("InstanceType").and_then(|v| v.as_str())
+                            {
+                                domain.cluster_config.instance_type = instance_type.to_string();
+                            }
+                            if let Some(instance_count) =
+                                cluster_config.get("InstanceCount").and_then(|v| v.as_u64())
+                            {
+                                domain.cluster_config.instance_count = instance_count as u32;
+                            }
+                        }
+                        Ok(json_ok(json!({
+                            "DomainConfig": {
+                                "EngineVersion": { "Options": domain.engine_version },
+                                "ClusterConfig": {
+                                    "Options": {
+                                        "InstanceType": domain.cluster_config.instance_type,
+                                        "InstanceCount": domain.cluster_config.instance_count,
+                                    }
+                                }
+                            }
+                        })))
+                    }
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
+                        404,
+                    )),
+                }
+            }
+
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }

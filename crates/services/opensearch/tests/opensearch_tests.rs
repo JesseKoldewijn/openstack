@@ -180,6 +180,62 @@ async fn test_list_domain_names() {
 }
 
 #[tokio::test]
+async fn test_update_domain_config() {
+    let p = OpenSearchProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateDomain",
+        json!({ "DomainName": "upd-domain" }),
+        "/2021-01-01/opensearch/domain",
+        "POST",
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "UpdateDomainConfig",
+            json!({
+                "EngineVersion": "OpenSearch_2.11",
+                "ClusterConfig": {
+                    "InstanceType": "m6g.large.search",
+                    "InstanceCount": 2
+                }
+            }),
+            "/2021-01-01/opensearch/domain/upd-domain/config",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body_json(&resp);
+    assert_eq!(
+        b["DomainConfig"]["EngineVersion"]["Options"],
+        "OpenSearch_2.11"
+    );
+    assert_eq!(
+        b["DomainConfig"]["ClusterConfig"]["Options"]["InstanceType"],
+        "m6g.large.search"
+    );
+    assert_eq!(
+        b["DomainConfig"]["ClusterConfig"]["Options"]["InstanceCount"],
+        2
+    );
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeDomain",
+            json!({}),
+            "/2021-01-01/opensearch/domain/upd-domain",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    let b = body_json(&resp);
+    assert_eq!(b["DomainStatus"]["EngineVersion"], "OpenSearch_2.11");
+    assert_eq!(b["DomainStatus"]["ClusterConfig"]["InstanceCount"], 2);
+}
+
+#[tokio::test]
 async fn test_delete_domain() {
     let p = OpenSearchProvider::new();
     p.dispatch(&make_ctx(

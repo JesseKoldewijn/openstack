@@ -305,6 +305,37 @@ impl ServiceProvider for EventBridgeProvider {
             }
 
             // ----------------------------------------------------------------
+            // DescribeEventBus
+            // ----------------------------------------------------------------
+            "DescribeEventBus" => {
+                let name = str_param(ctx, "Name").unwrap_or_else(|| "default".to_string());
+                if name == "default" {
+                    return Ok(json_ok(json!({
+                        "Name": "default",
+                        "Arn": format!("arn:aws:events:{region}:{account_id}:event-bus/default"),
+                    })));
+                }
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Event bus {name} does not exist."),
+                        404,
+                    ));
+                };
+                match store.buses.get(&name) {
+                    Some(bus) => Ok(json_ok(json!({
+                        "Name": bus.name,
+                        "Arn": bus.arn,
+                    }))),
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Event bus {name} does not exist."),
+                        404,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
             // PutRule
             // ----------------------------------------------------------------
             "PutRule" => {
