@@ -164,6 +164,33 @@ impl ServiceProvider for SesProvider {
             }
 
             // ----------------------------------------------------------------
+            // GetIdentityVerificationAttributes
+            // ----------------------------------------------------------------
+            "GetIdentityVerificationAttributes" => {
+                let identities = addresses_from_params(ctx, "Identities.member");
+                let attrs = self
+                    .store
+                    .get(account_id, region)
+                    .map(|store| {
+                        identities
+                            .iter()
+                            .filter_map(|identity| {
+                                store.identities.get(identity).map(|id| {
+                                    format!(
+                                        "<entry><key>{}</key><value><VerificationStatus>{}</VerificationStatus></value></entry>",
+                                        identity,
+                                        if id.verified { "Success" } else { "Pending" }
+                                    )
+                                })
+                            })
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                let inner = format!("<VerificationAttributes>{attrs}</VerificationAttributes>");
+                Ok(xml_resp("GetIdentityVerificationAttributes", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
             // SendEmail
             // ----------------------------------------------------------------
             "SendEmail" => {

@@ -195,6 +195,25 @@ async fn test_get_hosted_zone() {
 }
 
 #[tokio::test]
+async fn test_get_change() {
+    let p = Route53Provider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetChange",
+            "",
+            "/2013-04-01/change/abc123",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetChangeResponse"));
+    assert!(body.contains("/change/abc123"));
+    assert!(body.contains("INSYNC"));
+}
+
+#[tokio::test]
 async fn test_change_resource_record_sets() {
     let p = Route53Provider::new();
     // Create a zone

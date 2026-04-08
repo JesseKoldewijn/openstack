@@ -297,6 +297,20 @@ impl ServiceProvider for Route53Provider {
             }
 
             // ----------------------------------------------------------------
+            // GetChange  GET /2013-04-01/change/{Id}
+            // ----------------------------------------------------------------
+            "GetChange" => {
+                let change_id = ctx.path.split('/').next_back().unwrap_or("").to_string();
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<GetChangeResponse xmlns=\"{ROUTE53_NS}\">\
+<ChangeInfo><Id>/change/{change_id}</Id><Status>INSYNC</Status></ChangeInfo>\
+</GetChangeResponse>"
+                );
+                Ok(xml_ok(body))
+            }
+
+            // ----------------------------------------------------------------
             // ChangeResourceRecordSets  POST /2013-04-01/hostedzone/{Id}/rrset
             // ----------------------------------------------------------------
             "ChangeResourceRecordSets" => {

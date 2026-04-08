@@ -72,6 +72,34 @@ async fn test_list_identities() {
 }
 
 #[tokio::test]
+async fn test_get_identity_verification_attributes() {
+    let p = SesProvider::new();
+    let mut verify = HashMap::new();
+    verify.insert(
+        "EmailAddress".to_string(),
+        "verified@example.com".to_string(),
+    );
+    p.dispatch(&make_ctx("VerifyEmailIdentity", verify))
+        .await
+        .unwrap();
+
+    let mut params = HashMap::new();
+    params.insert(
+        "Identities.member.1".to_string(),
+        "verified@example.com".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("GetIdentityVerificationAttributes", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetIdentityVerificationAttributesResponse"));
+    assert!(body.contains("verified@example.com"));
+    assert!(body.contains("Success"));
+}
+
+#[tokio::test]
 async fn test_send_email() {
     let p = SesProvider::new();
     let mut params = HashMap::new();

@@ -47,6 +47,37 @@ async fn request_cert(p: &AcmProvider, domain: &str) -> String {
 }
 
 #[tokio::test]
+async fn test_import_certificate() {
+    let p = AcmProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "ImportCertificate",
+            json!({
+                "Certificate": "pem-data",
+                "PrivateKey": "private-key",
+                "CertificateChain": "chain",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let arn = body(&resp)["CertificateArn"].as_str().unwrap().to_string();
+    assert!(arn.contains("arn:aws:acm:"));
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeCertificate",
+            json!({ "CertificateArn": arn }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body(&resp);
+    assert_eq!(b["Certificate"]["Status"], "ISSUED");
+    assert_eq!(b["Certificate"]["DomainName"], "imported.local");
+}
+
+#[tokio::test]
 async fn test_request_and_describe_certificate() {
     let p = AcmProvider::new();
     let arn = request_cert(&p, "example.com").await;

@@ -99,6 +99,25 @@ impl ServiceProvider for AcmProvider {
         let region = &ctx.region;
 
         match op {
+            "ImportCertificate" => {
+                let cert_arn = str_param(ctx, "CertificateArn").unwrap_or_else(|| {
+                    let cert_id = Uuid::new_v4().to_string();
+                    format!("arn:aws:acm:{region}:{account_id}:certificate/{cert_id}")
+                });
+
+                let cert = Certificate {
+                    arn: cert_arn.clone(),
+                    domain_name: "imported.local".to_string(),
+                    subject_alternative_names: Vec::new(),
+                    status: CertificateStatus::Issued,
+                    created: Utc::now(),
+                    tags: Default::default(),
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                store.certificates.insert(cert_arn.clone(), cert);
+                Ok(json_ok(json!({ "CertificateArn": cert_arn })))
+            }
+
             "RequestCertificate" => {
                 let domain_name = match str_param(ctx, "DomainName") {
                     Some(d) => d,
