@@ -1381,9 +1381,28 @@ if is_active "cloudformation"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "CloudFormation (Query-XML)"
 
-  bench_targets "cloudformation" "list_stacks" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Action=ListStacks&Version=2010-05-15"
+  _cfn_template='{"Resources":{"Bucket":{"Type":"AWS::S3::Bucket"}}}'
+  _cfn_template_encoded=$(printf '%s' "$_cfn_template" | jq -sRr @uri)
+
+  # Seed one stack for describe/list benchmarking.
+  if seed_all_targets "cloudformation" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "Action=CreateStack&Version=2010-05-15&StackName=bench-stack-$$&TemplateBody=${_cfn_template_encoded}"; then
+
+    bench_dynamic_targets "cloudformation" "create_stack" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=CreateStack&Version=2010-05-15&StackName=bench-stack-create-$$-{i}&TemplateBody=${_cfn_template_encoded}" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_targets "cloudformation" "describe_stacks" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=DescribeStacks&Version=2010-05-15&StackName=bench-stack-$$"
+
+    bench_targets "cloudformation" "list_stacks" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=ListStacks&Version=2010-05-15"
+  else
+    skip_service "cloudformation" "Failed to create seed stack"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1411,9 +1430,21 @@ if is_active "ec2"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "EC2 (Query-XML)"
 
-  bench_targets "ec2" "describe_instances" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Action=DescribeInstances&Version=2016-11-15"
+  # Seed one instance for describe benchmarking.
+  if seed_all_targets "ec2" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "Action=RunInstances&Version=2016-11-15&ImageId=ami-00000000&InstanceType=t2.micro&MinCount=1&MaxCount=1"; then
+
+    bench_dynamic_targets "ec2" "run_instances" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=RunInstances&Version=2016-11-15&ImageId=ami-00000000&InstanceType=t2.micro&MinCount=1&MaxCount=1" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_targets "ec2" "describe_instances" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=DescribeInstances&Version=2016-11-15"
+  else
+    skip_service "ec2" "Failed to create seed instance"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
