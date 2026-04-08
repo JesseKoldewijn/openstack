@@ -1256,6 +1256,12 @@ if is_active "firehose"; then
       "${FIREHOSE_HEADERS[@]}" \
       -H "X-Amz-Target: Firehose_20150804.ListDeliveryStreams" \
       -d '{}'
+
+    # DescribeDeliveryStream
+    bench_targets "firehose" "describe_delivery_stream" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${FIREHOSE_HEADERS[@]}" \
+      -H "X-Amz-Target: Firehose_20150804.DescribeDeliveryStream" \
+      -d '{"DeliveryStreamName":"bench-firehose-'"$$"'"}'
   else
     skip_service "firehose" "Failed to create seed delivery stream"
   fi
@@ -1309,6 +1315,12 @@ if is_active "secretsmanager"; then
       "${SM_HEADERS[@]}" \
       -H "X-Amz-Target: secretsmanager.ListSecrets" \
       -d '{}'
+
+    # UpdateSecret
+    bench_targets "secretsmanager" "update_secret" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${SM_HEADERS[@]}" \
+      -H "X-Amz-Target: secretsmanager.UpdateSecret" \
+      -d '{"SecretId":"bench-secret-'"$$"'","SecretString":"updated-via-update-secret","Description":"bench-updated"}'
   else
     skip_service "secretsmanager" "Failed to create seed secret"
   fi
@@ -2117,6 +2129,10 @@ if is_active "sqs"; then
       bench_targets "sqs" "list_queues" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "Action=ListQueues&Version=2012-11-05"
+
+      bench_targets "sqs" "get_queue_attributes" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=GetQueueAttributes&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&AttributeName.1=All"
 
       bench_targets "sqs" "send_message" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
         -H "Content-Type: application/x-www-form-urlencoded" \

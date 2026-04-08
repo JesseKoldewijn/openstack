@@ -26,7 +26,7 @@ Notes:
 | ec2 | 11 | 12 | 3 | 1 | 3 |
 | ecr | 8 | 14 | 5 | 2 | 4 |
 | eventbridge | 14 | 16 | 2 | 1 | 5 |
-| firehose | 6 | 7 | 0 | 1 | 3 |
+| firehose | 6 | 7 | 3 | 1 | 4 |
 | iam | 15 | 17 | 0 | 1 | 3 |
 | kinesis | 17 | 18 | 4 | 1 | 3 |
 | kms | 20 | 18 | 2 | 1 | 2 |
@@ -35,10 +35,10 @@ Notes:
 | redshift | 5 | 9 | 3 | 1 | 3 |
 | route53 | 8 | 8 | 3 | 1 | 4 |
 | s3 | 27 | 34 | 6 | 8 | 4 |
-| secretsmanager | 8 | 8 | 0 | 1 | 4 |
+| secretsmanager | 8 | 8 | 3 | 1 | 5 |
 | ses | 7 | 9 | 3 | 1 | 4 |
 | sns | 9 | 22 | 3 | 1 | 3 |
-| sqs | 14 | 32 | 0 | 1 | 4 |
+| sqs | 14 | 32 | 3 | 1 | 5 |
 | ssm | 7 | 8 | 3 | 1 | 4 |
 | stepfunctions | 9 | 12 | 3 | 1 | 3 |
 | sts | 5 | 8 | 5 | 1 | 2 |
@@ -113,9 +113,9 @@ Notes:
 
 - implemented_ops (6): `CreateDeliveryStream`, `DeleteDeliveryStream`, `DescribeDeliveryStream`, `ListDeliveryStreams`, `PutRecord`, `PutRecordBatch`
 - unit_tests: 7
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_firehose_stream_lifecycle_with_latency_guardrail`
-- bench_ops (3): `list_delivery_streams`, `put_record`, `put_record_batch`
+- bench_ops (4): `describe_delivery_stream`, `list_delivery_streams`, `put_record`, `put_record_batch`
 
 ### iam
 
@@ -185,9 +185,9 @@ Notes:
 
 - implemented_ops (8): `CreateSecret`, `DeleteSecret`, `DescribeSecret`, `GetSecretValue`, `ListSecrets`, `PutSecretValue`, `RestoreSecret`, `UpdateSecret`
 - unit_tests: 8
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_secretsmanager_lifecycle`
-- bench_ops (4): `create_secret`, `get_secret_value`, `list_secrets`, `put_secret_value`
+- bench_ops (5): `create_secret`, `get_secret_value`, `list_secrets`, `put_secret_value`, `update_secret`
 
 ### ses
 
@@ -209,9 +209,9 @@ Notes:
 
 - implemented_ops (14): `ChangeMessageVisibility`, `ChangeMessageVisibilityBatch`, `CreateQueue`, `DeleteMessage`, `DeleteMessageBatch`, `DeleteQueue`, `GetQueueAttributes`, `GetQueueUrl`, `ListQueues`, `PurgeQueue`, `ReceiveMessage`, `SendMessage`, `SendMessageBatch`, `SetQueueAttributes`
 - unit_tests: 32
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_sqs_queue_lifecycle`
-- bench_ops (4): `delete_message`, `list_queues`, `receive_message`, `send_message`
+- bench_ops (5): `delete_message`, `get_queue_attributes`, `list_queues`, `receive_message`, `send_message`
 
 ### ssm
 
@@ -241,7 +241,4 @@ Notes:
 
 Services still missing dedicated perf coverage, with especially thin benchmark breadth:
 
-- **firehose** — perf_tests=0, bench_ops=3
 - **iam** — perf_tests=0, bench_ops=3
-- **secretsmanager** — perf_tests=0, bench_ops=4
-- **sqs** — perf_tests=0, bench_ops=4
