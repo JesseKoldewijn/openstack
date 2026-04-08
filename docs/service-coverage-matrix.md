@@ -20,7 +20,7 @@ Notes:
 |---|---:|---:|---:|---:|---:|
 | acm | 9 | 9 | 3 | 1 | 4 |
 | apigateway | 12 | 13 | 3 | 1 | 4 |
-| cloudformation | 7 | 13 | 3 | 1 | 4 |
+| cloudformation | 7 | 13 | 3 | 1 | 5 |
 | cloudwatch | 17 | 21 | 3 | 1 | 4 |
 | dynamodb | 19 | 29 | 8 | 1 | 4 |
 | ec2 | 11 | 12 | 3 | 1 | 4 |
@@ -36,10 +36,10 @@ Notes:
 | route53 | 8 | 8 | 3 | 1 | 5 |
 | s3 | 27 | 34 | 6 | 8 | 4 |
 | secretsmanager | 8 | 8 | 3 | 1 | 5 |
-| ses | 7 | 9 | 3 | 1 | 4 |
+| ses | 7 | 9 | 3 | 1 | 5 |
 | sns | 9 | 22 | 3 | 1 | 4 |
 | sqs | 14 | 32 | 3 | 1 | 5 |
-| ssm | 7 | 8 | 3 | 1 | 4 |
+| ssm | 7 | 8 | 3 | 1 | 5 |
 | stepfunctions | 9 | 12 | 3 | 1 | 4 |
 | sts | 5 | 8 | 5 | 1 | 4 |
 
@@ -67,7 +67,7 @@ Notes:
 - unit_tests: 13
 - perf_tests: 3
 - smoke_tests (1): `smoke_cloudformation_stack_lifecycle_with_latency_guardrail`
-- bench_ops (4): `create_stack`, `describe_stacks`, `get_template`, `list_stacks`
+- bench_ops (5): `create_stack`, `describe_stacks`, `get_template`, `list_stacks`, `update_stack`
 
 ### cloudwatch
 
@@ -195,7 +195,7 @@ Notes:
 - unit_tests: 9
 - perf_tests: 3
 - smoke_tests (1): `smoke_ses_identity_and_send_email_with_latency_guardrail`
-- bench_ops (4): `list_identities`, `send_email`, `send_raw_email`, `verify_email_identity`
+- bench_ops (5): `get_identity_verification_attributes`, `list_identities`, `send_email`, `send_raw_email`, `verify_email_identity`
 
 ### sns
 
@@ -219,7 +219,7 @@ Notes:
 - unit_tests: 8
 - perf_tests: 3
 - smoke_tests (1): `smoke_ssm_parameter_lifecycle`
-- bench_ops (4): `describe_parameters`, `get_parameter`, `get_parameters_by_path`, `put_parameter`
+- bench_ops (5): `describe_parameters`, `get_parameter`, `get_parameters`, `get_parameters_by_path`, `put_parameter`
 
 ### stepfunctions
 

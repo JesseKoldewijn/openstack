@@ -1532,6 +1532,8 @@ if is_active "cloudformation"; then
 
   _cfn_template='{"Resources":{"Bucket":{"Type":"AWS::S3::Bucket"}}}'
   _cfn_template_encoded=$(printf '%s' "$_cfn_template" | jq -sRr @uri)
+  _cfn_update_template='{"Resources":{"NewRes":{"Type":"AWS::SQS::Queue"}}}'
+  _cfn_update_template_encoded=$(printf '%s' "$_cfn_update_template" | jq -sRr @uri)
 
   # Seed one stack for describe/list benchmarking.
   if seed_all_targets "cloudformation" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
@@ -1553,6 +1555,10 @@ if is_active "cloudformation"; then
     bench_targets "cloudformation" "get_template" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=GetTemplate&Version=2010-05-15&StackName=bench-stack-$$"
+
+    bench_targets "cloudformation" "update_stack" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=UpdateStack&Version=2010-05-15&StackName=bench-stack-$$&TemplateBody=${_cfn_update_template_encoded}"
   else
     skip_service "cloudformation" "Failed to create seed stack"
   fi
@@ -2244,6 +2250,10 @@ if is_active "ses"; then
     bench_targets "ses" "list_identities" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=ListIdentities&Version=2010-12-01"
+
+    bench_targets "ses" "get_identity_verification_attributes" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=GetIdentityVerificationAttributes&Version=2010-12-01&Identities.member.1=${_ses_sender_enc}"
   else
     skip_service "ses" "Failed to seed verified sender identity"
   fi
@@ -2415,6 +2425,11 @@ if is_active "ssm"; then
     "${SSM_HEADERS[@]}" \
     -H "X-Amz-Target: AmazonSSM.DescribeParameters" \
     -d '{}'
+
+  bench_targets "ssm" "get_parameters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.GetParameters" \
+    -d '{"Names":["/bench/static-param","/bench/missing-param"]}'
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
