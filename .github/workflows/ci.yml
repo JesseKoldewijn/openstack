@@ -29,27 +29,6 @@ permissions:
   pull-requests: write
 
 jobs:
-  conventional-pr-title:
-    name: Conventional PR Title
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate PR title (Conventional Commit style)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          PR_TITLE="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.title')"
-          pattern='^(feat|fix|chore|refactor|test|docs|perf|ci)(\([^)]+\))?!?: .+'
-          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
-            echo "Invalid PR title: '$PR_TITLE'"
-            echo "Expected format: type(scope?): description"
-            echo "Examples: 'feat(gateway): add X', 'fix: correct Y', 'feat!: remove Z'"
-            exit 1
-          fi
-
   conventional-push-subjects:
     name: Conventional Push Subjects
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
