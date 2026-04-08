@@ -21,15 +21,15 @@ Notes:
 | acm | 9 | 9 | 3 | 1 | 3 |
 | apigateway | 12 | 13 | 3 | 1 | 4 |
 | cloudformation | 7 | 13 | 3 | 1 | 4 |
-| cloudwatch | 17 | 21 | 3 | 1 | 3 |
+| cloudwatch | 17 | 21 | 3 | 1 | 4 |
 | dynamodb | 19 | 29 | 8 | 1 | 4 |
-| ec2 | 11 | 12 | 3 | 1 | 3 |
+| ec2 | 11 | 12 | 3 | 1 | 4 |
 | ecr | 8 | 14 | 5 | 2 | 4 |
 | eventbridge | 14 | 16 | 3 | 1 | 6 |
 | firehose | 6 | 7 | 3 | 1 | 4 |
 | iam | 15 | 17 | 3 | 1 | 5 |
 | kinesis | 17 | 18 | 4 | 1 | 3 |
-| kms | 20 | 18 | 3 | 1 | 3 |
+| kms | 20 | 18 | 3 | 1 | 4 |
 | lambda | 26 | 31 | 3 | 1 | 6 |
 | opensearch | 6 | 8 | 3 | 1 | 4 |
 | redshift | 5 | 9 | 3 | 1 | 3 |
@@ -75,7 +75,7 @@ Notes:
 - unit_tests: 21
 - perf_tests: 3
 - smoke_tests (1): `smoke_cloudwatch_metrics_with_latency_guardrail`
-- bench_ops (3): `get_metric_statistics`, `list_metrics`, `put_metric_data`
+- bench_ops (4): `describe_alarms`, `get_metric_statistics`, `list_metrics`, `put_metric_data`
 
 ### dynamodb
 
@@ -91,7 +91,7 @@ Notes:
 - unit_tests: 12
 - perf_tests: 3
 - smoke_tests (1): `smoke_ec2_instance_lifecycle_with_latency_guardrail`
-- bench_ops (3): `create_vpc`, `describe_instances`, `run_instances`
+- bench_ops (4): `create_security_group`, `create_vpc`, `describe_instances`, `run_instances`
 
 ### ecr
 
@@ -139,7 +139,7 @@ Notes:
 - unit_tests: 18
 - perf_tests: 3
 - smoke_tests (1): `smoke_kms_key_lifecycle`
-- bench_ops (3): `create_key`, `describe_key`, `list_keys`
+- bench_ops (4): `create_key`, `describe_key`, `generate_data_key`, `list_keys`
 
 ### lambda
 

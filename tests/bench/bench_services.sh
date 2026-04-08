@@ -1557,6 +1557,10 @@ if is_active "cloudwatch"; then
   bench_targets "cloudwatch" "get_metric_statistics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "Action=GetMetricStatistics&Version=2010-08-01&Namespace=OpenStackBench&MetricName=Latency&StartTime=2024-01-01T00%3A00%3A00Z&EndTime=2024-01-01T01%3A00%3A00Z&Period=60&Statistics.member.1=Average"
+
+  bench_targets "cloudwatch" "describe_alarms" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=DescribeAlarms&Version=2010-08-01"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1582,6 +1586,10 @@ if is_active "ec2"; then
 
     bench_dynamic_targets "ec2" "create_vpc" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       "Action=CreateVpc&Version=2016-11-15&CidrBlock=10.{i}.0.0%2F16" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_dynamic_targets "ec2" "create_security_group" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=CreateSecurityGroup&Version=2016-11-15&GroupName=bench-sg-$$-{i}&Description=benchmark-sg-{i}" \
       -H "Content-Type: application/x-www-form-urlencoded"
   else
     skip_service "ec2" "Failed to create seed instance"
@@ -1755,6 +1763,11 @@ if is_active "kms"; then
       "${KMS_HEADERS[@]}" \
       -H "X-Amz-Target: TrentService.DescribeKey" \
       -d "{\"KeyId\":\"${_kms_key_id_os}\"}"
+    log "  kms/generate_data_key (openstack)..."
+    bench "kms" "generate_data_key" "os" POST "$OS_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.GenerateDataKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_os}\",\"KeySpec\":\"AES_256\"}"
   fi
   if target_active ls && [[ -n "${_kms_key_id_ls:-}" ]]; then
     log "  kms/describe_key (localstack)..."
@@ -1762,6 +1775,11 @@ if is_active "kms"; then
       "${KMS_HEADERS[@]}" \
       -H "X-Amz-Target: TrentService.DescribeKey" \
       -d "{\"KeyId\":\"${_kms_key_id_ls}\"}"
+    log "  kms/generate_data_key (localstack)..."
+    bench "kms" "generate_data_key" "ls" POST "$LS_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.GenerateDataKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_ls}\",\"KeySpec\":\"AES_256\"}"
   fi
   if target_active moto && [[ -n "${_kms_key_id_moto:-}" ]]; then
     log "  kms/describe_key (moto)..."
@@ -1769,6 +1787,11 @@ if is_active "kms"; then
       "${KMS_HEADERS[@]}" \
       -H "X-Amz-Target: TrentService.DescribeKey" \
       -d "{\"KeyId\":\"${_kms_key_id_moto}\"}"
+    log "  kms/generate_data_key (moto)..."
+    bench "kms" "generate_data_key" "moto" POST "$MOTO_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.GenerateDataKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_moto}\",\"KeySpec\":\"AES_256\"}"
   fi
 
   bench_targets "kms" "list_keys" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
