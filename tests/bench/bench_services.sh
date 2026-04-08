@@ -1286,6 +1286,11 @@ if is_active "firehose"; then
 
     sleep 1
 
+    bench_dynamic_targets "firehose" "create_delivery_stream" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      '{"DeliveryStreamName":"bench-firehose-create-'"$$"'-{i}","DeliveryStreamType":"DirectPut"}' \
+      "${FIREHOSE_HEADERS[@]}" \
+      -H "X-Amz-Target: Firehose_20150804.CreateDeliveryStream"
+
     # PutRecord
     bench_targets "firehose" "put_record" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       "${FIREHOSE_HEADERS[@]}" \
@@ -2099,6 +2104,11 @@ if is_active "opensearch"; then
       "$MOTO_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
       -H "Content-Type: application/json" \
       -d '{"EngineVersion":"OpenSearch_2.11","ClusterConfig":{"InstanceType":"m6g.large.search","InstanceCount":2}}'
+
+    bench_targets "opensearch" "describe_domain_config" GET \
+      "$OS_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      "$LS_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config"
   else
     skip_service "opensearch" "Failed to create seed domain"
   fi

@@ -26,12 +26,12 @@ Notes:
 | ec2 | 11 | 12 | 3 | 1 | 4 |
 | ecr | 8 | 14 | 5 | 2 | 4 |
 | eventbridge | 14 | 16 | 3 | 1 | 6 |
-| firehose | 6 | 7 | 3 | 1 | 4 |
+| firehose | 6 | 7 | 3 | 1 | 5 |
 | iam | 15 | 17 | 3 | 1 | 5 |
 | kinesis | 17 | 18 | 4 | 1 | 3 |
 | kms | 20 | 18 | 3 | 1 | 4 |
 | lambda | 26 | 31 | 3 | 1 | 6 |
-| opensearch | 6 | 8 | 3 | 1 | 4 |
+| opensearch | 6 | 8 | 3 | 1 | 5 |
 | redshift | 5 | 9 | 3 | 1 | 4 |
 | route53 | 8 | 8 | 3 | 1 | 5 |
 | s3 | 27 | 34 | 6 | 8 | 4 |
@@ -115,7 +115,7 @@ Notes:
 - unit_tests: 7
 - perf_tests: 3
 - smoke_tests (1): `smoke_firehose_stream_lifecycle_with_latency_guardrail`
-- bench_ops (4): `describe_delivery_stream`, `list_delivery_streams`, `put_record`, `put_record_batch`
+- bench_ops (5): `create_delivery_stream`, `describe_delivery_stream`, `list_delivery_streams`, `put_record`, `put_record_batch`
 
 ### iam
 
@@ -155,7 +155,7 @@ Notes:
 - unit_tests: 8
 - perf_tests: 3
 - smoke_tests (1): `smoke_opensearch_domain_lifecycle_with_latency_guardrail`
-- bench_ops (4): `create_domain`, `describe_domain`, `list_domain_names`, `update_domain_config`
+- bench_ops (5): `create_domain`, `describe_domain`, `describe_domain_config`, `list_domain_names`, `update_domain_config`
 
 ### redshift
 
