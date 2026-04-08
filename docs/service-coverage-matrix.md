@@ -18,7 +18,7 @@ Notes:
 
 | service | implemented_ops | unit_tests | perf_tests | smoke_tests | bench_ops |
 |---|---:|---:|---:|---:|---:|
-| acm | 9 | 9 | 0 | 1 | 2 |
+| acm | 9 | 9 | 3 | 1 | 3 |
 | apigateway | 12 | 13 | 0 | 1 | 3 |
 | cloudformation | 7 | 13 | 0 | 1 | 3 |
 | cloudwatch | 17 | 21 | 2 | 1 | 2 |
@@ -32,8 +32,8 @@ Notes:
 | kms | 20 | 18 | 2 | 1 | 2 |
 | lambda | 26 | 31 | 3 | 1 | 6 |
 | opensearch | 6 | 8 | 0 | 1 | 3 |
-| redshift | 5 | 9 | 0 | 1 | 2 |
-| route53 | 8 | 8 | 0 | 1 | 3 |
+| redshift | 5 | 9 | 3 | 1 | 3 |
+| route53 | 8 | 8 | 3 | 1 | 4 |
 | s3 | 27 | 34 | 6 | 8 | 4 |
 | secretsmanager | 8 | 8 | 0 | 1 | 4 |
 | ses | 7 | 9 | 0 | 1 | 3 |
@@ -49,9 +49,9 @@ Notes:
 
 - implemented_ops (9): `AddTagsToCertificate`, `DeleteCertificate`, `DescribeCertificate`, `ExportCertificate`, `ImportCertificate`, `ListCertificates`, `ListTagsForCertificate`, `RemoveTagsFromCertificate`, `RequestCertificate`
 - unit_tests: 9
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_acm_certificate_lifecycle_with_latency_guardrail`
-- bench_ops (2): `list_certificates`, `request_certificate`
+- bench_ops (3): `describe_certificate`, `list_certificates`, `request_certificate`
 
 ### apigateway
 
@@ -161,17 +161,17 @@ Notes:
 
 - implemented_ops (5): `CreateCluster`, `DeleteCluster`, `DescribeClusters`, `ModifyCluster`, `RebootCluster`
 - unit_tests: 9
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_redshift_cluster_lifecycle_with_latency_guardrail`
-- bench_ops (2): `create_cluster`, `describe_clusters`
+- bench_ops (3): `create_cluster`, `describe_clusters`, `reboot_cluster`
 
 ### route53
 
 - implemented_ops (8): `ChangeResourceRecordSets`, `CreateHostedZone`, `DELETE`, `DeleteHostedZone`, `GetChange`, `GetHostedZone`, `ListHostedZones`, `ListResourceRecordSets`
 - unit_tests: 8
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_route53_hosted_zone_lifecycle_with_latency_guardrail`
-- bench_ops (3): `create_hosted_zone`, `list_hosted_zones`, `list_resource_record_sets`
+- bench_ops (4): `change_resource_record_sets`, `create_hosted_zone`, `list_hosted_zones`, `list_resource_record_sets`
 
 ### s3
 
@@ -241,15 +241,12 @@ Notes:
 
 Services still missing dedicated perf coverage, with especially thin benchmark breadth:
 
-- **acm** — perf_tests=0, bench_ops=2
 - **apigateway** — perf_tests=0, bench_ops=3
 - **cloudformation** — perf_tests=0, bench_ops=3
 - **ec2** — perf_tests=0, bench_ops=2
 - **firehose** — perf_tests=0, bench_ops=3
 - **iam** — perf_tests=0, bench_ops=3
 - **opensearch** — perf_tests=0, bench_ops=3
-- **redshift** — perf_tests=0, bench_ops=2
-- **route53** — perf_tests=0, bench_ops=3
 - **secretsmanager** — perf_tests=0, bench_ops=4
 - **ses** — perf_tests=0, bench_ops=3
 - **sqs** — perf_tests=0, bench_ops=4

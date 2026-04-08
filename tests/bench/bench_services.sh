@@ -1333,6 +1333,43 @@ if is_active "acm"; then
     "${ACM_HEADERS[@]}" \
     -H "X-Amz-Target: CertificateManager.RequestCertificate"
 
+  _acm_seed_os=$(curl -s -X POST "$OS_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: CertificateManager.RequestCertificate" \
+    -d '{"DomainName":"bench-acm-describe-os.example.com"}' || true)
+  _acm_seed_ls=$(curl -s -X POST "$LS_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: CertificateManager.RequestCertificate" \
+    -d '{"DomainName":"bench-acm-describe-ls.example.com"}' || true)
+  _acm_seed_moto=$(curl -s -X POST "$MOTO_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: CertificateManager.RequestCertificate" \
+    -d '{"DomainName":"bench-acm-describe-moto.example.com"}' || true)
+
+  _acm_arn_os=$(printf '%s' "$_acm_seed_os" | jq -r '.CertificateArn // empty' 2>/dev/null)
+  _acm_arn_ls=$(printf '%s' "$_acm_seed_ls" | jq -r '.CertificateArn // empty' 2>/dev/null)
+  _acm_arn_moto=$(printf '%s' "$_acm_seed_moto" | jq -r '.CertificateArn // empty' 2>/dev/null)
+
+  log "  acm/describe_certificate (openstack)..."
+  bench "acm" "describe_certificate" "os" POST "$OS_BASE" \
+    "${ACM_HEADERS[@]}" \
+    -H "X-Amz-Target: CertificateManager.DescribeCertificate" \
+    -d "{\"CertificateArn\":\"${_acm_arn_os:-missing}\"}"
+  if target_active ls; then
+    log "  acm/describe_certificate (localstack)..."
+    bench "acm" "describe_certificate" "ls" POST "$LS_BASE" \
+      "${ACM_HEADERS[@]}" \
+      -H "X-Amz-Target: CertificateManager.DescribeCertificate" \
+      -d "{\"CertificateArn\":\"${_acm_arn_ls:-missing}\"}"
+  fi
+  if target_active moto; then
+    log "  acm/describe_certificate (moto)..."
+    bench "acm" "describe_certificate" "moto" POST "$MOTO_BASE" \
+      "${ACM_HEADERS[@]}" \
+      -H "X-Amz-Target: CertificateManager.DescribeCertificate" \
+      -d "{\"CertificateArn\":\"${_acm_arn_moto:-missing}\"}"
+  fi
+
   bench_targets "acm" "list_certificates" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     "${ACM_HEADERS[@]}" \
     -H "X-Amz-Target: CertificateManager.ListCertificates" \
@@ -1896,6 +1933,10 @@ if is_active "redshift"; then
     bench_targets "redshift" "describe_clusters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=DescribeClusters&Version=2012-12-01"
+
+    bench_targets "redshift" "reboot_cluster" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=RebootCluster&Version=2012-12-01&ClusterIdentifier=bench-cluster-$$"
   else
     skip_service "redshift" "Failed to create seed cluster"
   fi
@@ -1917,6 +1958,7 @@ if is_active "route53"; then
   )
 
   _r53_seed_body='<CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><Name>bench.example.com</Name><CallerReference>bench-r53-$$</CallerReference></CreateHostedZoneRequest>'
+  _r53_change_body='<ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><ChangeBatch><Changes><Change><Action>UPSERT</Action><ResourceRecordSet><Name>www.bench.example.com</Name><Type>A</Type><TTL>300</TTL><ResourceRecords><ResourceRecord><Value>1.2.3.4</Value></ResourceRecord></ResourceRecords></ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>'
 
   SEED_OS=0; SEED_LS=0; SEED_MOTO=0
   _r53_seed_os=$(curl -s -X POST "$OS_BASE/2013-04-01/hostedzone" -H "Content-Type: text/xml" -d "$_r53_seed_body" || true)
@@ -1942,6 +1984,24 @@ if is_active "route53"; then
       "$MOTO_BASE/2013-04-01/hostedzone" \
       '<CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><Name>bench-{i}.example.com</Name><CallerReference>bench-r53-{i}</CallerReference></CreateHostedZoneRequest>' \
       -H "Content-Type: text/xml"
+
+    log "  route53/change_resource_record_sets (openstack)..."
+    bench "route53" "change_resource_record_sets" "os" POST "$OS_BASE/2013-04-01/hostedzone/${_r53_id_os}/rrset" \
+      -H "Content-Type: text/xml" \
+      -d "$_r53_change_body"
+    if target_active ls; then
+      log "  route53/change_resource_record_sets (localstack)..."
+      bench "route53" "change_resource_record_sets" "ls" POST "$LS_BASE/2013-04-01/hostedzone/${_r53_id_ls:-missing}/rrset" \
+        -H "Content-Type: text/xml" \
+        -d "$_r53_change_body"
+    fi
+    if target_active moto; then
+      log "  route53/change_resource_record_sets (moto)..."
+      bench "route53" "change_resource_record_sets" "moto" POST "$MOTO_BASE/2013-04-01/hostedzone/${_r53_id_moto:-missing}/rrset" \
+        -H "Content-Type: text/xml" \
+        -d "$_r53_change_body" \
+        "${MOTO_EXTRA[@]}"
+    fi
 
     bench_targets "route53" "list_resource_record_sets" GET \
       "$OS_BASE/2013-04-01/hostedzone/${_r53_id_os}/rrset" \
