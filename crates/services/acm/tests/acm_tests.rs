@@ -78,6 +78,34 @@ async fn test_import_certificate() {
 }
 
 #[tokio::test]
+async fn test_export_certificate() {
+    let p = AcmProvider::new();
+    let arn = request_cert(&p, "export-me.com").await;
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ExportCertificate",
+            json!({ "CertificateArn": arn }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert!(
+        b["Certificate"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN CERTIFICATE")
+    );
+    assert!(
+        b["PrivateKey"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN PRIVATE KEY")
+    );
+}
+
+#[tokio::test]
 async fn test_request_and_describe_certificate() {
     let p = AcmProvider::new();
     let arn = request_cert(&p, "example.com").await;

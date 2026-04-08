@@ -256,6 +256,44 @@ impl ServiceProvider for OpenSearchProvider {
             }
 
             // ----------------------------------------------------------------
+            // DescribeDomainConfig  GET /2021-01-01/opensearch/domain/{DomainName}/config
+            // ----------------------------------------------------------------
+            "DescribeDomainConfig" => {
+                let domain_name = ctx
+                    .path
+                    .trim_end_matches("/config")
+                    .split('/')
+                    .next_back()
+                    .unwrap_or("")
+                    .to_string();
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
+                        404,
+                    ));
+                };
+                match store.domains.get(&domain_name) {
+                    Some(domain) => Ok(json_ok(json!({
+                        "DomainConfig": {
+                            "EngineVersion": { "Options": domain.engine_version },
+                            "ClusterConfig": {
+                                "Options": {
+                                    "InstanceType": domain.cluster_config.instance_type,
+                                    "InstanceCount": domain.cluster_config.instance_count,
+                                }
+                            }
+                        }
+                    }))),
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
+                        404,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
             // UpdateDomainConfig  POST /2021-01-01/opensearch/domain/{DomainName}/config
             // ----------------------------------------------------------------
             "UpdateDomainConfig" => {

@@ -219,6 +219,35 @@ impl ServiceProvider for RedshiftProvider {
             }
 
             // ----------------------------------------------------------------
+            // RebootCluster
+            // ----------------------------------------------------------------
+            "RebootCluster" => {
+                let cluster_id = match str_param(ctx, "ClusterIdentifier") {
+                    Some(id) => id.to_string(),
+                    None => {
+                        return Ok(xml_error(
+                            "MissingParameter",
+                            "ClusterIdentifier required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.clusters.get_mut(&cluster_id) {
+                    Some(cluster) => {
+                        cluster.cluster_status = "available".to_string();
+                        let inner = format!("<Cluster>{}</Cluster>", cluster_xml(cluster));
+                        Ok(xml_resp("RebootCluster", &rid, &inner))
+                    }
+                    None => Ok(xml_error(
+                        "ClusterNotFound",
+                        &format!("Cluster {cluster_id} not found."),
+                        400,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
             // ModifyCluster
             // ----------------------------------------------------------------
             "ModifyCluster" => {

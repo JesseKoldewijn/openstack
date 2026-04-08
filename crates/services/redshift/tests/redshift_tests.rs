@@ -182,6 +182,34 @@ async fn test_modify_cluster() {
 }
 
 #[tokio::test]
+async fn test_reboot_cluster() {
+    let p = RedshiftProvider::new();
+    let mut params = HashMap::new();
+    params.insert(
+        "ClusterIdentifier".to_string(),
+        "reboot-cluster".to_string(),
+    );
+    p.dispatch(&make_ctx("CreateCluster", params))
+        .await
+        .unwrap();
+
+    let mut reboot = HashMap::new();
+    reboot.insert(
+        "ClusterIdentifier".to_string(),
+        "reboot-cluster".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("RebootCluster", reboot))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("RebootClusterResponse"));
+    assert!(body.contains("reboot-cluster"));
+    assert!(body.contains("available"));
+}
+
+#[tokio::test]
 async fn test_create_cluster_missing_identifier() {
     let p = RedshiftProvider::new();
     let resp = p

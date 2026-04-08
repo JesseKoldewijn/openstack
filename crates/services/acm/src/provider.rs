@@ -99,6 +99,38 @@ impl ServiceProvider for AcmProvider {
         let region = &ctx.region;
 
         match op {
+            "ExportCertificate" => {
+                let arn = match str_param(ctx, "CertificateArn") {
+                    Some(a) => a,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "CertificateArn is required",
+                            400,
+                        ));
+                    }
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Certificate {arn} not found"),
+                        400,
+                    ));
+                };
+                if !store.certificates.contains_key(&arn) {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Certificate {arn} not found"),
+                        400,
+                    ));
+                }
+                Ok(json_ok(json!({
+                    "Certificate": "-----BEGIN CERTIFICATE-----\nFAKE-CERT-DATA\n-----END CERTIFICATE-----",
+                    "CertificateChain": "-----BEGIN CERTIFICATE-----\nFAKE-CHAIN-DATA\n-----END CERTIFICATE-----",
+                    "PrivateKey": "-----BEGIN PRIVATE KEY-----\nFAKE-PRIVATE-KEY\n-----END PRIVATE KEY-----"
+                })))
+            }
+
             "ImportCertificate" => {
                 let cert_arn = str_param(ctx, "CertificateArn").unwrap_or_else(|| {
                     let cert_id = Uuid::new_v4().to_string();

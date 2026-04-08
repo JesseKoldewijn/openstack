@@ -72,6 +72,28 @@ async fn test_list_identities() {
 }
 
 #[tokio::test]
+async fn test_verify_domain_identity() {
+    let p = SesProvider::new();
+    let mut params = HashMap::new();
+    params.insert("Domain".to_string(), "example.com".to_string());
+    let resp = p
+        .dispatch(&make_ctx("VerifyDomainIdentity", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("VerifyDomainIdentityResponse"));
+    assert!(body.contains("<VerificationToken>example-com-verification-token</VerificationToken>"));
+
+    let resp = p
+        .dispatch(&make_ctx("ListIdentities", HashMap::new()))
+        .await
+        .unwrap();
+    let body = body_str(&resp);
+    assert!(body.contains("example.com"));
+}
+
+#[tokio::test]
 async fn test_get_identity_verification_attributes() {
     let p = SesProvider::new();
     let mut verify = HashMap::new();

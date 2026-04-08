@@ -142,6 +142,25 @@ impl ServiceProvider for SesProvider {
             }
 
             // ----------------------------------------------------------------
+            // VerifyDomainIdentity
+            // ----------------------------------------------------------------
+            "VerifyDomainIdentity" => {
+                let domain = match str_param(ctx, "Domain") {
+                    Some(d) => d.to_string(),
+                    None => return Ok(xml_error("MissingParameter", "Domain required", 400)),
+                };
+                let identity = Identity {
+                    identity: domain.clone(),
+                    verified: true,
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                store.identities.insert(domain.clone(), identity);
+                let token = format!("{}-verification-token", domain.replace('.', "-"));
+                let inner = format!("<VerificationToken>{token}</VerificationToken>");
+                Ok(xml_resp("VerifyDomainIdentity", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
             // ListIdentities
             // ----------------------------------------------------------------
             "ListIdentities" => {

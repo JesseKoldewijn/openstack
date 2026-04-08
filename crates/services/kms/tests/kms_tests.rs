@@ -192,6 +192,91 @@ async fn test_create_alias() {
 }
 
 #[tokio::test]
+async fn test_delete_alias() {
+    let p = KmsProvider::new();
+    let key_id = create_key(&p).await;
+
+    p.dispatch(&make_ctx(
+        "CreateAlias",
+        json!({
+            "AliasName": "alias/delete-me",
+            "TargetKeyId": key_id,
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DeleteAlias",
+            json!({ "AliasName": "alias/delete-me" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+
+    let resp = p
+        .dispatch(&make_ctx("ListAliases", json!({})))
+        .await
+        .unwrap();
+    let aliases = body(&resp)["Aliases"].as_array().unwrap().clone();
+    assert!(!aliases.iter().any(|a| a["AliasName"] == "alias/delete-me"));
+}
+
+#[tokio::test]
+async fn test_tag_list_and_untag_resource() {
+    let p = KmsProvider::new();
+    let key_id = create_key(&p).await;
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "TagResource",
+            json!({
+                "KeyId": key_id,
+                "Tags": [
+                    { "TagKey": "env", "TagValue": "prod" },
+                    { "TagKey": "team", "TagValue": "platform" }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+
+    let resp = p
+        .dispatch(&make_ctx("ListResourceTags", json!({ "KeyId": key_id })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let tags = body(&resp)["Tags"].as_array().unwrap().clone();
+    assert_eq!(tags.len(), 2);
+    assert!(
+        tags.iter()
+            .any(|t| t["TagKey"] == "env" && t["TagValue"] == "prod")
+    );
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "UntagResource",
+            json!({
+                "KeyId": key_id,
+                "TagKeys": ["env"]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+
+    let resp = p
+        .dispatch(&make_ctx("ListResourceTags", json!({ "KeyId": key_id })))
+        .await
+        .unwrap();
+    let tags = body(&resp)["Tags"].as_array().unwrap().clone();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0]["TagKey"], "team");
+}
+
+#[tokio::test]
 async fn test_schedule_key_deletion() {
     let p = KmsProvider::new();
     let key_id = create_key(&p).await;
@@ -208,6 +293,34 @@ async fn test_schedule_key_deletion() {
         .unwrap();
     assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
     assert!(body(&resp)["DeletionDate"].as_i64().is_some());
+}
+
+#[tokio::test]
+async fn test_cancel_key_deletion_restores_enabled_state() {
+    let p = KmsProvider::new();
+    let key_id = create_key(&p).await;
+
+    p.dispatch(&make_ctx(
+        "ScheduleKeyDeletion",
+        json!({
+            "KeyId": key_id,
+            "PendingWindowInDays": 7,
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx("CancelKeyDeletion", json!({ "KeyId": key_id })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+
+    let resp = p
+        .dispatch(&make_ctx("DescribeKey", json!({ "KeyId": key_id })))
+        .await
+        .unwrap();
+    assert_eq!(body(&resp)["KeyMetadata"]["KeyState"], "Enabled");
 }
 
 #[tokio::test]
