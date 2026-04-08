@@ -277,6 +277,41 @@ impl ServiceProvider for AcmProvider {
                 }
             }
 
+            "RemoveTagsFromCertificate" => {
+                let arn = match str_param(ctx, "CertificateArn") {
+                    Some(a) => a,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "CertificateArn is required",
+                            400,
+                        ));
+                    }
+                };
+                let tags = ctx
+                    .request_body
+                    .get("Tags")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.certificates.get_mut(&arn) {
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Certificate {arn} not found"),
+                        400,
+                    )),
+                    Some(c) => {
+                        for tag in &tags {
+                            if let Some(k) = tag.get("Key").and_then(|v| v.as_str()) {
+                                c.tags.remove(k);
+                            }
+                        }
+                        Ok(json_ok(json!({})))
+                    }
+                }
+            }
+
             _ => Ok(json_error(
                 "NotImplementedException",
                 &format!("Operation not implemented: {op}"),

@@ -218,6 +218,46 @@ impl ServiceProvider for RedshiftProvider {
                 Ok(xml_resp("DescribeClusters", &rid, &inner))
             }
 
+            // ----------------------------------------------------------------
+            // ModifyCluster
+            // ----------------------------------------------------------------
+            "ModifyCluster" => {
+                let cluster_id = match str_param(ctx, "ClusterIdentifier") {
+                    Some(id) => id.to_string(),
+                    None => {
+                        return Ok(xml_error(
+                            "MissingParameter",
+                            "ClusterIdentifier required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.clusters.get_mut(&cluster_id) {
+                    Some(cluster) => {
+                        if let Some(node_type) = str_param(ctx, "NodeType") {
+                            cluster.node_type = node_type.to_string();
+                        }
+                        if let Some(db_name) = str_param(ctx, "DBName") {
+                            cluster.db_name = db_name.to_string();
+                        }
+                        if let Some(port) = str_param(ctx, "Port").and_then(|s| s.parse().ok()) {
+                            cluster.port = port;
+                            if let Some(endpoint) = cluster.endpoint.as_mut() {
+                                endpoint.port = port;
+                            }
+                        }
+                        let inner = format!("<Cluster>{}</Cluster>", cluster_xml(cluster));
+                        Ok(xml_resp("ModifyCluster", &rid, &inner))
+                    }
+                    None => Ok(xml_error(
+                        "ClusterNotFound",
+                        &format!("Cluster {cluster_id} not found."),
+                        400,
+                    )),
+                }
+            }
+
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }

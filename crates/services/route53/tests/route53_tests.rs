@@ -162,6 +162,39 @@ async fn test_delete_hosted_zone() {
 }
 
 #[tokio::test]
+async fn test_get_hosted_zone() {
+    let p = Route53Provider::new();
+    let xml = r#"<CreateHostedZoneRequest><Name>get-zone.com</Name><CallerReference>r-get</CallerReference></CreateHostedZoneRequest>"#;
+    let create_resp = p
+        .dispatch(&make_ctx(
+            "CreateHostedZone",
+            xml,
+            "/2013-04-01/hostedzone",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    let create_body = body_str(&create_resp);
+    let id_raw = xml_text(&create_body, "Id").unwrap();
+    let zone_id = id_raw.trim_start_matches("/hostedzone/").to_string();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetHostedZone",
+            "",
+            &format!("/2013-04-01/hostedzone/{zone_id}"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetHostedZoneResponse"));
+    assert!(body.contains("get-zone.com."));
+    assert!(body.contains(&format!("/hostedzone/{zone_id}")));
+}
+
+#[tokio::test]
 async fn test_change_resource_record_sets() {
     let p = Route53Provider::new();
     // Create a zone

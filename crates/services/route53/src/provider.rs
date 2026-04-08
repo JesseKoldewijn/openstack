@@ -259,6 +259,44 @@ impl ServiceProvider for Route53Provider {
             }
 
             // ----------------------------------------------------------------
+            // GetHostedZone  GET /2013-04-01/hostedzone/{Id}
+            // ----------------------------------------------------------------
+            "GetHostedZone" => {
+                let zone_id = ctx.path.split('/').next_back().unwrap_or("").to_string();
+                let Some(store) = self.store.get(account_id, ROUTE53_REGION) else {
+                    return Ok(xml_error(
+                        "NoSuchHostedZone",
+                        &format!("No hosted zone found with ID: {zone_id}"),
+                        404,
+                    ));
+                };
+                let Some(zone) = store.zones.get(&zone_id) else {
+                    return Ok(xml_error(
+                        "NoSuchHostedZone",
+                        &format!("No hosted zone found with ID: {zone_id}"),
+                        404,
+                    ));
+                };
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<GetHostedZoneResponse xmlns=\"{ROUTE53_NS}\">\
+<HostedZone>\
+<Id>/hostedzone/{}</Id>\
+<Name>{}</Name>\
+<Config><Comment>{}</Comment><PrivateZone>{}</PrivateZone></Config>\
+<ResourceRecordSetCount>{}</ResourceRecordSetCount>\
+</HostedZone>\
+</GetHostedZoneResponse>",
+                    zone.id,
+                    xml_escape(&zone.name),
+                    xml_escape(&zone.comment),
+                    zone.private_zone,
+                    zone.record_count
+                );
+                Ok(xml_ok(body))
+            }
+
+            // ----------------------------------------------------------------
             // ChangeResourceRecordSets  POST /2013-04-01/hostedzone/{Id}/rrset
             // ----------------------------------------------------------------
             "ChangeResourceRecordSets" => {

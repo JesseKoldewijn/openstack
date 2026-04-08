@@ -175,6 +175,48 @@ async fn test_add_tags() {
 }
 
 #[tokio::test]
+async fn test_remove_tags() {
+    let p = AcmProvider::new();
+    let arn = request_cert(&p, "tagged-remove.com").await;
+
+    p.dispatch(&make_ctx(
+        "AddTagsToCertificate",
+        json!({
+            "CertificateArn": arn,
+            "Tags": [
+                { "Key": "env", "Value": "prod" },
+                { "Key": "team", "Value": "platform" }
+            ],
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "RemoveTagsFromCertificate",
+            json!({
+                "CertificateArn": arn,
+                "Tags": [{ "Key": "env" }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListTagsForCertificate",
+            json!({ "CertificateArn": arn }),
+        ))
+        .await
+        .unwrap();
+    let tags = body(&resp)["Tags"].as_array().unwrap().clone();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0]["Key"], "team");
+}
+
+#[tokio::test]
 async fn test_describe_not_found() {
     let p = AcmProvider::new();
     let missing_arn = "arn:aws:acm:us-east-1:000000000000:certificate/nonexistent";

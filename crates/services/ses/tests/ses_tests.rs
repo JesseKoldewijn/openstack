@@ -140,6 +140,33 @@ async fn test_send_raw_email() {
 }
 
 #[tokio::test]
+async fn test_delete_identity() {
+    let p = SesProvider::new();
+    let mut verify = HashMap::new();
+    verify.insert("EmailAddress".to_string(), "gone@example.com".to_string());
+    p.dispatch(&make_ctx("VerifyEmailIdentity", verify))
+        .await
+        .unwrap();
+
+    let mut delete = HashMap::new();
+    delete.insert("Identity".to_string(), "gone@example.com".to_string());
+    let resp = p
+        .dispatch(&make_ctx("DeleteIdentity", delete))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("DeleteIdentityResponse"));
+
+    let resp = p
+        .dispatch(&make_ctx("ListIdentities", HashMap::new()))
+        .await
+        .unwrap();
+    let body = body_str(&resp);
+    assert!(!body.contains("gone@example.com"));
+}
+
+#[tokio::test]
 async fn test_verify_email_identity_missing_address() {
     let p = SesProvider::new();
     let resp = p
