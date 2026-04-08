@@ -1155,6 +1155,20 @@ if is_active "iam"; then
     bench_targets "iam" "list_users" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=ListUsers&Version=2010-05-08"
+
+    # Seed one role for read benchmarking
+    if seed_all_targets "iam" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+         -H "Content-Type: application/x-www-form-urlencoded" \
+         -d "Action=CreateRole&RoleName=bench-role-$$&AssumeRolePolicyDocument=%7B%22Version%22%3A%222012-10-17%22%7D&Version=2010-05-08"; then
+
+      bench_dynamic_targets "iam" "create_role" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+        "Action=CreateRole&RoleName=bench-create-role-$$-{i}&AssumeRolePolicyDocument=%7B%22Version%22%3A%222012-10-17%22%7D&Version=2010-05-08" \
+        -H "Content-Type: application/x-www-form-urlencoded"
+
+      bench_targets "iam" "get_role" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=GetRole&RoleName=bench-role-$$&Version=2010-05-08"
+    fi
   else
     skip_service "iam" "Failed to create seed user"
   fi

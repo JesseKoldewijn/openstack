@@ -27,7 +27,7 @@ Notes:
 | ecr | 8 | 14 | 5 | 2 | 4 |
 | eventbridge | 14 | 16 | 2 | 1 | 5 |
 | firehose | 6 | 7 | 3 | 1 | 4 |
-| iam | 15 | 17 | 0 | 1 | 3 |
+| iam | 15 | 17 | 3 | 1 | 5 |
 | kinesis | 17 | 18 | 4 | 1 | 3 |
 | kms | 20 | 18 | 2 | 1 | 2 |
 | lambda | 26 | 31 | 3 | 1 | 6 |
@@ -121,9 +121,9 @@ Notes:
 
 - implemented_ops (15): `AddUserToGroup`, `AssumeRole`, `AttachRolePolicy`, `AttachUserPolicy`, `CreateGroup`, `CreatePolicy`, `CreateRole`, `CreateUser`, `DeleteRole`, `DeleteUser`, `GetPolicy`, `GetRole`, `GetUser`, `ListUsers`, `PutRolePolicy`
 - unit_tests: 17
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_iam_and_sts_query_with_latency_guardrail`
-- bench_ops (3): `create_user`, `get_user`, `list_users`
+- bench_ops (5): `create_role`, `create_user`, `get_role`, `get_user`, `list_users`
 
 ### kinesis
 
@@ -241,4 +241,3 @@ Notes:
 
 Services still missing dedicated perf coverage, with especially thin benchmark breadth:
 
-- **iam** — perf_tests=0, bench_ops=3
