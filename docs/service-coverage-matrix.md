@@ -21,7 +21,7 @@ Notes:
 | acm | 9 | 9 | 3 | 1 | 3 |
 | apigateway | 12 | 13 | 3 | 1 | 4 |
 | cloudformation | 7 | 13 | 3 | 1 | 4 |
-| cloudwatch | 17 | 21 | 2 | 1 | 2 |
+| cloudwatch | 17 | 21 | 3 | 1 | 3 |
 | dynamodb | 19 | 29 | 8 | 1 | 4 |
 | ec2 | 11 | 12 | 3 | 1 | 3 |
 | ecr | 8 | 14 | 5 | 2 | 4 |
@@ -29,7 +29,7 @@ Notes:
 | firehose | 6 | 7 | 3 | 1 | 4 |
 | iam | 15 | 17 | 3 | 1 | 5 |
 | kinesis | 17 | 18 | 4 | 1 | 3 |
-| kms | 20 | 18 | 2 | 1 | 2 |
+| kms | 20 | 18 | 3 | 1 | 3 |
 | lambda | 26 | 31 | 3 | 1 | 6 |
 | opensearch | 6 | 8 | 3 | 1 | 4 |
 | redshift | 5 | 9 | 3 | 1 | 3 |
@@ -41,7 +41,7 @@ Notes:
 | sqs | 14 | 32 | 3 | 1 | 5 |
 | ssm | 7 | 8 | 3 | 1 | 4 |
 | stepfunctions | 9 | 12 | 3 | 1 | 3 |
-| sts | 5 | 8 | 5 | 1 | 2 |
+| sts | 5 | 8 | 5 | 1 | 4 |
 
 ## Detailed per service
 
@@ -73,9 +73,9 @@ Notes:
 
 - implemented_ops (17): `CreateLogGroup`, `CreateLogStream`, `DeleteAlarms`, `DeleteLogGroup`, `DescribeAlarms`, `DescribeLogGroups`, `DescribeLogStreams`, `FilterLogEvents`, `GetLogEvents`, `GetMetricData`, `GetMetricStatistics`, `ListMetrics`, `PutLogEvents`, `PutMetricAlarm`, `PutMetricData`, `PutRetentionPolicy`, `SetAlarmState`
 - unit_tests: 21
-- perf_tests: 2
+- perf_tests: 3
 - smoke_tests (1): `smoke_cloudwatch_metrics_with_latency_guardrail`
-- bench_ops (2): `list_metrics`, `put_metric_data`
+- bench_ops (3): `get_metric_statistics`, `list_metrics`, `put_metric_data`
 
 ### dynamodb
 
@@ -137,9 +137,9 @@ Notes:
 
 - implemented_ops (20): `CancelKeyDeletion`, `CreateAlias`, `CreateKey`, `Decrypt`, `DeleteAlias`, `DescribeKey`, `DisableKey`, `EnableKey`, `Encrypt`, `GenerateDataKey`, `GenerateDataKeyWithoutPlaintext`, `GenerateRandom`, `ListAliases`, `ListKeys`, `ListResourceTags`, `ScheduleKeyDeletion`, `Sign`, `TagResource`, `UntagResource`, `Verify`
 - unit_tests: 18
-- perf_tests: 2
+- perf_tests: 3
 - smoke_tests (1): `smoke_kms_key_lifecycle`
-- bench_ops (2): `create_key`, `list_keys`
+- bench_ops (3): `create_key`, `describe_key`, `list_keys`
 
 ### lambda
 
@@ -235,7 +235,7 @@ Notes:
 - unit_tests: 8
 - perf_tests: 5
 - smoke_tests (1): `smoke_iam_and_sts_query_with_latency_guardrail`
-- bench_ops (2): `assume_role`, `get_caller_identity`
+- bench_ops (4): `assume_role`, `get_access_key_info`, `get_caller_identity`, `get_session_token`
 
 ## Immediate completion priorities
 

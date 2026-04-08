@@ -1193,6 +1193,16 @@ if is_active "sts"; then
   bench_targets "sts" "assume_role" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "Action=AssumeRole&RoleArn=arn:aws:iam::000000000000:role/bench-role&RoleSessionName=bench-session&Version=2011-06-15"
+
+  # GetSessionToken
+  bench_targets "sts" "get_session_token" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=GetSessionToken&Version=2011-06-15"
+
+  # GetAccessKeyInfo
+  bench_targets "sts" "get_access_key_info" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=GetAccessKeyInfo&AccessKeyId=AKIAIOSFODNN7EXAMPLE&Version=2011-06-15"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1520,6 +1530,10 @@ if is_active "cloudwatch"; then
   bench_targets "cloudwatch" "list_metrics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "Action=ListMetrics&Version=2010-08-01"
+
+  bench_targets "cloudwatch" "get_metric_statistics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=GetMetricStatistics&Version=2010-08-01&Namespace=OpenStackBench&MetricName=Latency&StartTime=2024-01-01T00%3A00%3A00Z&EndTime=2024-01-01T01%3A00%3A00Z&Period=60&Statistics.member.1=Average"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1688,6 +1702,45 @@ if is_active "kms"; then
     '{"Description":"bench-key-{i}"}' \
     "${KMS_HEADERS[@]}" \
     -H "X-Amz-Target: TrentService.CreateKey"
+
+  _kms_seed_os=$(curl -s -X POST "$OS_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: TrentService.CreateKey" \
+    -d '{"Description":"bench-describe-key-os"}' || true)
+  _kms_seed_ls=$(curl -s -X POST "$LS_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: TrentService.CreateKey" \
+    -d '{"Description":"bench-describe-key-ls"}' || true)
+  _kms_seed_moto=$(curl -s -X POST "$MOTO_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: TrentService.CreateKey" \
+    -d '{"Description":"bench-describe-key-moto"}' || true)
+
+  _kms_key_id_os=$(printf '%s' "$_kms_seed_os" | jq -r '.KeyMetadata.KeyId // empty' 2>/dev/null)
+  _kms_key_id_ls=$(printf '%s' "$_kms_seed_ls" | jq -r '.KeyMetadata.KeyId // empty' 2>/dev/null)
+  _kms_key_id_moto=$(printf '%s' "$_kms_seed_moto" | jq -r '.KeyMetadata.KeyId // empty' 2>/dev/null)
+
+  if [[ -n "${_kms_key_id_os:-}" ]]; then
+    log "  kms/describe_key (openstack)..."
+    bench "kms" "describe_key" "os" POST "$OS_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.DescribeKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_os}\"}"
+  fi
+  if target_active ls && [[ -n "${_kms_key_id_ls:-}" ]]; then
+    log "  kms/describe_key (localstack)..."
+    bench "kms" "describe_key" "ls" POST "$LS_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.DescribeKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_ls}\"}"
+  fi
+  if target_active moto && [[ -n "${_kms_key_id_moto:-}" ]]; then
+    log "  kms/describe_key (moto)..."
+    bench "kms" "describe_key" "moto" POST "$MOTO_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.DescribeKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_moto}\"}"
+  fi
 
   bench_targets "kms" "list_keys" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     "${KMS_HEADERS[@]}" \

@@ -132,3 +132,40 @@ async fn perf_sign_verify_round_trip() {
         elapsed.as_millis()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Perf 3 — CreateKey + DescribeKey round-trip × 100 in under 1500 ms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_create_and_describe_key_round_trip() {
+    let p = KmsProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let resp = p
+            .dispatch(&make_ctx(
+                "CreateKey",
+                json!({ "Description": format!("perf-desc-key-{i}") }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+        let b: Value = serde_json::from_slice(resp.body.as_bytes()).unwrap();
+        let key_id = b["KeyMetadata"]["KeyId"].as_str().unwrap().to_string();
+
+        let desc = p
+            .dispatch(&make_ctx("DescribeKey", json!({ "KeyId": key_id })))
+            .await
+            .unwrap();
+        assert_eq!(desc.status_code, 200);
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 1500,
+        "CreateKey+DescribeKey round-trip×{n} took {}ms — expected <1500ms",
+        elapsed.as_millis()
+    );
+}
