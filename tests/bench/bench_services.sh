@@ -328,6 +328,7 @@ bench_dynamic() {
   start_ts=$(date +%s%3N)   # ms since epoch
 
   local i
+  local pids=()
   for (( i=1; i<=dynamic_n; i++ )); do
     local body="${body_template//\{i\}/$i}"
     # Write result file: "time_total_ms http_code"
@@ -341,13 +342,20 @@ bench_dynamic() {
       time_ms=$(awk "BEGIN{printf \"%.2f\", ${time_s:-0}*1000}")
       printf '%s %s\n' "$time_ms" "${code:-000}" > "$tmpdir/$i"
     ) &
+    pids+=("$!")
 
-    # Wait for batch to complete every $CONC jobs
+    # Wait for the current batch only; do not wait on unrelated background jobs
+    # such as the openstack binary running in --binary mode.
     if (( i % CONC == 0 )); then
-      wait
+      for pid in "${pids[@]}"; do
+        wait "$pid"
+      done
+      pids=()
     fi
   done
-  wait   # final stragglers
+  for pid in "${pids[@]}"; do
+    wait "$pid"
+  done
 
   end_ts=$(date +%s%3N)
   wall_secs=$(awk "BEGIN{printf \"%.3f\", ($end_ts - $start_ts)/1000}")
