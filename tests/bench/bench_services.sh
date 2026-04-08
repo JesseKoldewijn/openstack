@@ -1492,6 +1492,10 @@ if is_active "ec2"; then
     bench_targets "ec2" "describe_instances" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=DescribeInstances&Version=2016-11-15"
+
+    bench_dynamic_targets "ec2" "create_vpc" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=CreateVpc&Version=2016-11-15&CidrBlock=10.{i}.0.0%2F16" \
+      -H "Content-Type: application/x-www-form-urlencoded"
   else
     skip_service "ec2" "Failed to create seed instance"
   fi
@@ -2042,6 +2046,10 @@ if is_active "ses"; then
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=SendEmail&Version=2010-12-01&Source=${_ses_sender_enc}&Destination.ToAddresses.member.1=dest%40example.com&Message.Subject.Data=Benchmark&Message.Body.Text.Data=hello"
 
+    bench_targets "ses" "send_raw_email" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=SendRawEmail&Version=2010-12-01&Source=${_ses_sender_enc}&RawMessage.Data=From%3A%20bench%40example.com%0D%0ATo%3A%20dest%40example.com%0D%0ASubject%3A%20Raw%0D%0A%0D%0ABody"
+
     bench_targets "ses" "list_identities" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=ListIdentities&Version=2010-12-01"
@@ -2202,6 +2210,11 @@ if is_active "ssm"; then
     "${SSM_HEADERS[@]}" \
     -H "X-Amz-Target: AmazonSSM.GetParameter" \
     -d '{"Name":"/bench/static-param"}'
+
+  bench_targets "ssm" "get_parameters_by_path" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.GetParametersByPath" \
+    -d '{"Path":"/bench","Recursive":true}'
 
   bench_targets "ssm" "describe_parameters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     "${SSM_HEADERS[@]}" \

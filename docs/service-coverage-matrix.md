@@ -23,7 +23,7 @@ Notes:
 | cloudformation | 7 | 13 | 0 | 1 | 3 |
 | cloudwatch | 17 | 21 | 2 | 1 | 2 |
 | dynamodb | 19 | 29 | 8 | 1 | 4 |
-| ec2 | 11 | 12 | 0 | 1 | 2 |
+| ec2 | 11 | 12 | 3 | 1 | 3 |
 | ecr | 8 | 14 | 5 | 2 | 4 |
 | eventbridge | 14 | 16 | 2 | 1 | 5 |
 | firehose | 6 | 7 | 0 | 1 | 3 |
@@ -36,10 +36,10 @@ Notes:
 | route53 | 8 | 8 | 3 | 1 | 4 |
 | s3 | 27 | 34 | 6 | 8 | 4 |
 | secretsmanager | 8 | 8 | 0 | 1 | 4 |
-| ses | 7 | 9 | 0 | 1 | 3 |
+| ses | 7 | 9 | 3 | 1 | 4 |
 | sns | 9 | 22 | 3 | 1 | 3 |
 | sqs | 14 | 32 | 0 | 1 | 4 |
-| ssm | 7 | 8 | 0 | 1 | 3 |
+| ssm | 7 | 8 | 3 | 1 | 4 |
 | stepfunctions | 9 | 12 | 3 | 1 | 3 |
 | sts | 5 | 8 | 5 | 1 | 2 |
 
@@ -89,9 +89,9 @@ Notes:
 
 - implemented_ops (11): `AuthorizeSecurityGroupIngress`, `CreateSecurityGroup`, `CreateSubnet`, `CreateVpc`, `DeleteVpc`, `DescribeInstances`, `DescribeSecurityGroups`, `DescribeSubnets`, `DescribeVpcs`, `RunInstances`, `TerminateInstances`
 - unit_tests: 12
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_ec2_instance_lifecycle_with_latency_guardrail`
-- bench_ops (2): `describe_instances`, `run_instances`
+- bench_ops (3): `create_vpc`, `describe_instances`, `run_instances`
 
 ### ecr
 
@@ -193,9 +193,9 @@ Notes:
 
 - implemented_ops (7): `DeleteIdentity`, `GetIdentityVerificationAttributes`, `ListIdentities`, `SendEmail`, `SendRawEmail`, `VerifyDomainIdentity`, `VerifyEmailIdentity`
 - unit_tests: 9
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_ses_identity_and_send_email_with_latency_guardrail`
-- bench_ops (3): `list_identities`, `send_email`, `verify_email_identity`
+- bench_ops (4): `list_identities`, `send_email`, `send_raw_email`, `verify_email_identity`
 
 ### sns
 
@@ -217,9 +217,9 @@ Notes:
 
 - implemented_ops (7): `DeleteParameter`, `DeleteParameters`, `DescribeParameters`, `GetParameter`, `GetParameters`, `GetParametersByPath`, `PutParameter`
 - unit_tests: 8
-- perf_tests: 0
+- perf_tests: 3
 - smoke_tests (1): `smoke_ssm_parameter_lifecycle`
-- bench_ops (3): `describe_parameters`, `get_parameter`, `put_parameter`
+- bench_ops (4): `describe_parameters`, `get_parameter`, `get_parameters_by_path`, `put_parameter`
 
 ### stepfunctions
 
@@ -243,11 +243,8 @@ Services still missing dedicated perf coverage, with especially thin benchmark b
 
 - **apigateway** — perf_tests=0, bench_ops=3
 - **cloudformation** — perf_tests=0, bench_ops=3
-- **ec2** — perf_tests=0, bench_ops=2
 - **firehose** — perf_tests=0, bench_ops=3
 - **iam** — perf_tests=0, bench_ops=3
 - **opensearch** — perf_tests=0, bench_ops=3
 - **secretsmanager** — perf_tests=0, bench_ops=4
-- **ses** — perf_tests=0, bench_ops=3
 - **sqs** — perf_tests=0, bench_ops=4
-- **ssm** — perf_tests=0, bench_ops=3
