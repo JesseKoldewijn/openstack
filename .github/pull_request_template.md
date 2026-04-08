@@ -31,6 +31,7 @@
 
 ## Checklist
 
+- [ ] PR title follows Conventional Commit style (`feat:`, `fix:`, `perf:`, etc.)
 - [ ] This PR targets **`develop`**, not `main`
 - [ ] Code is formatted with `cargo fmt`
 - [ ] No new Clippy warnings introduced
