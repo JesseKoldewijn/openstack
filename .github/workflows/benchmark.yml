@@ -245,7 +245,7 @@ jobs:
             --report benchmark-report.json \
             --p95-max 10 \
             "${MEMORY_ARG[@]}" \
-            --op-p95-max "acm/request_certificate=40,apigateway/create_rest_api=50,apigateway/get_rest_api=15,cloudformation/create_stack=75,cloudformation/describe_stacks=20,cloudwatch/put_metric_data=25,ec2/run_instances=75,kms/create_key=25,opensearch/create_domain=60,opensearch/describe_domain=20,redshift/create_cluster=60,route53/create_hosted_zone=40,route53/list_resource_record_sets=20,ses/verify_email_identity=20,ses/send_email=25,ssm/put_parameter=25,ssm/get_parameter=15,lambda/update_function_code=20,s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=400,s3/get_object_10mb=250,s3/put_object_50mb=1600,s3/get_object_50mb=1000,s3/put_object_100mb=2000,s3/get_object_100mb=2000" \
+            --op-p95-max "acm/request_certificate=40,apigateway/create_rest_api=50,apigateway/get_rest_api=15,cloudformation/create_stack=75,cloudformation/describe_stacks=20,cloudwatch/put_metric_data=25,ec2/run_instances=75,kms/create_key=25,opensearch/create_domain=60,opensearch/describe_domain=20,redshift/create_cluster=60,route53/create_hosted_zone=40,route53/list_resource_record_sets=20,ses/verify_email_identity=20,ses/send_email=25,ssm/put_parameter=25,ssm/get_parameter=15,stepfunctions/create_state_machine=40,stepfunctions/start_execution=25,lambda/update_function_code=20,s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=400,s3/get_object_10mb=250,s3/put_object_50mb=1600,s3/get_object_50mb=1000,s3/put_object_100mb=2000,s3/get_object_100mb=2000" \
             --output benchmark-gate.json
       - name: Benchmark report
         if: always()

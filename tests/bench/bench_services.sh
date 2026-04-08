@@ -2158,11 +2158,31 @@ if is_active "stepfunctions"; then
   log_section "StepFunctions (JSON)"
 
   SFN_HEADERS=(-H "Content-Type: application/x-amz-json-1.0")
+  _sfn_definition='{"StartAt":"Done","States":{"Done":{"Type":"Pass","Result":{"ok":true},"End":true}}}'
+  _sfn_definition_json=$(jq -Rn --arg def "$_sfn_definition" '$def')
 
-  bench_targets "stepfunctions" "list_state_machines" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    "${SFN_HEADERS[@]}" \
-    -H "X-Amz-Target: AWSStepFunctions.ListStateMachines" \
-    -d '{}'
+  if seed_all_targets "stepfunctions" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       "${SFN_HEADERS[@]}" \
+       -H "X-Amz-Target: AWSStepFunctions.CreateStateMachine" \
+       -d "{\"name\":\"bench-machine-$$\",\"definition\":${_sfn_definition_json},\"roleArn\":\"arn:aws:iam::000000000000:role/sf-role\"}"; then
+
+    bench_dynamic_targets "stepfunctions" "create_state_machine" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "{\"name\":\"bench-machine-create-$$-{i}\",\"definition\":${_sfn_definition_json},\"roleArn\":\"arn:aws:iam::000000000000:role/sf-role\"}" \
+      "${SFN_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSStepFunctions.CreateStateMachine"
+
+    bench_dynamic_targets "stepfunctions" "start_execution" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "{\"stateMachineArn\":\"arn:aws:states:us-east-1:000000000000:stateMachine:bench-machine-$$\",\"input\":\"{}\",\"name\":\"bench-exec-{i}\"}" \
+      "${SFN_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSStepFunctions.StartExecution"
+
+    bench_targets "stepfunctions" "list_state_machines" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${SFN_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSStepFunctions.ListStateMachines" \
+      -d '{}'
+  else
+    skip_service "stepfunctions" "Failed to create seed state machine"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
