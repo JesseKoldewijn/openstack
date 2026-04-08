@@ -1118,10 +1118,33 @@ if is_active "sns"; then
         "${MOTO_EXTRA[@]}"
     fi
 
+    # Seed one subscription per target so list-subscription benches have data
+    if [[ -n "$OS_TOPIC_ARN" ]]; then
+      curl -s -X POST "$OS_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=Subscribe&TopicArn=$OS_TOPIC_ARN&Protocol=https&Endpoint=https%3A%2F%2Fexample.com%2Fbench-sns" >/dev/null 2>&1 || true
+    fi
+    if target_active ls && [[ -n "$LS_TOPIC_ARN" ]]; then
+      curl -s -X POST "$LS_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=Subscribe&TopicArn=$LS_TOPIC_ARN&Protocol=https&Endpoint=https%3A%2F%2Fexample.com%2Fbench-sns" >/dev/null 2>&1 || true
+    fi
+    if target_active moto && [[ -n "$MOTO_TOPIC_ARN" ]]; then
+      curl -s -X POST "$MOTO_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=Subscribe&TopicArn=$MOTO_TOPIC_ARN&Protocol=https&Endpoint=https%3A%2F%2Fexample.com%2Fbench-sns" \
+        "${MOTO_EXTRA[@]}" >/dev/null 2>&1 || true
+    fi
+
     # ListTopics — bench_targets appends MOTO_EXTRA automatically
     bench_targets "sns" "list_topics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=ListTopics"
+
+    # ListSubscriptions
+    bench_targets "sns" "list_subscriptions" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=ListSubscriptions"
   else
     skip_service "sns" "Failed to create seed topic"
   fi
@@ -1677,6 +1700,12 @@ if is_active "eventbridge"; then
       "${EVENTS_HEADERS[@]}" \
       -H "X-Amz-Target: AWSEvents.DescribeRule" \
       -d '{"Name":"'"$_eb_rule"'","EventBusName":"'"$_eb_bus"'"}'
+
+    # DescribeEventBus
+    bench_targets "eventbridge" "describe_event_bus" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${EVENTS_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSEvents.DescribeEventBus" \
+      -d '{"Name":"'"$_eb_bus"'"}'
 
     # ListTargetsByRule
     bench_targets "eventbridge" "list_targets_by_rule" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
@@ -2367,6 +2396,11 @@ if is_active "stepfunctions"; then
       "${SFN_HEADERS[@]}" \
       -H "X-Amz-Target: AWSStepFunctions.ListStateMachines" \
       -d '{}'
+
+    bench_targets "stepfunctions" "describe_state_machine" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${SFN_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSStepFunctions.DescribeStateMachine" \
+      -d "{\"stateMachineArn\":\"arn:aws:states:us-east-1:000000000000:stateMachine:bench-machine-$$\"}"
   else
     skip_service "stepfunctions" "Failed to create seed state machine"
   fi

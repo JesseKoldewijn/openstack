@@ -25,7 +25,7 @@ Notes:
 | dynamodb | 19 | 29 | 8 | 1 | 4 |
 | ec2 | 11 | 12 | 3 | 1 | 3 |
 | ecr | 8 | 14 | 5 | 2 | 4 |
-| eventbridge | 14 | 16 | 2 | 1 | 5 |
+| eventbridge | 14 | 16 | 3 | 1 | 6 |
 | firehose | 6 | 7 | 3 | 1 | 4 |
 | iam | 15 | 17 | 3 | 1 | 5 |
 | kinesis | 17 | 18 | 4 | 1 | 3 |
@@ -37,10 +37,10 @@ Notes:
 | s3 | 27 | 34 | 6 | 8 | 4 |
 | secretsmanager | 8 | 8 | 3 | 1 | 5 |
 | ses | 7 | 9 | 3 | 1 | 4 |
-| sns | 9 | 22 | 3 | 1 | 3 |
+| sns | 9 | 22 | 3 | 1 | 4 |
 | sqs | 14 | 32 | 3 | 1 | 5 |
 | ssm | 7 | 8 | 3 | 1 | 4 |
-| stepfunctions | 9 | 12 | 3 | 1 | 3 |
+| stepfunctions | 9 | 12 | 3 | 1 | 4 |
 | sts | 5 | 8 | 5 | 1 | 4 |
 
 ## Detailed per service
@@ -105,9 +105,9 @@ Notes:
 
 - implemented_ops (14): `CreateEventBus`, `DeleteEventBus`, `DeleteRule`, `DescribeEventBus`, `DescribeRule`, `DisableRule`, `EnableRule`, `ListEventBuses`, `ListRules`, `ListTargetsByRule`, `PutEvents`, `PutRule`, `PutTargets`, `RemoveTargets`
 - unit_tests: 16
-- perf_tests: 2
+- perf_tests: 3
 - smoke_tests (1): `smoke_eventbridge_rule_lifecycle_with_latency_guardrail`
-- bench_ops (5): `describe_rule`, `list_event_buses`, `list_rules`, `list_targets_by_rule`, `put_rule`
+- bench_ops (6): `describe_event_bus`, `describe_rule`, `list_event_buses`, `list_rules`, `list_targets_by_rule`, `put_rule`
 
 ### firehose
 
@@ -203,7 +203,7 @@ Notes:
 - unit_tests: 22
 - perf_tests: 3
 - smoke_tests (1): `smoke_sns_topic_lifecycle`
-- bench_ops (3): `get_topic_attributes`, `list_topics`, `publish`
+- bench_ops (4): `get_topic_attributes`, `list_subscriptions`, `list_topics`, `publish`
 
 ### sqs
 
@@ -227,7 +227,7 @@ Notes:
 - unit_tests: 12
 - perf_tests: 3
 - smoke_tests (1): `smoke_stepfunctions_lifecycle_with_latency_guardrail`
-- bench_ops (3): `create_state_machine`, `list_state_machines`, `start_execution`
+- bench_ops (4): `create_state_machine`, `describe_state_machine`, `list_state_machines`, `start_execution`
 
 ### sts
 
