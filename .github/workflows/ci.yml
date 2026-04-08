@@ -29,8 +29,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  semver-pr-title:
-    name: SemVer PR Title
+  conventional-pr-title:
+    name: Conventional PR Title
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -50,8 +50,8 @@ jobs:
             exit 1
           fi
 
-  semver-push-subject:
-    name: SemVer Push Subjects
+  conventional-push-subjects:
+    name: Conventional Push Subjects
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     runs-on: ubuntu-latest
     steps:
