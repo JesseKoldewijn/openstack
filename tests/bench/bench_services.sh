@@ -1392,6 +1392,13 @@ if is_active "acm"; then
 
   ACM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
+  # Moto's multi-service root can mis-route ACM JSON-target requests to S3
+  # unless SigV4-like headers are present.
+  MOTO_EXTRA=(
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/acm/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy"
+    -H "X-Amz-Date: 20260101T000000Z"
+  )
+
   bench_dynamic_targets "acm" "request_certificate" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     '{"DomainName":"bench-acm-{i}.example.com","SubjectAlternativeNames":["www.bench-acm-{i}.example.com"]}' \
     "${ACM_HEADERS[@]}" \
@@ -1408,6 +1415,8 @@ if is_active "acm"; then
   _acm_seed_moto=$(curl -s -X POST "$MOTO_BASE" \
     -H "Content-Type: application/x-amz-json-1.1" \
     -H "X-Amz-Target: CertificateManager.RequestCertificate" \
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/acm/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy" \
+    -H "X-Amz-Date: 20260101T000000Z" \
     -d '{"DomainName":"bench-acm-describe-moto.example.com"}' || true)
 
   _acm_arn_os=$(printf '%s' "$_acm_seed_os" | jq -r '.CertificateArn // empty' 2>/dev/null)
@@ -1458,6 +1467,8 @@ if is_active "acm"; then
       -H "X-Amz-Target: CertificateManager.ExportCertificate" \
       -d "{\"CertificateArn\":\"${_acm_arn_moto:-missing}\"}"
   fi
+
+  MOTO_EXTRA=()
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
