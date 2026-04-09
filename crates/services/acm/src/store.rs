@@ -30,6 +30,9 @@ pub struct Certificate {
     pub status: CertificateStatus,
     pub created: DateTime<Utc>,
     pub tags: HashMap<String, String>,
+    pub certificate_pem: String,
+    pub certificate_chain_pem: Option<String>,
+    pub private_key_pem: String,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

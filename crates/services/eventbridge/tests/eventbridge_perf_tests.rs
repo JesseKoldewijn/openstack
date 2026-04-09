@@ -100,3 +100,38 @@ async fn perf_put_events_large_batch() {
         elapsed.as_millis()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Perf 3 — CreateEventBus + DescribeEventBus round-trip × 100 under 1500 ms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_create_and_describe_event_bus_round_trip() {
+    let p = EventBridgeProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let name = format!("perf-bus-{i:03}");
+        let create = p
+            .dispatch(&make_ctx("CreateEventBus", json!({ "Name": name })))
+            .await
+            .unwrap();
+        assert_eq!(create.status_code, 200);
+
+        let describe = p
+            .dispatch(&make_ctx("DescribeEventBus", json!({ "Name": name })))
+            .await
+            .unwrap();
+        assert_eq!(describe.status_code, 200);
+        let b: Value = serde_json::from_slice(describe.body.as_bytes()).unwrap();
+        assert_eq!(b["Name"], format!("perf-bus-{i:03}"));
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 1500,
+        "CreateEventBus+DescribeEventBus round-trip×{n} took {}ms — expected <1500ms",
+        elapsed.as_millis()
+    );
+}

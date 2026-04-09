@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct HostedZone {
     pub id: String,   // /hostedzone/<id>
     pub name: String, // DNS name with trailing dot
+    pub caller_reference: String,
     pub comment: String,
     pub private_zone: bool,
     pub record_count: usize,

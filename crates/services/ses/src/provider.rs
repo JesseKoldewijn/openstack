@@ -142,6 +142,25 @@ impl ServiceProvider for SesProvider {
             }
 
             // ----------------------------------------------------------------
+            // VerifyDomainIdentity
+            // ----------------------------------------------------------------
+            "VerifyDomainIdentity" => {
+                let domain = match str_param(ctx, "Domain") {
+                    Some(d) => d.to_string(),
+                    None => return Ok(xml_error("MissingParameter", "Domain required", 400)),
+                };
+                let identity = Identity {
+                    identity: domain.clone(),
+                    verified: true,
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                store.identities.insert(domain.clone(), identity);
+                let token = format!("{}-verification-token", domain.replace('.', "-"));
+                let inner = format!("<VerificationToken>{token}</VerificationToken>");
+                Ok(xml_resp("VerifyDomainIdentity", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
             // ListIdentities
             // ----------------------------------------------------------------
             "ListIdentities" => {
@@ -161,6 +180,33 @@ impl ServiceProvider for SesProvider {
                 };
                 let inner = identities;
                 Ok(xml_resp("ListIdentities", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
+            // GetIdentityVerificationAttributes
+            // ----------------------------------------------------------------
+            "GetIdentityVerificationAttributes" => {
+                let identities = addresses_from_params(ctx, "Identities.member");
+                let attrs = self
+                    .store
+                    .get(account_id, region)
+                    .map(|store| {
+                        identities
+                            .iter()
+                            .filter_map(|identity| {
+                                store.identities.get(identity).map(|id| {
+                                    format!(
+                                        "<entry><key>{}</key><value><VerificationStatus>{}</VerificationStatus></value></entry>",
+                                        identity,
+                                        if id.verified { "Success" } else { "Pending" }
+                                    )
+                                })
+                            })
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                let inner = format!("<VerificationAttributes>{attrs}</VerificationAttributes>");
+                Ok(xml_resp("GetIdentityVerificationAttributes", &rid, &inner))
             }
 
             // ----------------------------------------------------------------
@@ -224,6 +270,19 @@ impl ServiceProvider for SesProvider {
                 store.emails.insert(message_id.clone(), email);
                 let inner = format!("<MessageId>{message_id}</MessageId>");
                 Ok(xml_resp("SendRawEmail", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
+            // DeleteIdentity
+            // ----------------------------------------------------------------
+            "DeleteIdentity" => {
+                let identity = match str_param(ctx, "Identity") {
+                    Some(i) => i.to_string(),
+                    None => return Ok(xml_error("MissingParameter", "Identity required", 400)),
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                store.identities.remove(&identity);
+                Ok(xml_no_result("DeleteIdentity", &rid))
             }
 
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),

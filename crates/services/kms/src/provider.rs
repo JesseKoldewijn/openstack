@@ -254,6 +254,34 @@ impl ServiceProvider for KmsProvider {
                 }
             }
 
+            "CancelKeyDeletion" => {
+                let key_id = match str_param(ctx, "KeyId") {
+                    Some(k) => k,
+                    None => return Ok(json_error("ValidationException", "KeyId is required", 400)),
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.resolve_key_mut(&key_id) {
+                    None => Ok(json_error(
+                        "NotFoundException",
+                        &format!("Invalid keyId {key_id}"),
+                        404,
+                    )),
+                    Some(k) => {
+                        if k.key_state != KeyState::PendingDeletion {
+                            return Ok(json_error(
+                                "KMSInvalidStateException",
+                                "Key is not pending deletion",
+                                400,
+                            ));
+                        }
+                        k.key_state = KeyState::Disabled;
+                        Ok(json_ok(json!({
+                            "KeyId": k.key_id,
+                        })))
+                    }
+                }
+            }
+
             "CreateAlias" => {
                 let alias_name = match str_param(ctx, "AliasName") {
                     Some(a) => a,
@@ -324,6 +352,116 @@ impl ServiceProvider for KmsProvider {
                     })
                     .collect();
                 Ok(json_ok(json!({ "Aliases": aliases, "Truncated": false })))
+            }
+
+            "DeleteAlias" => {
+                let alias_name = match str_param(ctx, "AliasName") {
+                    Some(a) => a,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "AliasName is required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                if let Some(key_id) = store.alias_to_key.remove(&alias_name)
+                    && let Some(key) = store.keys.get_mut(&key_id)
+                {
+                    key.aliases.retain(|alias| alias != &alias_name);
+                }
+                Ok(json_ok(json!({})))
+            }
+
+            "TagResource" => {
+                let key_id = match str_param(ctx, "KeyId") {
+                    Some(k) => k,
+                    None => return Ok(json_error("ValidationException", "KeyId is required", 400)),
+                };
+                let tags = ctx
+                    .request_body
+                    .get("Tags")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.resolve_key_mut(&key_id) {
+                    None => Ok(json_error(
+                        "NotFoundException",
+                        &format!("Invalid keyId {key_id}"),
+                        404,
+                    )),
+                    Some(key) => {
+                        for tag in &tags {
+                            if let (Some(k), Some(v)) = (
+                                tag.get("TagKey").and_then(|v| v.as_str()),
+                                tag.get("TagValue").and_then(|v| v.as_str()),
+                            ) {
+                                key.tags.insert(k.to_string(), v.to_string());
+                            }
+                        }
+                        Ok(json_ok(json!({})))
+                    }
+                }
+            }
+
+            "UntagResource" => {
+                let key_id = match str_param(ctx, "KeyId") {
+                    Some(k) => k,
+                    None => return Ok(json_error("ValidationException", "KeyId is required", 400)),
+                };
+                let tag_keys = ctx
+                    .request_body
+                    .get("TagKeys")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.resolve_key_mut(&key_id) {
+                    None => Ok(json_error(
+                        "NotFoundException",
+                        &format!("Invalid keyId {key_id}"),
+                        404,
+                    )),
+                    Some(key) => {
+                        for tag_key in &tag_keys {
+                            if let Some(k) = tag_key.as_str() {
+                                key.tags.remove(k);
+                            }
+                        }
+                        Ok(json_ok(json!({})))
+                    }
+                }
+            }
+
+            "ListResourceTags" => {
+                let key_id = match str_param(ctx, "KeyId") {
+                    Some(k) => k,
+                    None => return Ok(json_error("ValidationException", "KeyId is required", 400)),
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "NotFoundException",
+                        &format!("Invalid keyId {key_id}"),
+                        404,
+                    ));
+                };
+                match store.resolve_key(&key_id) {
+                    None => Ok(json_error(
+                        "NotFoundException",
+                        &format!("Invalid keyId {key_id}"),
+                        404,
+                    )),
+                    Some(key) => {
+                        let tags: Vec<Value> = key
+                            .tags
+                            .iter()
+                            .map(|(k, v)| json!({ "TagKey": k, "TagValue": v }))
+                            .collect();
+                        Ok(json_ok(json!({ "Tags": tags, "Truncated": false })))
+                    }
+                }
             }
 
             "Encrypt" => {

@@ -153,6 +153,153 @@ async fn test_delete_cluster_not_found() {
 }
 
 #[tokio::test]
+async fn test_modify_cluster() {
+    let p = RedshiftProvider::new();
+    let mut params = HashMap::new();
+    params.insert("ClusterIdentifier".to_string(), "mod-cluster".to_string());
+    params.insert("NodeType".to_string(), "dc2.large".to_string());
+    params.insert("DBName".to_string(), "dev".to_string());
+    p.dispatch(&make_ctx("CreateCluster", params))
+        .await
+        .unwrap();
+
+    let mut modify = HashMap::new();
+    modify.insert("ClusterIdentifier".to_string(), "mod-cluster".to_string());
+    modify.insert("NodeType".to_string(), "ra3.xlplus".to_string());
+    modify.insert("DBName".to_string(), "analytics".to_string());
+    modify.insert("Port".to_string(), "15439".to_string());
+
+    let resp = p
+        .dispatch(&make_ctx("ModifyCluster", modify))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("ModifyClusterResponse"));
+    assert!(body.contains("ra3.xlplus"));
+    assert!(body.contains("analytics"));
+    assert!(body.contains("15439"));
+}
+
+#[tokio::test]
+async fn test_modify_cluster_escapes_xml_fields() {
+    let p = RedshiftProvider::new();
+    let mut params = HashMap::new();
+    params.insert(
+        "ClusterIdentifier".to_string(),
+        "mod-xml-cluster".to_string(),
+    );
+    params.insert("NodeType".to_string(), "dc2.large".to_string());
+    params.insert("DBName".to_string(), "dev".to_string());
+    p.dispatch(&make_ctx("CreateCluster", params))
+        .await
+        .unwrap();
+
+    let mut modify = HashMap::new();
+    modify.insert(
+        "ClusterIdentifier".to_string(),
+        "mod-xml-cluster".to_string(),
+    );
+    modify.insert("NodeType".to_string(), "ra3&xl<plus>".to_string());
+    modify.insert("DBName".to_string(), "analytics<&>".to_string());
+
+    let resp = p
+        .dispatch(&make_ctx("ModifyCluster", modify))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("ra3&amp;xl&lt;plus&gt;"), "{body}");
+    assert!(body.contains("analytics&lt;&amp;&gt;"), "{body}");
+}
+
+#[tokio::test]
+async fn test_reboot_cluster() {
+    let p = RedshiftProvider::new();
+    let mut params = HashMap::new();
+    params.insert(
+        "ClusterIdentifier".to_string(),
+        "reboot-cluster".to_string(),
+    );
+    p.dispatch(&make_ctx("CreateCluster", params))
+        .await
+        .unwrap();
+
+    let mut reboot = HashMap::new();
+    reboot.insert(
+        "ClusterIdentifier".to_string(),
+        "reboot-cluster".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("RebootCluster", reboot))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("RebootClusterResponse"));
+    assert!(body.contains("reboot-cluster"));
+    assert!(body.contains("available"));
+}
+
+#[tokio::test]
+async fn test_modify_cluster_not_found() {
+    let p = RedshiftProvider::new();
+    let mut modify = HashMap::new();
+    modify.insert(
+        "ClusterIdentifier".to_string(),
+        "missing-cluster".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("ModifyCluster", modify))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("ClusterNotFound"));
+    assert!(body.contains("missing-cluster"));
+}
+
+#[tokio::test]
+async fn test_modify_cluster_rejects_invalid_port() {
+    let p = RedshiftProvider::new();
+    let mut params = HashMap::new();
+    params.insert("ClusterIdentifier".to_string(), "port-cluster".to_string());
+    p.dispatch(&make_ctx("CreateCluster", params))
+        .await
+        .unwrap();
+
+    let mut modify = HashMap::new();
+    modify.insert("ClusterIdentifier".to_string(), "port-cluster".to_string());
+    modify.insert("Port".to_string(), "not-a-port".to_string());
+    let resp = p
+        .dispatch(&make_ctx("ModifyCluster", modify))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("InvalidParameterValue"));
+    assert!(body.contains("Port must be a valid 16-bit integer"));
+}
+
+#[tokio::test]
+async fn test_reboot_cluster_not_found() {
+    let p = RedshiftProvider::new();
+    let mut reboot = HashMap::new();
+    reboot.insert(
+        "ClusterIdentifier".to_string(),
+        "missing-reboot-cluster".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("RebootCluster", reboot))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("ClusterNotFound"));
+    assert!(body.contains("missing-reboot-cluster"));
+}
+
+#[tokio::test]
 async fn test_create_cluster_missing_identifier() {
     let p = RedshiftProvider::new();
     let resp = p

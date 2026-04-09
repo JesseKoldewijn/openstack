@@ -763,7 +763,7 @@ async fn test_get_metric_data_invalid_time_format_returns_graceful_response() {
         results.is_empty()
             || results
                 .iter()
-                .all(|r| r["Values"].as_array().map_or(true, |v| v.is_empty())),
+                .all(|r| r["Values"].as_array().is_none_or(|v| v.is_empty())),
         "expected empty or zero-value results for malformed time input, got: {}",
         body_str(&resp)
     );

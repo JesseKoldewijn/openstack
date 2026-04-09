@@ -2486,10 +2486,23 @@ fn service_from_query_action(
         | "ChangeMessageVisibility"
         | "ChangeMessageVisibilityBatch" => Some("sqs"),
         // STS
-        "GetCallerIdentity" | "AssumeRole" => Some("sts"),
+        "GetCallerIdentity"
+        | "AssumeRole"
+        | "GetSessionToken"
+        | "GetAccessKeyInfo"
+        | "DecodeAuthorizationMessage" => Some("sts"),
         // SNS
-        "CreateTopic" | "DeleteTopic" | "Publish" | "Subscribe" | "Unsubscribe" | "ListTopics"
-        | "SetTopicAttributes" | "GetTopicAttributes" => Some("sns"),
+        "CreateTopic"
+        | "DeleteTopic"
+        | "Publish"
+        | "Subscribe"
+        | "Unsubscribe"
+        | "ListTopics"
+        | "SetTopicAttributes"
+        | "GetTopicAttributes"
+        | "ListSubscriptions"
+        | "ListSubscriptionsByTopic"
+        | "GetSubscriptionAttributes" => Some("sns"),
         // IAM
         "CreateRole" | "DeleteRole" | "ListRoles" | "GetRole" | "CreateUser" | "DeleteUser"
         | "ListUsers" | "GetUser" => Some("iam"),
@@ -2497,7 +2510,13 @@ fn service_from_query_action(
         "CreateStack" | "DeleteStack" | "DescribeStacks" | "ListStacks" | "GetTemplate"
         | "ValidateTemplate" | "UpdateStack" => Some("cloudformation"),
         // CloudWatch (query actions)
-        "PutMetricData" | "ListMetrics" | "GetMetricStatistics" => Some("cloudwatch"),
+        "PutMetricData"
+        | "ListMetrics"
+        | "GetMetricStatistics"
+        | "DescribeAlarms"
+        | "PutMetricAlarm"
+        | "DeleteAlarms"
+        | "SetAlarmState" => Some("cloudwatch"),
         // EC2
         "DescribeVpcs"
         | "CreateVpc"
@@ -2511,9 +2530,16 @@ fn service_from_query_action(
         | "DescribeInstances"
         | "TerminateInstances" => Some("ec2"),
         // Redshift
-        "CreateCluster" | "DeleteCluster" | "DescribeClusters" => Some("redshift"),
+        "CreateCluster" | "DeleteCluster" | "DescribeClusters" | "ModifyCluster"
+        | "RebootCluster" => Some("redshift"),
         // SES
-        "VerifyEmailIdentity" | "ListIdentities" | "SendEmail" | "SendRawEmail" => Some("ses"),
+        "VerifyEmailIdentity"
+        | "VerifyDomainIdentity"
+        | "ListIdentities"
+        | "SendEmail"
+        | "SendRawEmail"
+        | "GetIdentityVerificationAttributes"
+        | "DeleteIdentity" => Some("ses"),
         _ => None,
     }
 }
@@ -2729,6 +2755,13 @@ fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value)
         };
     }
     if path.starts_with("/2021-01-01/opensearch/domain/") {
+        if path.ends_with("/config") {
+            return match method {
+                "GET" => "DescribeDomainConfig".to_string(),
+                "POST" => "UpdateDomainConfig".to_string(),
+                _ => format!("{}:{}", method, path),
+            };
+        }
         return match method {
             "GET" => "DescribeDomain".to_string(),
             "DELETE" => "DeleteDomain".to_string(),
@@ -2751,7 +2784,14 @@ fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value)
             };
         }
         return match method {
+            "GET" => "GetHostedZone".to_string(),
             "DELETE" => "DeleteHostedZone".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
+    if path.starts_with("/2013-04-01/change/") {
+        return match method {
+            "GET" => "GetChange".to_string(),
             _ => format!("{}:{}", method, path),
         };
     }
@@ -3005,6 +3045,8 @@ fn is_s3_object_body_request(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use axum::http::{HeaderMap, HeaderValue, Method};
     use bytes::Bytes;
     use serde_json::json;
@@ -3041,16 +3083,88 @@ mod tests {
     }
 
     #[test]
+    fn maps_opensearch_config_routes() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation(
+                "POST",
+                "/2021-01-01/opensearch/domain/bench-domain/config",
+                &params,
+            ),
+            "UpdateDomainConfig"
+        );
+        assert_eq!(
+            extract_rest_operation(
+                "GET",
+                "/2021-01-01/opensearch/domain/bench-domain/config",
+                &params,
+            ),
+            "DescribeDomainConfig"
+        );
+    }
+
+    #[test]
+    fn maps_route53_hosted_zone_get_route() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation("GET", "/2013-04-01/hostedzone/Z123456789", &params),
+            "GetHostedZone"
+        );
+    }
+
+    #[test]
+    fn maps_route53_change_get_route() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation("GET", "/2013-04-01/change/C123456789", &params),
+            "GetChange"
+        );
+    }
+
+    #[test]
     fn detect_service_normalizes_es_host_alias() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "host",
             HeaderValue::from_static("es.us-east-1.localhost.localstack.cloud"),
         );
-        let query = std::collections::HashMap::new();
+        let query = HashMap::new();
 
         let service = detect_service("/my-index/_doc/1", &query, &headers, &Bytes::new(), None);
         assert_eq!(service, "opensearch");
+    }
+
+    #[test]
+    fn detect_service_maps_extended_query_protocol_actions() {
+        let headers = HeaderMap::new();
+        let query = HashMap::new();
+
+        let cases = [
+            ("Action=DescribeAlarms&Version=2010-08-01", "cloudwatch"),
+            (
+                "Action=GetIdentityVerificationAttributes&Version=2010-12-01&Identities.member.1=bench%40example.com",
+                "ses",
+            ),
+            ("Action=ListSubscriptions&Version=2010-03-31", "sns"),
+            ("Action=GetSessionToken&Version=2011-06-15", "sts"),
+            (
+                "Action=GetAccessKeyInfo&AccessKeyId=AKIAIOSFODNN7EXAMPLE&Version=2011-06-15",
+                "sts",
+            ),
+            (
+                "Action=ModifyCluster&Version=2012-12-01&ClusterIdentifier=bench&NodeType=ra3.xlplus",
+                "redshift",
+            ),
+            (
+                "Action=RebootCluster&Version=2012-12-01&ClusterIdentifier=bench",
+                "redshift",
+            ),
+        ];
+
+        for (body, expected) in cases {
+            let service = detect_service("/", &query, &headers, &Bytes::from(body), None);
+            assert_eq!(service, expected, "body={body}");
+        }
     }
 
     #[test]

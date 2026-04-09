@@ -255,6 +255,106 @@ impl ServiceProvider for OpenSearchProvider {
                 })))
             }
 
+            // ----------------------------------------------------------------
+            // DescribeDomainConfig  GET /2021-01-01/opensearch/domain/{DomainName}/config
+            // ----------------------------------------------------------------
+            "DescribeDomainConfig" => {
+                let domain_name = ctx
+                    .path
+                    .trim_end_matches("/config")
+                    .split('/')
+                    .next_back()
+                    .unwrap_or("")
+                    .to_string();
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
+                        404,
+                    ));
+                };
+                match store.domains.get(&domain_name) {
+                    Some(domain) => Ok(json_ok(json!({
+                        "DomainConfig": {
+                            "EngineVersion": { "Options": domain.engine_version },
+                            "ClusterConfig": {
+                                "Options": {
+                                    "InstanceType": domain.cluster_config.instance_type,
+                                    "InstanceCount": domain.cluster_config.instance_count,
+                                }
+                            }
+                        }
+                    }))),
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
+                        404,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // UpdateDomainConfig  POST /2021-01-01/opensearch/domain/{DomainName}/config
+            // ----------------------------------------------------------------
+            "UpdateDomainConfig" => {
+                let domain_name = ctx
+                    .path
+                    .trim_end_matches("/config")
+                    .split('/')
+                    .next_back()
+                    .unwrap_or("")
+                    .to_string();
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.domains.get_mut(&domain_name) {
+                    Some(domain) => {
+                        if let Some(engine_version) = str_param(ctx, "EngineVersion") {
+                            domain.engine_version = engine_version;
+                        }
+                        if let Some(cluster_config) = ctx.request_body.get("ClusterConfig") {
+                            if let Some(instance_type) =
+                                cluster_config.get("InstanceType").and_then(|v| v.as_str())
+                            {
+                                domain.cluster_config.instance_type = instance_type.to_string();
+                            }
+                            if let Some(instance_count_value) = cluster_config.get("InstanceCount")
+                            {
+                                let Some(instance_count) = instance_count_value.as_u64() else {
+                                    return Ok(json_error(
+                                        "ValidationException",
+                                        "ClusterConfig.InstanceCount must be a non-negative integer",
+                                        400,
+                                    ));
+                                };
+                                let Ok(instance_count) = u32::try_from(instance_count) else {
+                                    return Ok(json_error(
+                                        "ValidationException",
+                                        "ClusterConfig.InstanceCount is too large",
+                                        400,
+                                    ));
+                                };
+                                domain.cluster_config.instance_count = instance_count;
+                            }
+                        }
+                        Ok(json_ok(json!({
+                            "DomainConfig": {
+                                "EngineVersion": { "Options": domain.engine_version },
+                                "ClusterConfig": {
+                                    "Options": {
+                                        "InstanceType": domain.cluster_config.instance_type,
+                                        "InstanceCount": domain.cluster_config.instance_count,
+                                    }
+                                }
+                            }
+                        })))
+                    }
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
+                        404,
+                    )),
+                }
+            }
+
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
         }
     }

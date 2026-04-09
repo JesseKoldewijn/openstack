@@ -328,6 +328,7 @@ bench_dynamic() {
   start_ts=$(date +%s%3N)   # ms since epoch
 
   local i
+  local pids=()
   for (( i=1; i<=dynamic_n; i++ )); do
     local body="${body_template//\{i\}/$i}"
     # Write result file: "time_total_ms http_code"
@@ -341,13 +342,20 @@ bench_dynamic() {
       time_ms=$(awk "BEGIN{printf \"%.2f\", ${time_s:-0}*1000}")
       printf '%s %s\n' "$time_ms" "${code:-000}" > "$tmpdir/$i"
     ) &
+    pids+=("$!")
 
-    # Wait for batch to complete every $CONC jobs
+    # Wait for the current batch only; do not wait on unrelated background jobs
+    # such as the openstack binary running in --binary mode.
     if (( i % CONC == 0 )); then
-      wait
+      for pid in "${pids[@]}"; do
+        wait "$pid"
+      done
+      pids=()
     fi
   done
-  wait   # final stragglers
+  for pid in "${pids[@]}"; do
+    wait "$pid"
+  done
 
   end_ts=$(date +%s%3N)
   wall_secs=$(awk "BEGIN{printf \"%.3f\", ($end_ts - $start_ts)/1000}")
@@ -1110,10 +1118,33 @@ if is_active "sns"; then
         "${MOTO_EXTRA[@]}"
     fi
 
+    # Seed one subscription per target so list-subscription benches have data
+    if [[ -n "$OS_TOPIC_ARN" ]]; then
+      curl -s -X POST "$OS_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=Subscribe&TopicArn=$OS_TOPIC_ARN&Protocol=https&Endpoint=https%3A%2F%2Fexample.com%2Fbench-sns" >/dev/null 2>&1 || true
+    fi
+    if target_active ls && [[ -n "$LS_TOPIC_ARN" ]]; then
+      curl -s -X POST "$LS_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=Subscribe&TopicArn=$LS_TOPIC_ARN&Protocol=https&Endpoint=https%3A%2F%2Fexample.com%2Fbench-sns" >/dev/null 2>&1 || true
+    fi
+    if target_active moto && [[ -n "$MOTO_TOPIC_ARN" ]]; then
+      curl -s -X POST "$MOTO_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=Subscribe&TopicArn=$MOTO_TOPIC_ARN&Protocol=https&Endpoint=https%3A%2F%2Fexample.com%2Fbench-sns" \
+        "${MOTO_EXTRA[@]}" >/dev/null 2>&1 || true
+    fi
+
     # ListTopics — bench_targets appends MOTO_EXTRA automatically
     bench_targets "sns" "list_topics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=ListTopics"
+
+    # ListSubscriptions
+    bench_targets "sns" "list_subscriptions" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=ListSubscriptions"
   else
     skip_service "sns" "Failed to create seed topic"
   fi
@@ -1147,6 +1178,20 @@ if is_active "iam"; then
     bench_targets "iam" "list_users" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "Action=ListUsers&Version=2010-05-08"
+
+    # Seed one role for read benchmarking
+    if seed_all_targets "iam" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+         -H "Content-Type: application/x-www-form-urlencoded" \
+         -d "Action=CreateRole&RoleName=bench-role-$$&AssumeRolePolicyDocument=%7B%22Version%22%3A%222012-10-17%22%7D&Version=2010-05-08"; then
+
+      bench_dynamic_targets "iam" "create_role" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+        "Action=CreateRole&RoleName=bench-create-role-$$-{i}&AssumeRolePolicyDocument=%7B%22Version%22%3A%222012-10-17%22%7D&Version=2010-05-08" \
+        -H "Content-Type: application/x-www-form-urlencoded"
+
+      bench_targets "iam" "get_role" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=GetRole&RoleName=bench-role-$$&Version=2010-05-08"
+    fi
   else
     skip_service "iam" "Failed to create seed user"
   fi
@@ -1171,6 +1216,16 @@ if is_active "sts"; then
   bench_targets "sts" "assume_role" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "Action=AssumeRole&RoleArn=arn:aws:iam::000000000000:role/bench-role&RoleSessionName=bench-session&Version=2011-06-15"
+
+  # GetSessionToken
+  bench_targets "sts" "get_session_token" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=GetSessionToken&Version=2011-06-15"
+
+  # GetAccessKeyInfo
+  bench_targets "sts" "get_access_key_info" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=GetAccessKeyInfo&AccessKeyId=AKIAIOSFODNN7EXAMPLE&Version=2011-06-15"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1231,6 +1286,11 @@ if is_active "firehose"; then
 
     sleep 1
 
+    bench_dynamic_targets "firehose" "create_delivery_stream" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      '{"DeliveryStreamName":"bench-firehose-create-'"$$"'-{i}","DeliveryStreamType":"DirectPut"}' \
+      "${FIREHOSE_HEADERS[@]}" \
+      -H "X-Amz-Target: Firehose_20150804.CreateDeliveryStream"
+
     # PutRecord
     bench_targets "firehose" "put_record" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       "${FIREHOSE_HEADERS[@]}" \
@@ -1248,6 +1308,12 @@ if is_active "firehose"; then
       "${FIREHOSE_HEADERS[@]}" \
       -H "X-Amz-Target: Firehose_20150804.ListDeliveryStreams" \
       -d '{}'
+
+    # DescribeDeliveryStream
+    bench_targets "firehose" "describe_delivery_stream" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${FIREHOSE_HEADERS[@]}" \
+      -H "X-Amz-Target: Firehose_20150804.DescribeDeliveryStream" \
+      -d '{"DeliveryStreamName":"bench-firehose-'"$$"'"}'
   else
     skip_service "firehose" "Failed to create seed delivery stream"
   fi
@@ -1301,6 +1367,12 @@ if is_active "secretsmanager"; then
       "${SM_HEADERS[@]}" \
       -H "X-Amz-Target: secretsmanager.ListSecrets" \
       -d '{}'
+
+    # UpdateSecret
+    bench_targets "secretsmanager" "update_secret" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${SM_HEADERS[@]}" \
+      -H "X-Amz-Target: secretsmanager.UpdateSecret" \
+      -d '{"SecretId":"bench-secret-'"$$"'","SecretString":"updated-via-update-secret","Description":"bench-updated"}'
   else
     skip_service "secretsmanager" "Failed to create seed secret"
   fi
@@ -1320,10 +1392,83 @@ if is_active "acm"; then
 
   ACM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
+  # Moto's multi-service root can mis-route ACM JSON-target requests to S3
+  # unless SigV4-like headers are present.
+  MOTO_EXTRA=(
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/acm/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy"
+    -H "X-Amz-Date: 20260101T000000Z"
+  )
+
+  bench_dynamic_targets "acm" "request_certificate" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    '{"DomainName":"bench-acm-{i}.example.com","SubjectAlternativeNames":["www.bench-acm-{i}.example.com"]}' \
+    "${ACM_HEADERS[@]}" \
+    -H "X-Amz-Target: CertificateManager.RequestCertificate"
+
+  _acm_seed_os=$(curl -s -X POST "$OS_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: CertificateManager.RequestCertificate" \
+    -d '{"DomainName":"bench-acm-describe-os.example.com"}' || true)
+  _acm_seed_ls=$(curl -s -X POST "$LS_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: CertificateManager.RequestCertificate" \
+    -d '{"DomainName":"bench-acm-describe-ls.example.com"}' || true)
+  _acm_seed_moto=$(curl -s -X POST "$MOTO_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: CertificateManager.RequestCertificate" \
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/acm/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy" \
+    -H "X-Amz-Date: 20260101T000000Z" \
+    -d '{"DomainName":"bench-acm-describe-moto.example.com"}' || true)
+
+  _acm_arn_os=$(printf '%s' "$_acm_seed_os" | jq -r '.CertificateArn // empty' 2>/dev/null)
+  _acm_arn_ls=$(printf '%s' "$_acm_seed_ls" | jq -r '.CertificateArn // empty' 2>/dev/null)
+  _acm_arn_moto=$(printf '%s' "$_acm_seed_moto" | jq -r '.CertificateArn // empty' 2>/dev/null)
+
+  log "  acm/describe_certificate (openstack)..."
+  bench "acm" "describe_certificate" "os" POST "$OS_BASE" \
+    "${ACM_HEADERS[@]}" \
+    -H "X-Amz-Target: CertificateManager.DescribeCertificate" \
+    -d "{\"CertificateArn\":\"${_acm_arn_os:-missing}\"}"
+  if target_active ls; then
+    log "  acm/describe_certificate (localstack)..."
+    bench "acm" "describe_certificate" "ls" POST "$LS_BASE" \
+      "${ACM_HEADERS[@]}" \
+      -H "X-Amz-Target: CertificateManager.DescribeCertificate" \
+      -d "{\"CertificateArn\":\"${_acm_arn_ls:-missing}\"}"
+  fi
+  if target_active moto; then
+    log "  acm/describe_certificate (moto)..."
+    bench "acm" "describe_certificate" "moto" POST "$MOTO_BASE" \
+      "${ACM_HEADERS[@]}" \
+      -H "X-Amz-Target: CertificateManager.DescribeCertificate" \
+      -d "{\"CertificateArn\":\"${_acm_arn_moto:-missing}\"}"
+  fi
+
   bench_targets "acm" "list_certificates" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     "${ACM_HEADERS[@]}" \
     -H "X-Amz-Target: CertificateManager.ListCertificates" \
     -d '{}'
+
+  log "  acm/export_certificate (openstack)..."
+  bench "acm" "export_certificate" "os" POST "$OS_BASE" \
+    "${ACM_HEADERS[@]}" \
+    -H "X-Amz-Target: CertificateManager.ExportCertificate" \
+    -d "{\"CertificateArn\":\"${_acm_arn_os:-missing}\"}"
+  if target_active ls; then
+    log "  acm/export_certificate (localstack)..."
+    bench "acm" "export_certificate" "ls" POST "$LS_BASE" \
+      "${ACM_HEADERS[@]}" \
+      -H "X-Amz-Target: CertificateManager.ExportCertificate" \
+      -d "{\"CertificateArn\":\"${_acm_arn_ls:-missing}\"}"
+  fi
+  if target_active moto; then
+    log "  acm/export_certificate (moto)..."
+    bench "acm" "export_certificate" "moto" POST "$MOTO_BASE" \
+      "${ACM_HEADERS[@]}" \
+      -H "X-Amz-Target: CertificateManager.ExportCertificate" \
+      -d "{\"CertificateArn\":\"${_acm_arn_moto:-missing}\"}"
+  fi
+
+  MOTO_EXTRA=()
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1341,10 +1486,54 @@ if is_active "apigateway"; then
     -H "X-Amz-Date: 20260101T000000Z"
   )
 
+  bench_dynamic_targets "apigateway" "create_rest_api" POST \
+    "$OS_BASE/restapis" \
+    "$LS_BASE/restapis" \
+    "$MOTO_BASE/restapis" \
+    '{"name":"bench-api-{i}"}' \
+    -H "Content-Type: application/json"
+
+  _apigw_seed_os=$(curl -s -X POST "$OS_BASE/restapis" -H "Content-Type: application/json" -d '{"name":"bench-api-get-os"}' || true)
+  _apigw_seed_ls=$(curl -s -X POST "$LS_BASE/restapis" -H "Content-Type: application/json" -d '{"name":"bench-api-get-ls"}' || true)
+  _apigw_seed_moto=$(curl -s -X POST "$MOTO_BASE/restapis" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/apigateway/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy" \
+    -H "X-Amz-Date: 20260101T000000Z" \
+    -d '{"name":"bench-api-get-moto"}' || true)
+
+  _apigw_id_os=$(printf '%s' "$_apigw_seed_os" | jq -r '.id // empty' 2>/dev/null)
+  _apigw_id_ls=$(printf '%s' "$_apigw_seed_ls" | jq -r '.id // empty' 2>/dev/null)
+  _apigw_id_moto=$(printf '%s' "$_apigw_seed_moto" | jq -r '.id // empty' 2>/dev/null)
+
+  bench_targets "apigateway" "get_rest_api" GET \
+    "$OS_BASE/restapis/${_apigw_id_os:-missing}" \
+    "$LS_BASE/restapis/${_apigw_id_ls:-missing}" \
+    "$MOTO_BASE/restapis/${_apigw_id_moto:-missing}"
+
   bench_targets "apigateway" "get_rest_apis" GET \
     "$OS_BASE/restapis" \
     "$LS_BASE/restapis" \
     "$MOTO_BASE/restapis"
+
+  if [[ -n "${_apigw_id_os:-}" ]]; then
+    log "  apigateway/create_resource (openstack)..."
+    bench "apigateway" "create_resource" "os" POST "$OS_BASE/restapis/${_apigw_id_os}/resources/$(printf '%s' "$_apigw_seed_os" | jq -r '.rootResourceId // empty')" \
+      -H "Content-Type: application/json" \
+      -d '{"pathPart":"bench-res"}'
+  fi
+  if target_active ls && [[ -n "${_apigw_id_ls:-}" ]]; then
+    log "  apigateway/create_resource (localstack)..."
+    bench "apigateway" "create_resource" "ls" POST "$LS_BASE/restapis/${_apigw_id_ls}/resources/$(printf '%s' "$_apigw_seed_ls" | jq -r '.rootResourceId // empty')" \
+      -H "Content-Type: application/json" \
+      -d '{"pathPart":"bench-res"}'
+  fi
+  if target_active moto && [[ -n "${_apigw_id_moto:-}" ]]; then
+    log "  apigateway/create_resource (moto)..."
+    bench "apigateway" "create_resource" "moto" POST "$MOTO_BASE/restapis/${_apigw_id_moto}/resources/$(printf '%s' "$_apigw_seed_moto" | jq -r '.rootResourceId // empty')" \
+      -H "Content-Type: application/json" \
+      -d '{"pathPart":"bench-res"}' \
+      "${MOTO_EXTRA[@]}"
+  fi
 
   MOTO_EXTRA=()
 fi
@@ -1357,9 +1546,38 @@ if is_active "cloudformation"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "CloudFormation (Query-XML)"
 
-  bench_targets "cloudformation" "list_stacks" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Action=ListStacks&Version=2010-05-15"
+  _cfn_template='{"Resources":{"Bucket":{"Type":"AWS::S3::Bucket"}}}'
+  _cfn_template_encoded=$(printf '%s' "$_cfn_template" | jq -sRr @uri)
+  _cfn_update_template='{"Resources":{"NewRes":{"Type":"AWS::SQS::Queue"}}}'
+  _cfn_update_template_encoded=$(printf '%s' "$_cfn_update_template" | jq -sRr @uri)
+
+  # Seed one stack for describe/list benchmarking.
+  if seed_all_targets "cloudformation" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "Action=CreateStack&Version=2010-05-15&StackName=bench-stack-$$&TemplateBody=${_cfn_template_encoded}"; then
+
+    bench_dynamic_targets "cloudformation" "create_stack" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=CreateStack&Version=2010-05-15&StackName=bench-stack-create-$$-{i}&TemplateBody=${_cfn_template_encoded}" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_targets "cloudformation" "describe_stacks" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=DescribeStacks&Version=2010-05-15&StackName=bench-stack-$$"
+
+    bench_targets "cloudformation" "list_stacks" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=ListStacks&Version=2010-05-15"
+
+    bench_targets "cloudformation" "get_template" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=GetTemplate&Version=2010-05-15&StackName=bench-stack-$$"
+
+    bench_targets "cloudformation" "update_stack" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=UpdateStack&Version=2010-05-15&StackName=bench-stack-$$&TemplateBody=${_cfn_update_template_encoded}"
+  else
+    skip_service "cloudformation" "Failed to create seed stack"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1370,9 +1588,21 @@ if is_active "cloudwatch"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "CloudWatch (Query-XML)"
 
+  bench_targets "cloudwatch" "put_metric_data" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=PutMetricData&Version=2010-08-01&Namespace=OpenStackBench&MetricData.member.1.MetricName=Latency&MetricData.member.1.Value=1"
+
   bench_targets "cloudwatch" "list_metrics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "Action=ListMetrics&Version=2010-08-01"
+
+  bench_targets "cloudwatch" "get_metric_statistics" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=GetMetricStatistics&Version=2010-08-01&Namespace=OpenStackBench&MetricName=Latency&StartTime=2024-01-01T00%3A00%3A00Z&EndTime=2024-01-01T01%3A00%3A00Z&Period=60&Statistics.member.1=Average"
+
+  bench_targets "cloudwatch" "describe_alarms" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "Action=DescribeAlarms&Version=2010-08-01"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1383,9 +1613,29 @@ if is_active "ec2"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "EC2 (Query-XML)"
 
-  bench_targets "ec2" "describe_instances" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Action=DescribeInstances&Version=2016-11-15"
+  # Seed one instance for describe benchmarking.
+  if seed_all_targets "ec2" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "Action=RunInstances&Version=2016-11-15&ImageId=ami-00000000&InstanceType=t2.micro&MinCount=1&MaxCount=1"; then
+
+    bench_dynamic_targets "ec2" "run_instances" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=RunInstances&Version=2016-11-15&ImageId=ami-00000000&InstanceType=t2.micro&MinCount=1&MaxCount=1" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_targets "ec2" "describe_instances" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=DescribeInstances&Version=2016-11-15"
+
+    bench_dynamic_targets "ec2" "create_vpc" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=CreateVpc&Version=2016-11-15&CidrBlock=10.{i}.0.0%2F16" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_dynamic_targets "ec2" "create_security_group" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=CreateSecurityGroup&Version=2016-11-15&GroupName=bench-sg-$$-{i}&Description=benchmark-sg-{i}" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+  else
+    skip_service "ec2" "Failed to create seed instance"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1501,6 +1751,12 @@ if is_active "eventbridge"; then
       -H "X-Amz-Target: AWSEvents.DescribeRule" \
       -d '{"Name":"'"$_eb_rule"'","EventBusName":"'"$_eb_bus"'"}'
 
+    # DescribeEventBus
+    bench_targets "eventbridge" "describe_event_bus" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${EVENTS_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSEvents.DescribeEventBus" \
+      -d '{"Name":"'"$_eb_bus"'"}'
+
     # ListTargetsByRule
     bench_targets "eventbridge" "list_targets_by_rule" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
       "${EVENTS_HEADERS[@]}" \
@@ -1521,10 +1777,80 @@ if is_active "kms"; then
 
   KMS_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
+  # Moto's multi-service root can mis-route KMS JSON-target requests to S3
+  # unless SigV4-like headers are present.
+  MOTO_EXTRA=(
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/kms/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy"
+    -H "X-Amz-Date: 20260101T000000Z"
+  )
+
+  bench_dynamic_targets "kms" "create_key" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    '{"Description":"bench-key-{i}"}' \
+    "${KMS_HEADERS[@]}" \
+    -H "X-Amz-Target: TrentService.CreateKey"
+
+  _kms_seed_os=$(curl -s -X POST "$OS_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: TrentService.CreateKey" \
+    -d '{"Description":"bench-describe-key-os"}' || true)
+  _kms_seed_ls=$(curl -s -X POST "$LS_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: TrentService.CreateKey" \
+    -d '{"Description":"bench-describe-key-ls"}' || true)
+  _kms_seed_moto=$(curl -s -X POST "$MOTO_BASE" \
+    -H "Content-Type: application/x-amz-json-1.1" \
+    -H "X-Amz-Target: TrentService.CreateKey" \
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/kms/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy" \
+    -H "X-Amz-Date: 20260101T000000Z" \
+    -d '{"Description":"bench-describe-key-moto"}' || true)
+
+  _kms_key_id_os=$(printf '%s' "$_kms_seed_os" | jq -r '.KeyMetadata.KeyId // empty' 2>/dev/null)
+  _kms_key_id_ls=$(printf '%s' "$_kms_seed_ls" | jq -r '.KeyMetadata.KeyId // empty' 2>/dev/null)
+  _kms_key_id_moto=$(printf '%s' "$_kms_seed_moto" | jq -r '.KeyMetadata.KeyId // empty' 2>/dev/null)
+
+  if [[ -n "${_kms_key_id_os:-}" ]]; then
+    log "  kms/describe_key (openstack)..."
+    bench "kms" "describe_key" "os" POST "$OS_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.DescribeKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_os}\"}"
+    log "  kms/generate_data_key (openstack)..."
+    bench "kms" "generate_data_key" "os" POST "$OS_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.GenerateDataKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_os}\",\"KeySpec\":\"AES_256\"}"
+  fi
+  if target_active ls && [[ -n "${_kms_key_id_ls:-}" ]]; then
+    log "  kms/describe_key (localstack)..."
+    bench "kms" "describe_key" "ls" POST "$LS_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.DescribeKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_ls}\"}"
+    log "  kms/generate_data_key (localstack)..."
+    bench "kms" "generate_data_key" "ls" POST "$LS_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.GenerateDataKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_ls}\",\"KeySpec\":\"AES_256\"}"
+  fi
+  if target_active moto && [[ -n "${_kms_key_id_moto:-}" ]]; then
+    log "  kms/describe_key (moto)..."
+    bench "kms" "describe_key" "moto" POST "$MOTO_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.DescribeKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_moto}\"}"
+    log "  kms/generate_data_key (moto)..."
+    bench "kms" "generate_data_key" "moto" POST "$MOTO_BASE" \
+      "${KMS_HEADERS[@]}" \
+      -H "X-Amz-Target: TrentService.GenerateDataKey" \
+      -d "{\"KeyId\":\"${_kms_key_id_moto}\",\"KeySpec\":\"AES_256\"}"
+  fi
+
   bench_targets "kms" "list_keys" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     "${KMS_HEADERS[@]}" \
     -H "X-Amz-Target: TrentService.ListKeys" \
     -d '{}'
+
+  MOTO_EXTRA=()
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1770,10 +2096,44 @@ if is_active "opensearch"; then
     -H "X-Amz-Date: 20260101T000000Z"
   )
 
-  bench_targets "opensearch" "list_domain_names" GET \
-    "$OS_BASE/2021-01-01/opensearch/domain" \
-    "$LS_BASE/2021-01-01/opensearch/domain" \
-    "$MOTO_BASE/2021-01-01/opensearch/domain"
+  if seed_all_targets "opensearch" POST \
+       "$OS_BASE/2021-01-01/opensearch/domain" \
+       "$LS_BASE/2021-01-01/opensearch/domain" \
+       "$MOTO_BASE/2021-01-01/opensearch/domain" \
+       -H "Content-Type: application/json" \
+       -d '{"DomainName":"bench-domain-'"$$"'"}'; then
+
+    bench_dynamic_targets "opensearch" "create_domain" POST \
+      "$OS_BASE/2021-01-01/opensearch/domain" \
+      "$LS_BASE/2021-01-01/opensearch/domain" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain" \
+      '{"DomainName":"bench-domain-create-'"$$"'-{i}"}' \
+      -H "Content-Type: application/json"
+
+    bench_targets "opensearch" "describe_domain" GET \
+      "$OS_BASE/2021-01-01/opensearch/domain/bench-domain-$$" \
+      "$LS_BASE/2021-01-01/opensearch/domain/bench-domain-$$" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain/bench-domain-$$"
+
+    bench_targets "opensearch" "list_domain_names" GET \
+      "$OS_BASE/2021-01-01/opensearch/domain" \
+      "$LS_BASE/2021-01-01/opensearch/domain" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain"
+
+    bench_targets "opensearch" "update_domain_config" POST \
+      "$OS_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      "$LS_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      -H "Content-Type: application/json" \
+      -d '{"EngineVersion":"OpenSearch_2.11","ClusterConfig":{"InstanceType":"m6g.large.search","InstanceCount":2}}'
+
+    bench_targets "opensearch" "describe_domain_config" GET \
+      "$OS_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      "$LS_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config" \
+      "$MOTO_BASE/2021-01-01/opensearch/domain/bench-domain-$$/config"
+  else
+    skip_service "opensearch" "Failed to create seed domain"
+  fi
 
   MOTO_EXTRA=()
 fi
@@ -1786,9 +2146,28 @@ if is_active "redshift"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "Redshift (Query-XML)"
 
-  bench_targets "redshift" "describe_clusters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Action=DescribeClusters&Version=2012-12-01"
+  if seed_all_targets "redshift" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "Action=CreateCluster&Version=2012-12-01&ClusterIdentifier=bench-cluster-$$&NodeType=dc2.large&MasterUsername=admin&MasterUserPassword=Password123!&DBName=benchdb"; then
+
+    bench_dynamic_targets "redshift" "create_cluster" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=CreateCluster&Version=2012-12-01&ClusterIdentifier=bench-cluster-create-$$-{i}&NodeType=dc2.large&MasterUsername=admin&MasterUserPassword=Password123!&DBName=benchdb" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_targets "redshift" "describe_clusters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=DescribeClusters&Version=2012-12-01"
+
+    bench_targets "redshift" "reboot_cluster" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=RebootCluster&Version=2012-12-01&ClusterIdentifier=bench-cluster-$$"
+
+    bench_targets "redshift" "modify_cluster" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=ModifyCluster&Version=2012-12-01&ClusterIdentifier=bench-cluster-$$&NodeType=ra3.xlplus&DBName=analytics&Port=15439"
+  else
+    skip_service "redshift" "Failed to create seed cluster"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1806,10 +2185,69 @@ if is_active "route53"; then
     -H "X-Amz-Date: 20260101T000000Z"
   )
 
-  bench_targets "route53" "list_hosted_zones" GET \
-    "$OS_BASE/2013-04-01/hostedzone" \
-    "$LS_BASE/2013-04-01/hostedzone" \
-    "$MOTO_BASE/2013-04-01/hostedzone"
+  _r53_seed_body='<CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><Name>bench.example.com</Name><CallerReference>bench-r53-$$</CallerReference></CreateHostedZoneRequest>'
+  _r53_change_body='<ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><ChangeBatch><Changes><Change><Action>UPSERT</Action><ResourceRecordSet><Name>www.bench.example.com</Name><Type>A</Type><TTL>300</TTL><ResourceRecords><ResourceRecord><Value>1.2.3.4</Value></ResourceRecord></ResourceRecords></ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>'
+
+  SEED_OS=0; SEED_LS=0; SEED_MOTO=0
+  _r53_seed_os=$(curl -s -X POST "$OS_BASE/2013-04-01/hostedzone" -H "Content-Type: text/xml" -d "$_r53_seed_body" || true)
+  _r53_id_os=$(printf '%s' "$_r53_seed_os" | sed -n 's:.*<Id>/hostedzone/\([^<]*\)</Id>.*:\1:p')
+  [[ -n "$_r53_id_os" ]] && SEED_OS=1
+
+  if target_active ls; then
+    _r53_seed_ls=$(curl -s -X POST "$LS_BASE/2013-04-01/hostedzone" -H "Content-Type: text/xml" -d "$_r53_seed_body" || true)
+    _r53_id_ls=$(printf '%s' "$_r53_seed_ls" | sed -n 's:.*<Id>/hostedzone/\([^<]*\)</Id>.*:\1:p')
+    [[ -n "$_r53_id_ls" ]] && SEED_LS=1 || record_seed_failure "route53" "ls" "seed request failed"
+  fi
+
+  if target_active moto; then
+    _r53_seed_moto=$(curl -s -X POST "$MOTO_BASE/2013-04-01/hostedzone" -H "Content-Type: text/xml" "${MOTO_EXTRA[@]}" -d "$_r53_seed_body" || true)
+    _r53_id_moto=$(printf '%s' "$_r53_seed_moto" | sed -n 's:.*<Id>/hostedzone/\([^<]*\)</Id>.*:\1:p')
+    [[ -n "$_r53_id_moto" ]] && SEED_MOTO=1 || record_seed_failure "route53" "moto" "seed request failed"
+  fi
+
+  if [[ $SEED_OS -eq 1 ]]; then
+    bench_dynamic_targets "route53" "create_hosted_zone" POST \
+      "$OS_BASE/2013-04-01/hostedzone" \
+      "$LS_BASE/2013-04-01/hostedzone" \
+      "$MOTO_BASE/2013-04-01/hostedzone" \
+      '<CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><Name>bench-{i}.example.com</Name><CallerReference>bench-r53-{i}</CallerReference></CreateHostedZoneRequest>' \
+      -H "Content-Type: text/xml"
+
+    log "  route53/change_resource_record_sets (openstack)..."
+    bench "route53" "change_resource_record_sets" "os" POST "$OS_BASE/2013-04-01/hostedzone/${_r53_id_os}/rrset" \
+      -H "Content-Type: text/xml" \
+      -d "$_r53_change_body"
+    if target_active ls; then
+      log "  route53/change_resource_record_sets (localstack)..."
+      bench "route53" "change_resource_record_sets" "ls" POST "$LS_BASE/2013-04-01/hostedzone/${_r53_id_ls:-missing}/rrset" \
+        -H "Content-Type: text/xml" \
+        -d "$_r53_change_body"
+    fi
+    if target_active moto; then
+      log "  route53/change_resource_record_sets (moto)..."
+      bench "route53" "change_resource_record_sets" "moto" POST "$MOTO_BASE/2013-04-01/hostedzone/${_r53_id_moto:-missing}/rrset" \
+        -H "Content-Type: text/xml" \
+        -d "$_r53_change_body" \
+        "${MOTO_EXTRA[@]}"
+    fi
+
+    bench_targets "route53" "list_resource_record_sets" GET \
+      "$OS_BASE/2013-04-01/hostedzone/${_r53_id_os}/rrset" \
+      "$LS_BASE/2013-04-01/hostedzone/${_r53_id_ls:-missing}/rrset" \
+      "$MOTO_BASE/2013-04-01/hostedzone/${_r53_id_moto:-missing}/rrset"
+
+    bench_targets "route53" "list_hosted_zones" GET \
+      "$OS_BASE/2013-04-01/hostedzone" \
+      "$LS_BASE/2013-04-01/hostedzone" \
+      "$MOTO_BASE/2013-04-01/hostedzone"
+
+    bench_targets "route53" "get_hosted_zone" GET \
+      "$OS_BASE/2013-04-01/hostedzone/${_r53_id_os}" \
+      "$LS_BASE/2013-04-01/hostedzone/${_r53_id_ls:-missing}" \
+      "$MOTO_BASE/2013-04-01/hostedzone/${_r53_id_moto:-missing}"
+  else
+    skip_service "route53" "Failed to create seed hosted zone"
+  fi
 
   MOTO_EXTRA=()
 fi
@@ -1822,9 +2260,35 @@ if is_active "ses"; then
   SEED_OS=1; SEED_LS=1; SEED_MOTO=1
   log_section "SES (Query-XML)"
 
-  bench_targets "ses" "list_identities" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Action=ListIdentities&Version=2010-12-01"
+  _ses_sender="bench-sender-$$@example.com"
+  _ses_sender_enc=$(jq -nr --arg v "$_ses_sender" '$v|@uri')
+
+  if seed_all_targets "ses" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "Action=VerifyEmailIdentity&Version=2010-12-01&EmailAddress=${_ses_sender_enc}"; then
+
+    bench_dynamic_targets "ses" "verify_email_identity" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "Action=VerifyEmailIdentity&Version=2010-12-01&EmailAddress=bench-verify-{i}%40example.com" \
+      -H "Content-Type: application/x-www-form-urlencoded"
+
+    bench_targets "ses" "send_email" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=SendEmail&Version=2010-12-01&Source=${_ses_sender_enc}&Destination.ToAddresses.member.1=dest%40example.com&Message.Subject.Data=Benchmark&Message.Body.Text.Data=hello"
+
+    bench_targets "ses" "send_raw_email" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=SendRawEmail&Version=2010-12-01&Source=${_ses_sender_enc}&RawMessage.Data=From%3A%20bench%40example.com%0D%0ATo%3A%20dest%40example.com%0D%0ASubject%3A%20Raw%0D%0A%0D%0ABody"
+
+    bench_targets "ses" "list_identities" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=ListIdentities&Version=2010-12-01"
+
+    bench_targets "ses" "get_identity_verification_attributes" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "Action=GetIdentityVerificationAttributes&Version=2010-12-01&Identities.member.1=${_ses_sender_enc}"
+  else
+    skip_service "ses" "Failed to seed verified sender identity"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1855,6 +2319,10 @@ if is_active "sqs"; then
       bench_targets "sqs" "list_queues" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "Action=ListQueues&Version=2012-11-05"
+
+      bench_targets "sqs" "get_queue_attributes" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "Action=GetQueueAttributes&Version=2012-11-05&QueueUrl=${SQS_QUEUE_URL_ENC}&AttributeName.1=All"
 
       bench_targets "sqs" "send_message" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
         -H "Content-Type: application/x-www-form-urlencoded" \
@@ -1965,10 +2433,35 @@ if is_active "ssm"; then
 
   SSM_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
+  seed_all_targets "ssm" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.PutParameter" \
+    -d '{"Name":"/bench/static-param","Value":"seed","Type":"String","Overwrite":true}'
+
+  bench_targets "ssm" "put_parameter" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.PutParameter" \
+    -d '{"Name":"/bench/static-param","Value":"updated-benchmark-value","Type":"String","Overwrite":true}'
+
+  bench_targets "ssm" "get_parameter" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.GetParameter" \
+    -d '{"Name":"/bench/static-param"}'
+
+  bench_targets "ssm" "get_parameters_by_path" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.GetParametersByPath" \
+    -d '{"Path":"/bench","Recursive":true}'
+
   bench_targets "ssm" "describe_parameters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     "${SSM_HEADERS[@]}" \
     -H "X-Amz-Target: AmazonSSM.DescribeParameters" \
     -d '{}'
+
+  bench_targets "ssm" "get_parameters" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+    "${SSM_HEADERS[@]}" \
+    -H "X-Amz-Target: AmazonSSM.GetParameters" \
+    -d '{"Names":["/bench/static-param","/bench/missing-param"]}'
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1980,11 +2473,36 @@ if is_active "stepfunctions"; then
   log_section "StepFunctions (JSON)"
 
   SFN_HEADERS=(-H "Content-Type: application/x-amz-json-1.0")
+  _sfn_definition='{"StartAt":"Done","States":{"Done":{"Type":"Pass","Result":{"ok":true},"End":true}}}'
+  _sfn_definition_json=$(jq -Rn --arg def "$_sfn_definition" '$def')
 
-  bench_targets "stepfunctions" "list_state_machines" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
-    "${SFN_HEADERS[@]}" \
-    -H "X-Amz-Target: AWSStepFunctions.ListStateMachines" \
-    -d '{}'
+  if seed_all_targets "stepfunctions" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+       "${SFN_HEADERS[@]}" \
+       -H "X-Amz-Target: AWSStepFunctions.CreateStateMachine" \
+       -d "{\"name\":\"bench-machine-$$\",\"definition\":${_sfn_definition_json},\"roleArn\":\"arn:aws:iam::000000000000:role/sf-role\"}"; then
+
+    bench_dynamic_targets "stepfunctions" "create_state_machine" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "{\"name\":\"bench-machine-create-$$-{i}\",\"definition\":${_sfn_definition_json},\"roleArn\":\"arn:aws:iam::000000000000:role/sf-role\"}" \
+      "${SFN_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSStepFunctions.CreateStateMachine"
+
+    bench_dynamic_targets "stepfunctions" "start_execution" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "{\"stateMachineArn\":\"arn:aws:states:us-east-1:000000000000:stateMachine:bench-machine-$$\",\"input\":\"{}\",\"name\":\"bench-exec-{i}\"}" \
+      "${SFN_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSStepFunctions.StartExecution"
+
+    bench_targets "stepfunctions" "list_state_machines" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${SFN_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSStepFunctions.ListStateMachines" \
+      -d '{}'
+
+    bench_targets "stepfunctions" "describe_state_machine" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
+      "${SFN_HEADERS[@]}" \
+      -H "X-Amz-Target: AWSStepFunctions.DescribeStateMachine" \
+      -d "{\"stateMachineArn\":\"arn:aws:states:us-east-1:000000000000:stateMachine:bench-machine-$$\"}"
+  else
+    skip_service "stepfunctions" "Failed to create seed state machine"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

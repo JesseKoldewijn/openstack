@@ -154,3 +154,51 @@ async fn perf_get_metric_data_multi_query() {
         elapsed.as_millis()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Perf 3 — PutMetricAlarm + DescribeAlarms round-trip × 100 under 1500 ms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn perf_put_and_describe_alarm_round_trip() {
+    let p = CloudWatchProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let alarm_name = format!("perf-alarm-{i:03}");
+        let put = p
+            .dispatch(&make_ctx(
+                "PutMetricAlarm",
+                json!({
+                    "AlarmName": alarm_name,
+                    "MetricName": "CPUUtilization",
+                    "Namespace": "AWS/EC2",
+                    "Statistic": "Average",
+                    "Period": 60,
+                    "EvaluationPeriods": 1,
+                    "Threshold": 80.0,
+                    "ComparisonOperator": "GreaterThanThreshold",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(put.status_code, 200);
+
+        let describe = p
+            .dispatch(&make_ctx(
+                "DescribeAlarms",
+                json!({ "AlarmNames": [format!("perf-alarm-{i:03}")] }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(describe.status_code, 200);
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 1500,
+        "PutMetricAlarm+DescribeAlarms round-trip×{n} took {}ms — expected <1500ms",
+        elapsed.as_millis()
+    );
+}

@@ -72,6 +72,89 @@ async fn test_list_identities() {
 }
 
 #[tokio::test]
+async fn test_verify_domain_identity() {
+    let p = SesProvider::new();
+    let mut params = HashMap::new();
+    params.insert("Domain".to_string(), "example.com".to_string());
+    let resp = p
+        .dispatch(&make_ctx("VerifyDomainIdentity", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("VerifyDomainIdentityResponse"));
+    assert!(body.contains("<VerificationToken>example-com-verification-token</VerificationToken>"));
+
+    let resp = p
+        .dispatch(&make_ctx("ListIdentities", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("example.com"));
+}
+
+#[tokio::test]
+async fn test_verify_domain_identity_missing_domain() {
+    let p = SesProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("VerifyDomainIdentity", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("MissingParameter"));
+    assert!(body.contains("Domain required"));
+}
+
+#[tokio::test]
+async fn test_get_identity_verification_attributes() {
+    let p = SesProvider::new();
+    let mut verify = HashMap::new();
+    verify.insert(
+        "EmailAddress".to_string(),
+        "verified@example.com".to_string(),
+    );
+    p.dispatch(&make_ctx("VerifyEmailIdentity", verify))
+        .await
+        .unwrap();
+
+    let mut params = HashMap::new();
+    params.insert(
+        "Identities.member.1".to_string(),
+        "verified@example.com".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("GetIdentityVerificationAttributes", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetIdentityVerificationAttributesResponse"));
+    assert!(body.contains("verified@example.com"));
+    assert!(body.contains("Success"));
+}
+
+#[tokio::test]
+async fn test_get_identity_verification_attributes_missing_identity_returns_empty_result() {
+    let p = SesProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetIdentityVerificationAttributes",
+            HashMap::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetIdentityVerificationAttributesResponse"));
+    assert!(
+        body.contains("<VerificationAttributes></VerificationAttributes>")
+            || body.contains("<VerificationAttributes />")
+    );
+}
+
+#[tokio::test]
 async fn test_send_email() {
     let p = SesProvider::new();
     let mut params = HashMap::new();
@@ -137,6 +220,47 @@ async fn test_send_raw_email() {
     let body = body_str(&resp);
     assert!(body.contains("<MessageId>"));
     assert!(body.contains("SendRawEmailResponse"));
+}
+
+#[tokio::test]
+async fn test_delete_identity() {
+    let p = SesProvider::new();
+    let mut verify = HashMap::new();
+    verify.insert("EmailAddress".to_string(), "gone@example.com".to_string());
+    p.dispatch(&make_ctx("VerifyEmailIdentity", verify))
+        .await
+        .unwrap();
+
+    let mut delete = HashMap::new();
+    delete.insert("Identity".to_string(), "gone@example.com".to_string());
+    let resp = p
+        .dispatch(&make_ctx("DeleteIdentity", delete))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("DeleteIdentityResponse"));
+
+    let resp = p
+        .dispatch(&make_ctx("ListIdentities", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(!body.contains("gone@example.com"));
+}
+
+#[tokio::test]
+async fn test_delete_identity_missing_identity() {
+    let p = SesProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("DeleteIdentity", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("MissingParameter"));
+    assert!(body.contains("Identity required"));
 }
 
 #[tokio::test]

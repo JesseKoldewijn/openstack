@@ -7,6 +7,7 @@ use chrono::Utc;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
@@ -85,7 +86,8 @@ fn cluster_xml(c: &Cluster) -> String {
         .map(|e| {
             format!(
                 "<Endpoint><Address>{}</Address><Port>{}</Port></Endpoint>",
-                e.address, e.port
+                xml_escape(&e.address),
+                e.port
             )
         })
         .unwrap_or_default();
@@ -96,7 +98,11 @@ fn cluster_xml(c: &Cluster) -> String {
 <DBName>{}</DBName>\
 <ClusterStatus>{}</ClusterStatus>\
 {endpoint_xml}",
-        c.cluster_identifier, c.node_type, c.master_username, c.db_name, c.cluster_status
+        xml_escape(&c.cluster_identifier),
+        xml_escape(&c.node_type),
+        xml_escape(&c.master_username),
+        xml_escape(&c.db_name),
+        xml_escape(&c.cluster_status)
     )
 }
 
@@ -216,6 +222,82 @@ impl ServiceProvider for RedshiftProvider {
                     .collect();
                 let inner = format!("<Clusters>{clusters_xml}</Clusters>");
                 Ok(xml_resp("DescribeClusters", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
+            // RebootCluster
+            // ----------------------------------------------------------------
+            "RebootCluster" => {
+                let cluster_id = match str_param(ctx, "ClusterIdentifier") {
+                    Some(id) => id.to_string(),
+                    None => {
+                        return Ok(xml_error(
+                            "MissingParameter",
+                            "ClusterIdentifier required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.clusters.get_mut(&cluster_id) {
+                    Some(cluster) => {
+                        cluster.cluster_status = "available".to_string();
+                        let inner = format!("<Cluster>{}</Cluster>", cluster_xml(cluster));
+                        Ok(xml_resp("RebootCluster", &rid, &inner))
+                    }
+                    None => Ok(xml_error(
+                        "ClusterNotFound",
+                        &format!("Cluster {cluster_id} not found."),
+                        400,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // ModifyCluster
+            // ----------------------------------------------------------------
+            "ModifyCluster" => {
+                let cluster_id = match str_param(ctx, "ClusterIdentifier") {
+                    Some(id) => id.to_string(),
+                    None => {
+                        return Ok(xml_error(
+                            "MissingParameter",
+                            "ClusterIdentifier required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.clusters.get_mut(&cluster_id) {
+                    Some(cluster) => {
+                        if let Some(node_type) = str_param(ctx, "NodeType") {
+                            cluster.node_type = node_type.to_string();
+                        }
+                        if let Some(db_name) = str_param(ctx, "DBName") {
+                            cluster.db_name = db_name.to_string();
+                        }
+                        if let Some(port_str) = str_param(ctx, "Port") {
+                            let Ok(port) = port_str.parse::<u16>() else {
+                                return Ok(xml_error(
+                                    "InvalidParameterValue",
+                                    "Port must be a valid 16-bit integer",
+                                    400,
+                                ));
+                            };
+                            cluster.port = port;
+                            if let Some(endpoint) = cluster.endpoint.as_mut() {
+                                endpoint.port = port;
+                            }
+                        }
+                        let inner = format!("<Cluster>{}</Cluster>", cluster_xml(cluster));
+                        Ok(xml_resp("ModifyCluster", &rid, &inner))
+                    }
+                    None => Ok(xml_error(
+                        "ClusterNotFound",
+                        &format!("Cluster {cluster_id} not found."),
+                        400,
+                    )),
+                }
             }
 
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),

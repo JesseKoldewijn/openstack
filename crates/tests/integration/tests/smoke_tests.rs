@@ -1619,3 +1619,357 @@ async fn smoke_s3_large_put_no_deadlock() {
 
     harness.shutdown();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Missing dedicated smoke coverage: ACM / EC2 / ECR / EventBridge / Redshift / SES
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn smoke_acm_certificate_lifecycle_with_latency_guardrail() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("acm").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "acm", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "CertificateManager.RequestCertificate")
+            .json(&serde_json::json!({
+                "DomainName": "smoke-acm.example.com",
+                "SubjectAlternativeNames": ["www.smoke-acm.example.com"]
+            })),
+        "ACM RequestCertificate",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "RequestCertificate failed");
+    let create_json: serde_json::Value = resp.json().await.unwrap();
+    let cert_arn = create_json["CertificateArn"].as_str().unwrap().to_string();
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "acm", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "CertificateManager.DescribeCertificate")
+            .json(&serde_json::json!({ "CertificateArn": cert_arn })),
+        "ACM DescribeCertificate",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DescribeCertificate failed");
+    let describe_json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        describe_json["Certificate"]["DomainName"],
+        "smoke-acm.example.com"
+    );
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "acm", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "CertificateManager.DeleteCertificate")
+            .json(&serde_json::json!({ "CertificateArn": cert_arn })),
+        "ACM DeleteCertificate",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DeleteCertificate failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_ec2_instance_lifecycle_with_latency_guardrail() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("ec2").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ec2", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=RunInstances&Version=2016-11-15&ImageId=ami-smoke1234&InstanceType=t2.micro&MinCount=1&MaxCount=1"),
+        "EC2 RunInstances",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "RunInstances failed");
+    let run_xml = resp.text().await.unwrap();
+    let instance_id = run_xml
+        .split("<instanceId>")
+        .nth(1)
+        .and_then(|s| s.split("</instanceId>").next())
+        .unwrap()
+        .to_string();
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ec2", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=DescribeInstances&Version=2016-11-15"),
+        "EC2 DescribeInstances",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DescribeInstances failed");
+    let describe_xml = resp.text().await.unwrap();
+    assert!(describe_xml.contains(&instance_id));
+    assert!(describe_xml.contains("ami-smoke1234"));
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ec2", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(format!(
+                "Action=TerminateInstances&Version=2016-11-15&InstanceId.1={instance_id}"
+            )),
+        "EC2 TerminateInstances",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "TerminateInstances failed");
+    let term_xml = resp.text().await.unwrap();
+    assert!(term_xml.contains("terminated"));
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_ecr_repository_lifecycle_with_latency_guardrail() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("ecr").await;
+    common::health_check(&harness).await;
+
+    let repo_name = "smoke-ecr-repo";
+    let image_tag = "smoke";
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ecr", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header(
+                "x-amz-target",
+                "AmazonEC2ContainerRegistry_V20150921.CreateRepository",
+            )
+            .json(&serde_json::json!({ "repositoryName": repo_name })),
+        "ECR CreateRepository",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "CreateRepository failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ecr", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header(
+                "x-amz-target",
+                "AmazonEC2ContainerRegistry_V20150921.PutImage",
+            )
+            .json(&serde_json::json!({
+                "repositoryName": repo_name,
+                "imageManifest": r#"{"schemaVersion":2}"#,
+                "imageTag": image_tag
+            })),
+        "ECR PutImage",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "PutImage failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ecr", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header(
+                "x-amz-target",
+                "AmazonEC2ContainerRegistry_V20150921.ListImages",
+            )
+            .json(&serde_json::json!({ "repositoryName": repo_name })),
+        "ECR ListImages",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "ListImages failed");
+    let list_json: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        list_json["imageIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|image| image["imageTag"] == image_tag)
+    );
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ecr", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header(
+                "x-amz-target",
+                "AmazonEC2ContainerRegistry_V20150921.DeleteRepository",
+            )
+            .json(&serde_json::json!({ "repositoryName": repo_name })),
+        "ECR DeleteRepository",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DeleteRepository failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_eventbridge_rule_lifecycle_with_latency_guardrail() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("events").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "events", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "AWSEvents.PutRule")
+            .json(&serde_json::json!({
+                "Name": "smoke-rule",
+                "ScheduleExpression": "rate(5 minutes)",
+                "State": "ENABLED"
+            })),
+        "EventBridge PutRule",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "PutRule failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "events", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "AWSEvents.PutTargets")
+            .json(&serde_json::json!({
+                "Rule": "smoke-rule",
+                "Targets": [{
+                    "Id": "t1",
+                    "Arn": "arn:aws:sqs:us-east-1:000000000000:smoke-queue"
+                }]
+            })),
+        "EventBridge PutTargets",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "PutTargets failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "events", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "AWSEvents.ListTargetsByRule")
+            .json(&serde_json::json!({ "Rule": "smoke-rule" })),
+        "EventBridge ListTargetsByRule",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "ListTargetsByRule failed");
+    let list_json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(list_json["Targets"].as_array().unwrap().len(), 1);
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "events", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "AWSEvents.RemoveTargets")
+            .json(&serde_json::json!({ "Rule": "smoke-rule", "Ids": ["t1"] })),
+        "EventBridge RemoveTargets",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "RemoveTargets failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "events", "us-east-1")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", "AWSEvents.DeleteRule")
+            .json(&serde_json::json!({ "Name": "smoke-rule" })),
+        "EventBridge DeleteRule",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DeleteRule failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_redshift_cluster_lifecycle_with_latency_guardrail() {
+    let harness =
+        openstack_integration_tests::harness::TestHarness::start_services("redshift").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "redshift", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=CreateCluster&Version=2012-12-01&ClusterIdentifier=smoke-cluster&NodeType=dc2.large&MasterUsername=admin&MasterUserPassword=Password123!&DBName=smokedb"),
+        "Redshift CreateCluster",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "CreateCluster failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "redshift", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=DescribeClusters&Version=2012-12-01"),
+        "Redshift DescribeClusters",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DescribeClusters failed");
+    let describe_xml = resp.text().await.unwrap();
+    assert!(describe_xml.contains("smoke-cluster"));
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "redshift", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=DeleteCluster&Version=2012-12-01&ClusterIdentifier=smoke-cluster"),
+        "Redshift DeleteCluster",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DeleteCluster failed");
+
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn smoke_ses_identity_and_send_email_with_latency_guardrail() {
+    let harness = openstack_integration_tests::harness::TestHarness::start_services("ses").await;
+    common::health_check(&harness).await;
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ses", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=VerifyEmailIdentity&Version=2010-12-01&EmailAddress=smoke%40example.com"),
+        "SES VerifyEmailIdentity",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "VerifyEmailIdentity failed");
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ses", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=SendEmail&Version=2010-12-01&Source=smoke%40example.com&Destination.ToAddresses.member.1=dest%40example.com&Message.Subject.Data=Smoke&Message.Body.Text.Data=hello"),
+        "SES SendEmail",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "SendEmail failed");
+    let send_xml = resp.text().await.unwrap();
+    assert!(send_xml.contains("<MessageId>"));
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ses", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=ListIdentities&Version=2010-12-01"),
+        "SES ListIdentities",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "ListIdentities failed");
+    let list_xml = resp.text().await.unwrap();
+    assert!(list_xml.contains("smoke@example.com"));
+
+    let resp = common::send_with_latency(
+        harness
+            .aws_post("/", "ses", "us-east-1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("Action=DeleteIdentity&Version=2010-12-01&Identity=smoke%40example.com"),
+        "SES DeleteIdentity",
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "DeleteIdentity failed");
+
+    harness.shutdown();
+}

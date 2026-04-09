@@ -47,6 +47,143 @@ async fn request_cert(p: &AcmProvider, domain: &str) -> String {
 }
 
 #[tokio::test]
+async fn test_import_certificate() {
+    let p = AcmProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "ImportCertificate",
+            json!({
+                "Certificate": "-----BEGIN CERTIFICATE-----\nimported-cert\n-----END CERTIFICATE-----",
+                "PrivateKey": "-----BEGIN PRIVATE KEY-----\nimported-key\n-----END PRIVATE KEY-----",
+                "CertificateChain": "-----BEGIN CERTIFICATE-----\nimported-chain\n-----END CERTIFICATE-----",
+                "DomainName": "imported.example.com",
+                "SubjectAlternativeNames": ["www.imported.example.com"],
+                "Tags": [{ "Key": "source", "Value": "migration" }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let arn = body(&resp)["CertificateArn"].as_str().unwrap().to_string();
+    assert!(arn.contains("arn:aws:acm:"));
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeCertificate",
+            json!({ "CertificateArn": arn.clone() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body(&resp);
+    assert_eq!(b["Certificate"]["Status"], "ISSUED");
+    assert_eq!(b["Certificate"]["DomainName"], "imported.example.com");
+    assert_eq!(
+        b["Certificate"]["SubjectAlternativeNames"][0],
+        "www.imported.example.com"
+    );
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ExportCertificate",
+            json!({ "CertificateArn": arn }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let exported = body(&resp);
+    assert_eq!(
+        exported["Certificate"],
+        "-----BEGIN CERTIFICATE-----\nimported-cert\n-----END CERTIFICATE-----"
+    );
+    assert_eq!(
+        exported["PrivateKey"],
+        "-----BEGIN PRIVATE KEY-----\nimported-key\n-----END PRIVATE KEY-----"
+    );
+}
+
+#[tokio::test]
+async fn test_export_certificate() {
+    let p = AcmProvider::new();
+    let arn = request_cert(&p, "export-me.com").await;
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ExportCertificate",
+            json!({ "CertificateArn": arn }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert!(
+        b["Certificate"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN CERTIFICATE")
+    );
+    assert!(
+        b["CertificateChain"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN CERTIFICATE")
+    );
+    assert!(
+        b["PrivateKey"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN PRIVATE KEY")
+    );
+}
+
+#[tokio::test]
+async fn test_export_certificate_not_found() {
+    let p = AcmProvider::new();
+    let missing_arn = "arn:aws:acm:us-east-1:000000000000:certificate/nonexistent";
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ExportCertificate",
+            json!({ "CertificateArn": missing_arn }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    assert!(body_str(&resp).contains("ResourceNotFoundException"));
+}
+
+#[tokio::test]
+async fn test_import_certificate_missing_required_fields() {
+    let p = AcmProvider::new();
+
+    let missing_certificate = p
+        .dispatch(&make_ctx(
+            "ImportCertificate",
+            json!({
+                "PrivateKey": "-----BEGIN PRIVATE KEY-----\nimported-key\n-----END PRIVATE KEY-----",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_certificate.status_code, 400);
+    assert!(body_str(&missing_certificate).contains("ValidationException"));
+    assert!(body_str(&missing_certificate).contains("Certificate is required"));
+
+    let missing_private_key = p
+        .dispatch(&make_ctx(
+            "ImportCertificate",
+            json!({
+                "Certificate": "-----BEGIN CERTIFICATE-----\nimported-cert\n-----END CERTIFICATE-----",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_private_key.status_code, 400);
+    assert!(body_str(&missing_private_key).contains("ValidationException"));
+    assert!(body_str(&missing_private_key).contains("PrivateKey is required"));
+}
+
+#[tokio::test]
 async fn test_request_and_describe_certificate() {
     let p = AcmProvider::new();
     let arn = request_cert(&p, "example.com").await;
@@ -172,6 +309,65 @@ async fn test_add_tags() {
     let tags = body(&resp)["Tags"].as_array().unwrap().clone();
     assert_eq!(tags.len(), 1);
     assert_eq!(tags[0]["Key"], "env");
+}
+
+#[tokio::test]
+async fn test_remove_tags() {
+    let p = AcmProvider::new();
+    let arn = request_cert(&p, "tagged-remove.com").await;
+
+    p.dispatch(&make_ctx(
+        "AddTagsToCertificate",
+        json!({
+            "CertificateArn": arn,
+            "Tags": [
+                { "Key": "env", "Value": "prod" },
+                { "Key": "team", "Value": "platform" }
+            ],
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "RemoveTagsFromCertificate",
+            json!({
+                "CertificateArn": arn,
+                "Tags": [{ "Key": "env" }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListTagsForCertificate",
+            json!({ "CertificateArn": arn }),
+        ))
+        .await
+        .unwrap();
+    let tags = body(&resp)["Tags"].as_array().unwrap().clone();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0]["Key"], "team");
+}
+
+#[tokio::test]
+async fn test_remove_tags_not_found() {
+    let p = AcmProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "RemoveTagsFromCertificate",
+            json!({
+                "CertificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/nonexistent",
+                "Tags": [{ "Key": "env" }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    assert!(body_str(&resp).contains("ResourceNotFoundException"));
 }
 
 #[tokio::test]
