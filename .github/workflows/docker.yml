@@ -3,7 +3,6 @@ name: Docker
 on:
   push:
     branches: ["main", "develop"]
-    tags: ["v*"]
     paths:
       - "**/*.rs"
       - "**/Cargo.toml"
@@ -48,9 +47,7 @@ jobs:
           set -euo pipefail
           build_sha="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
 
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            build_tag="${GITHUB_REF_NAME}"
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
             build_tag="stable"
           elif [[ "${GITHUB_REF}" == "refs/heads/develop" ]]; then
             build_tag="beta"
@@ -69,17 +66,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
-            # Stable channel (main)
+            # Stable channel (main + scheduled refreshes of main only)
             type=raw,value=stable,enable=${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' }}
-            # Canary/Beta channel (develop)
+            # Beta channel (develop only)
             type=raw,value=beta,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
             type=sha,format=short,prefix=beta-,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
-            # SemVer tags (stable + beta prerelease tags)
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
           labels: |
             org.opencontainers.image.title=openstack
             org.opencontainers.image.description=A Rust-based LocalStack drop-in replacement

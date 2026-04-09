@@ -1,19 +1,41 @@
-# Release Flow Status
+# Release Flow
 
-`main` is currently in a transition period for release automation.
+## Branch roles
 
-## Current state
+- `main` publishes the stable container channels:
+  - `stable`
+  - `latest`
+- `develop` publishes the prerelease container channels:
+  - `beta`
+  - `beta-<short-sha>`
 
-- Legacy `release-plz` + RC helper workflows were removed from `main`.
-- CI remains the merge safety gate (`Required checks (main target)` / `Required checks (non-main target)`).
-- Docker publishing and tag-based binary builds remain active through their dedicated workflows.
-- `develop` is promoted to `main` using **fast-forward only** (`git merge --ff-only origin/develop`).
+## Versioning
 
-## Why this doc is short
+`semantic-release` determines when a new GitHub release/tag should be created:
 
-This file previously documented the old `release-plz`-driven flow in detail.
-That flow is no longer present on `main`, and the old instructions are intentionally removed to avoid operator confusion.
+- `main` → stable releases
+- `develop` → `beta` prereleases
 
-## Next step
+Those Git tags are for release/version history.
+They are **not** used as an additional Docker publishing path.
 
-A follow-up PR should reintroduce a single, stable release automation model and then update this document with final, branch-specific behavior.
+## Docker publishing rules
+
+Docker image publication is branch-driven:
+
+- pushes to `main` publish `stable` and `latest`
+- pushes to `develop` publish `beta` and `beta-<short-sha>`
+- scheduled Docker refreshes rebuild from `main` only
+- pull requests build for validation only and do not publish
+
+This keeps the release channels unambiguous and prevents prerelease activity on `develop` from accidentally publishing stable-style container tags.
+
+## Promotion
+
+`develop` is promoted to `main` using **fast-forward only**:
+
+```bash
+git checkout main
+git fetch origin
+git merge --ff-only origin/develop
+```
