@@ -65,7 +65,7 @@ async fn test_create_hosted_zone() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 201);
-    assert_eq!(resp.content_type, "text/xml");
+    assert_eq!(resp.content_type, "application/xml");
     let body = body_str(&resp);
     assert!(body.contains("CreateHostedZoneResponse"));
     assert!(body.contains("example.com."));

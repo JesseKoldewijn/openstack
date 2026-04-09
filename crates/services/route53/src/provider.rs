@@ -37,12 +37,13 @@ impl Default for Route53Provider {
 
 const ROUTE53_REGION: &str = "us-east-1";
 const ROUTE53_NS: &str = "https://route53.amazonaws.com/doc/2013-04-01/";
+const ROUTE53_SUBMITTED_AT: &str = "2010-09-10T01:36:41.958000Z";
 
 fn xml_ok(body: String) -> DispatchResponse {
     DispatchResponse {
         status_code: 200,
         body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
-        content_type: Cow::Borrowed("text/xml"),
+        content_type: Cow::Borrowed("application/xml"),
         headers: Vec::new(),
     }
 }
@@ -51,7 +52,7 @@ fn xml_created(body: String, location: &str) -> DispatchResponse {
     DispatchResponse {
         status_code: 201,
         body: ResponseBody::Buffered(Bytes::from(body.into_bytes())),
-        content_type: Cow::Borrowed("text/xml"),
+        content_type: Cow::Borrowed("application/xml"),
         headers: vec![("Location".to_string(), location.to_string())],
     }
 }
@@ -159,12 +160,14 @@ impl ServiceProvider for Route53Provider {
                 } else {
                     format!("{name_raw}.")
                 };
+                let caller_reference = xml_text(&raw, "CallerReference").unwrap_or_default();
                 let comment = xml_text(&raw, "Comment").unwrap_or_default();
 
                 let zone_id = short_id();
                 let zone = HostedZone {
                     id: zone_id.clone(),
                     name: name.clone(),
+                    caller_reference: caller_reference.clone(),
                     comment: comment.clone(),
                     private_zone: false,
                     record_count: 2,
@@ -179,12 +182,14 @@ impl ServiceProvider for Route53Provider {
 <HostedZone>\
 <Id>/hostedzone/{zone_id}</Id>\
 <Name>{}</Name>\
+<CallerReference>{}</CallerReference>\
 <Config><Comment>{}</Comment><PrivateZone>false</PrivateZone></Config>\
 <ResourceRecordSetCount>2</ResourceRecordSetCount>\
 </HostedZone>\
-<ChangeInfo><Id>/{rid}</Id><Status>INSYNC</Status></ChangeInfo>\
+<ChangeInfo><Id>/change/{rid}</Id><Status>INSYNC</Status><SubmittedAt>{ROUTE53_SUBMITTED_AT}</SubmittedAt></ChangeInfo>\
 </CreateHostedZoneResponse>",
                     xml_escape(&name),
+                    xml_escape(&caller_reference),
                     xml_escape(&comment)
                 );
                 Ok(xml_created(
@@ -206,7 +211,7 @@ impl ServiceProvider for Route53Provider {
                 let body = format!(
                     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <DeleteHostedZoneResponse xmlns=\"{ROUTE53_NS}\">\
-<ChangeInfo><Id>/{rid}</Id><Status>INSYNC</Status></ChangeInfo>\
+<ChangeInfo><Id>/change/{rid}</Id><Status>INSYNC</Status><SubmittedAt>{ROUTE53_SUBMITTED_AT}</SubmittedAt></ChangeInfo>\
 </DeleteHostedZoneResponse>"
                 );
                 Ok(xml_ok(body))
@@ -235,11 +240,13 @@ impl ServiceProvider for Route53Provider {
                             "<HostedZone>\
 <Id>/hostedzone/{}</Id>\
 <Name>{}</Name>\
+<CallerReference>{}</CallerReference>\
 <Config><Comment>{}</Comment><PrivateZone>{}</PrivateZone></Config>\
 <ResourceRecordSetCount>{}</ResourceRecordSetCount>\
 </HostedZone>",
                             z.id,
                             xml_escape(&z.name),
+                            xml_escape(&z.caller_reference),
                             xml_escape(&z.comment),
                             z.private_zone,
                             z.record_count
@@ -282,12 +289,14 @@ impl ServiceProvider for Route53Provider {
 <HostedZone>\
 <Id>/hostedzone/{}</Id>\
 <Name>{}</Name>\
+<CallerReference>{}</CallerReference>\
 <Config><Comment>{}</Comment><PrivateZone>{}</PrivateZone></Config>\
 <ResourceRecordSetCount>{}</ResourceRecordSetCount>\
 </HostedZone>\
 </GetHostedZoneResponse>",
                     zone.id,
                     xml_escape(&zone.name),
+                    xml_escape(&zone.caller_reference),
                     xml_escape(&zone.comment),
                     zone.private_zone,
                     zone.record_count
@@ -303,7 +312,7 @@ impl ServiceProvider for Route53Provider {
                 let body = format!(
                     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <GetChangeResponse xmlns=\"{ROUTE53_NS}\">\
-<ChangeInfo><Id>/change/{change_id}</Id><Status>INSYNC</Status></ChangeInfo>\
+<ChangeInfo><Id>/change/{change_id}</Id><Status>INSYNC</Status><SubmittedAt>{ROUTE53_SUBMITTED_AT}</SubmittedAt></ChangeInfo>\
 </GetChangeResponse>"
                 );
                 Ok(xml_ok(body))
@@ -349,7 +358,7 @@ impl ServiceProvider for Route53Provider {
                 let body = format!(
                     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ChangeResourceRecordSetsResponse xmlns=\"{ROUTE53_NS}\">\
-<ChangeInfo><Id>/{rid}</Id><Status>INSYNC</Status></ChangeInfo>\
+<ChangeInfo><Id>/change/{rid}</Id><Status>INSYNC</Status><SubmittedAt>{ROUTE53_SUBMITTED_AT}</SubmittedAt></ChangeInfo>\
 </ChangeResourceRecordSetsResponse>"
                 );
                 Ok(xml_ok(body))
