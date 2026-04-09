@@ -2486,12 +2486,23 @@ fn service_from_query_action(
         | "ChangeMessageVisibility"
         | "ChangeMessageVisibilityBatch" => Some("sqs"),
         // STS
-        "GetCallerIdentity" | "AssumeRole" | "GetSessionToken" | "GetAccessKeyInfo"
+        "GetCallerIdentity"
+        | "AssumeRole"
+        | "GetSessionToken"
+        | "GetAccessKeyInfo"
         | "DecodeAuthorizationMessage" => Some("sts"),
         // SNS
-        "CreateTopic" | "DeleteTopic" | "Publish" | "Subscribe" | "Unsubscribe" | "ListTopics"
-        | "SetTopicAttributes" | "GetTopicAttributes" | "ListSubscriptions"
-        | "ListSubscriptionsByTopic" | "GetSubscriptionAttributes" => Some("sns"),
+        "CreateTopic"
+        | "DeleteTopic"
+        | "Publish"
+        | "Subscribe"
+        | "Unsubscribe"
+        | "ListTopics"
+        | "SetTopicAttributes"
+        | "GetTopicAttributes"
+        | "ListSubscriptions"
+        | "ListSubscriptionsByTopic"
+        | "GetSubscriptionAttributes" => Some("sns"),
         // IAM
         "CreateRole" | "DeleteRole" | "ListRoles" | "GetRole" | "CreateUser" | "DeleteUser"
         | "ListUsers" | "GetUser" => Some("iam"),
@@ -2499,8 +2510,13 @@ fn service_from_query_action(
         "CreateStack" | "DeleteStack" | "DescribeStacks" | "ListStacks" | "GetTemplate"
         | "ValidateTemplate" | "UpdateStack" => Some("cloudformation"),
         // CloudWatch (query actions)
-        "PutMetricData" | "ListMetrics" | "GetMetricStatistics" | "DescribeAlarms"
-        | "PutMetricAlarm" | "DeleteAlarms" | "SetAlarmState" => Some("cloudwatch"),
+        "PutMetricData"
+        | "ListMetrics"
+        | "GetMetricStatistics"
+        | "DescribeAlarms"
+        | "PutMetricAlarm"
+        | "DeleteAlarms"
+        | "SetAlarmState" => Some("cloudwatch"),
         // EC2
         "DescribeVpcs"
         | "CreateVpc"
@@ -2517,8 +2533,13 @@ fn service_from_query_action(
         "CreateCluster" | "DeleteCluster" | "DescribeClusters" | "ModifyCluster"
         | "RebootCluster" => Some("redshift"),
         // SES
-        "VerifyEmailIdentity" | "VerifyDomainIdentity" | "ListIdentities" | "SendEmail"
-        | "SendRawEmail" | "GetIdentityVerificationAttributes" | "DeleteIdentity" => Some("ses"),
+        "VerifyEmailIdentity"
+        | "VerifyDomainIdentity"
+        | "ListIdentities"
+        | "SendEmail"
+        | "SendRawEmail"
+        | "GetIdentityVerificationAttributes"
+        | "DeleteIdentity" => Some("ses"),
         _ => None,
     }
 }
