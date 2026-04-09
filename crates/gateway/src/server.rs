@@ -2755,6 +2755,13 @@ fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value)
         };
     }
     if path.starts_with("/2021-01-01/opensearch/domain/") {
+        if path.ends_with("/config") {
+            return match method {
+                "GET" => "DescribeDomainConfig".to_string(),
+                "POST" => "UpdateDomainConfig".to_string(),
+                _ => format!("{}:{}", method, path),
+            };
+        }
         return match method {
             "GET" => "DescribeDomain".to_string(),
             "DELETE" => "DeleteDomain".to_string(),
@@ -2777,6 +2784,7 @@ fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value)
             };
         }
         return match method {
+            "GET" => "GetHostedZone".to_string(),
             "DELETE" => "DeleteHostedZone".to_string(),
             _ => format!("{}:{}", method, path),
         };
@@ -3065,6 +3073,36 @@ mod tests {
         assert_eq!(
             extract_rest_operation("GET", "/2015-03-31/functions", &params),
             "ListFunctions"
+        );
+    }
+
+    #[test]
+    fn maps_opensearch_config_routes() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation(
+                "POST",
+                "/2021-01-01/opensearch/domain/bench-domain/config",
+                &params,
+            ),
+            "UpdateDomainConfig"
+        );
+        assert_eq!(
+            extract_rest_operation(
+                "GET",
+                "/2021-01-01/opensearch/domain/bench-domain/config",
+                &params,
+            ),
+            "DescribeDomainConfig"
+        );
+    }
+
+    #[test]
+    fn maps_route53_hosted_zone_get_route() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation("GET", "/2013-04-01/hostedzone/Z123456789", &params),
+            "GetHostedZone"
         );
     }
 
