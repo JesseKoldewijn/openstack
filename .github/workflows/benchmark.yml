@@ -1,6 +1,8 @@
 name: Benchmark
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
@@ -67,6 +69,9 @@ jobs:
           DISPATCH_PR_NUMBER: ${{ github.event.inputs.pr_number }}
           DISPATCH_PR_SHA: ${{ github.event.inputs.pr_sha }}
           DISPATCH_PR_REF: ${{ github.event.inputs.pr_ref }}
+          PR_EVENT_NUMBER: ${{ github.event.pull_request.number }}
+          PR_EVENT_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_EVENT_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
 
@@ -121,6 +126,13 @@ jobs:
             echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
             echo "pr_sha=$PR_SHA" >> "$GITHUB_OUTPUT"
             echo "pr_ref=$PR_REF" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "dispatch_only=false" >> "$GITHUB_OUTPUT"
+            echo "profile=default" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${PR_EVENT_NUMBER:-}" >> "$GITHUB_OUTPUT"
+            echo "pr_sha=${PR_EVENT_SHA:-}" >> "$GITHUB_OUTPUT"
+            echo "pr_ref=${PR_EVENT_REF:-}" >> "$GITHUB_OUTPUT"
           elif [[ "$EVENT_NAME" == "schedule" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             echo "dispatch_only=false" >> "$GITHUB_OUTPUT"
