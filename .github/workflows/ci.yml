@@ -29,8 +29,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  semver-pr-title:
-    name: SemVer PR Title
+  conventional-pr-title:
+    name: Conventional PR Title
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -49,6 +49,44 @@ jobs:
             echo "Examples: 'feat(gateway): add X', 'fix: correct Y', 'feat!: remove Z'"
             exit 1
           fi
+
+  conventional-push-subjects:
+    name: Conventional Push Subjects
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate pushed commit subjects (Conventional Commit style)
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          pattern='^(feat|fix|chore|refactor|test|docs|perf|ci)(\([^)]+\))?!?: .+'
+
+          if [[ -z "${BEFORE_SHA:-}" || "$BEFORE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+            COMMITS=$(git rev-list --reverse "$AFTER_SHA")
+          else
+            COMMITS=$(git rev-list --reverse "${BEFORE_SHA}..${AFTER_SHA}")
+          fi
+
+          if [[ -z "$COMMITS" ]]; then
+            echo "No commits found in push range; nothing to validate."
+            exit 0
+          fi
+
+          while IFS= read -r sha; do
+            [[ -z "$sha" ]] && continue
+            subject=$(git log -1 --pretty=%s "$sha")
+            if [[ ! "$subject" =~ $pattern ]]; then
+              echo "Invalid pushed commit subject for $sha: '$subject'"
+              echo "Expected format: type(scope?): description"
+              echo "Examples: 'feat(gateway): add X', 'fix: correct Y', 'feat!: remove Z'"
+              exit 1
+            fi
+          done <<< "$COMMITS"
 
   fmt:
     name: Rustfmt
@@ -618,7 +656,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       [
-        semver-pr-title,
+        conventional-pr-title,
         fmt,
         clippy,
         test,
@@ -642,7 +680,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       [
-        semver-pr-title,
+        conventional-pr-title,
         fmt,
         clippy,
         test,
@@ -666,7 +704,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       [
-        semver-pr-title,
+        conventional-pr-title,
         fmt,
         clippy,
         test,
@@ -708,7 +746,6 @@ jobs:
               "",
               "| Check | Result |",
               "|---|---|",
-              f"| SemVer PR Title | `{os.environ.get('SEMVER_TITLE_RESULT', 'unknown')}` |",
               f"| Rustfmt | `{os.environ.get('FMT_RESULT', 'unknown')}` |",
               f"| Clippy | `{os.environ.get('CLIPPY_RESULT', 'unknown')}` |",
               f"| Tests | `{os.environ.get('TEST_RESULT', 'unknown')}` |",
@@ -755,7 +792,7 @@ jobs:
               out.write(content + "\n")
           PY
         env:
-          SEMVER_TITLE_RESULT: ${{ needs.semver-pr-title.result }}
+          PR_TITLE_RESULT: ${{ needs.conventional-pr-title.result }}
           FMT_RESULT: ${{ needs.fmt.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           TEST_RESULT: ${{ needs.test.result }}
