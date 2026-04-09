@@ -37,10 +37,45 @@ This keeps the release channels unambiguous and prevents prerelease activity on 
 
 ## Promotion
 
-`develop` is promoted to `main` using **fast-forward only**:
+`develop` is promoted to `main` using **fast-forward only**.
+
+### Recommended path
+
+Do **not** open a PR from `develop` to `main`.
+Treat this as a promotion step, not a merge-review step.
+
+Use the manual GitHub Actions workflow **Promote develop to main** from the `develop` branch.
+That workflow:
+
+- fetches `origin/main` and `origin/develop`
+- verifies `main` is an ancestor of `develop`
+- runs `git merge --ff-only origin/develop`
+- pushes the updated `main` ref only if the promotion is a true fast-forward
+
+This keeps `main` as a clean promoted snapshot of `develop` without merge commits, squash commits, or rebased SHAs.
+
+### CLI fallback
 
 ```bash
 git checkout main
 git fetch origin
 git merge --ff-only origin/develop
+git push origin main
 ```
+
+### GitHub branch settings
+
+For `main`, combine the workflow with branch protection / rulesets that:
+
+- require linear history
+- require status checks
+- restrict who can push to `main`
+- block force pushes and deletions
+
+Keep feature-branch merges flexible on `develop`, but treat `develop` -> `main` as a dedicated promotion step rather than a normal PR merge-button flow.
+
+## Team rule
+
+- open PRs into `develop`
+- do **not** open PRs from `develop` to `main`
+- promote `develop` to `main` only via the fast-forward workflow (or the equivalent CLI ff-only command)
