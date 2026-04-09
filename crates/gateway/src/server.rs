@@ -2789,6 +2789,12 @@ fn extract_rest_operation(method: &str, path: &str, _params: &serde_json::Value)
             _ => format!("{}:{}", method, path),
         };
     }
+    if path.starts_with("/2013-04-01/change/") {
+        return match method {
+            "GET" => "GetChange".to_string(),
+            _ => format!("{}:{}", method, path),
+        };
+    }
     if path.starts_with("/2015-03-31/functions/") {
         let suffix = path.trim_start_matches("/2015-03-31/functions/");
         if suffix.ends_with("/code") && method == "PUT" {
@@ -3103,6 +3109,15 @@ mod tests {
         assert_eq!(
             extract_rest_operation("GET", "/2013-04-01/hostedzone/Z123456789", &params),
             "GetHostedZone"
+        );
+    }
+
+    #[test]
+    fn maps_route53_change_get_route() {
+        let params = json!({});
+        assert_eq!(
+            extract_rest_operation("GET", "/2013-04-01/change/C123456789", &params),
+            "GetChange"
         );
     }
 

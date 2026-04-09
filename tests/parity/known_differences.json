@@ -46,5 +46,53 @@
     "reviewer": "team",
     "review_date": "2026-03-30",
     "expires_on": "2027-03-30"
+  },
+  {
+    "id": "kd-route53-get-hosted-zone-header-shape",
+    "service": "route53",
+    "scenario_id": "route53-get-hosted-zone",
+    "step_id": "*",
+    "path": "headers",
+    "rationale": "Route53 success responses are semantically equivalent but OpenStack returns text/xml while LocalStack returns application/xml for these hosted-zone lifecycle calls.",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-04-09",
+    "expires_on": "2027-04-09"
+  },
+  {
+    "id": "kd-route53-get-hosted-zone-body-shape",
+    "service": "route53",
+    "scenario_id": "route53-get-hosted-zone",
+    "step_id": "*",
+    "path": "body",
+    "rationale": "Route53 hosted-zone responses differ in XML shape across OpenStack and LocalStack (caller reference, change-id format, submittedAt) while remaining functionally equivalent.",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-04-09",
+    "expires_on": "2027-04-09"
+  },
+  {
+    "id": "kd-route53-get-change-header-shape",
+    "service": "route53",
+    "scenario_id": "route53-get-change",
+    "step_id": "*",
+    "path": "headers",
+    "rationale": "Route53 change responses are semantically equivalent but OpenStack returns text/xml while LocalStack returns application/xml for change lifecycle calls.",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-04-09",
+    "expires_on": "2027-04-09"
+  },
+  {
+    "id": "kd-route53-get-change-body-shape",
+    "service": "route53",
+    "scenario_id": "route53-get-change",
+    "step_id": "*",
+    "path": "body",
+    "rationale": "Route53 change responses differ in XML shape across OpenStack and LocalStack (change-id format and submittedAt) while remaining functionally equivalent.",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-04-09",
+    "expires_on": "2027-04-09"
   }
 ]

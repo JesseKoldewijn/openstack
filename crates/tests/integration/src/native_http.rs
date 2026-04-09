@@ -810,6 +810,77 @@ fn translate_route53(op: &str, command: &[String]) -> Result<NativeHttpPlan, Tra
             "route53:list-resource-record-sets".to_string(),
             "route53",
         )),
+        "create-hosted-zone" => {
+            let name = required_flag(command, "--name")?;
+            let caller_reference = required_flag(command, "--caller-reference")?;
+            let xml = format!(
+                "<CreateHostedZoneRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\"><Name>{name}</Name><CallerReference>{caller_reference}</CallerReference></CreateHostedZoneRequest>"
+            );
+            Ok(signed_request(
+                Method::POST,
+                "/2013-04-01/hostedzone".to_string(),
+                vec![("content-type".to_string(), "application/xml".to_string())],
+                Some(xml.clone().into_bytes()),
+                xml,
+                "route53:create-hosted-zone".to_string(),
+                "route53",
+            ))
+        }
+        "get-hosted-zone" => {
+            let zone_id = required_flag(command, "--id")?;
+            let zone_id = zone_id.trim_start_matches("/hostedzone/");
+            Ok(signed_request(
+                Method::GET,
+                format!("/2013-04-01/hostedzone/{zone_id}"),
+                Vec::new(),
+                None,
+                String::new(),
+                "route53:get-hosted-zone".to_string(),
+                "route53",
+            ))
+        }
+        "delete-hosted-zone" => {
+            let zone_id = required_flag(command, "--id")?;
+            let zone_id = zone_id.trim_start_matches("/hostedzone/");
+            Ok(signed_request(
+                Method::DELETE,
+                format!("/2013-04-01/hostedzone/{zone_id}"),
+                Vec::new(),
+                None,
+                String::new(),
+                "route53:delete-hosted-zone".to_string(),
+                "route53",
+            ))
+        }
+        "get-change" => {
+            let change_id = required_flag(command, "--id")?;
+            let change_id = change_id.trim_start_matches('/');
+            let change_id = change_id.trim_start_matches("change/");
+            Ok(signed_request(
+                Method::GET,
+                format!("/2013-04-01/change/{change_id}"),
+                Vec::new(),
+                None,
+                String::new(),
+                "route53:get-change".to_string(),
+                "route53",
+            ))
+        }
+        "change-resource-record-sets" => {
+            let zone_id = required_flag(command, "--hosted-zone-id")?;
+            let zone_id = zone_id.trim_start_matches("/hostedzone/");
+            let change_batch = parse_json_flag(command, "--change-batch")?;
+            let xml = route53_change_batch_xml(&change_batch)?;
+            Ok(signed_request(
+                Method::POST,
+                format!("/2013-04-01/hostedzone/{zone_id}/rrset"),
+                vec![("content-type".to_string(), "application/xml".to_string())],
+                Some(xml.clone().into_bytes()),
+                xml,
+                "route53:change-resource-record-sets".to_string(),
+                "route53",
+            ))
+        }
         "create-health-check" => {
             let caller_reference = required_flag(command, "--caller-reference")?;
             let config = required_flag(command, "--health-check-config")?;
@@ -859,6 +930,87 @@ fn translate_route53(op: &str, command: &[String]) -> Result<NativeHttpPlan, Tra
             "native HTTP translator not implemented for 'route53' '{op}'"
         ))),
     }
+}
+
+fn route53_change_batch_xml(batch: &serde_json::Value) -> Result<String, TranslationOutcome> {
+    let changes = batch
+        .get("Changes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            TranslationOutcome::Invalid(
+                "change-resource-record-sets requires ChangeBatch JSON with a Changes array"
+                    .to_string(),
+            )
+        })?;
+
+    let mut xml = String::from(
+        "<ChangeResourceRecordSetsRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\"><ChangeBatch><Changes>",
+    );
+
+    for change in changes {
+        let action = change
+            .get("Action")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                TranslationOutcome::Invalid("each Route53 change must include Action".to_string())
+            })?;
+        let rrset = change.get("ResourceRecordSet").ok_or_else(|| {
+            TranslationOutcome::Invalid(
+                "each Route53 change must include ResourceRecordSet".to_string(),
+            )
+        })?;
+        let name = rrset
+            .get("Name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                TranslationOutcome::Invalid("Route53 ResourceRecordSet requires Name".to_string())
+            })?;
+        let rr_type = rrset
+            .get("Type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                TranslationOutcome::Invalid("Route53 ResourceRecordSet requires Type".to_string())
+            })?;
+        let ttl = rrset
+            .get("TTL")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(60);
+        let values = rrset
+            .get("ResourceRecords")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                TranslationOutcome::Invalid(
+                    "Route53 ResourceRecordSet requires ResourceRecords array".to_string(),
+                )
+            })?;
+
+        xml.push_str("<Change><Action>");
+        xml.push_str(action);
+        xml.push_str("</Action><ResourceRecordSet><Name>");
+        xml.push_str(name);
+        xml.push_str("</Name><Type>");
+        xml.push_str(rr_type);
+        xml.push_str("</Type><TTL>");
+        xml.push_str(&ttl.to_string());
+        xml.push_str("</TTL><ResourceRecords>");
+        for value in values {
+            let record_value = value
+                .get("Value")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    TranslationOutcome::Invalid(
+                        "each Route53 ResourceRecord must include Value".to_string(),
+                    )
+                })?;
+            xml.push_str("<ResourceRecord><Value>");
+            xml.push_str(record_value);
+            xml.push_str("</Value></ResourceRecord>");
+        }
+        xml.push_str("</ResourceRecords></ResourceRecordSet></Change>");
+    }
+
+    xml.push_str("</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>");
+    Ok(xml)
 }
 
 fn translate_dynamodb(op: &str, command: &[String]) -> Result<NativeHttpPlan, TranslationOutcome> {
@@ -1140,6 +1292,9 @@ fn translate_events(op: &str, command: &[String]) -> Result<NativeHttpPlan, Tran
             "Name": required_flag(command, "--name")?,
         }),
         "delete-event-bus" => json!({
+            "Name": required_flag(command, "--name")?,
+        }),
+        "describe-event-bus" => json!({
             "Name": required_flag(command, "--name")?,
         }),
         "list-event-buses" => json!({}),

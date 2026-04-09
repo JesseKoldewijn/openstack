@@ -1131,7 +1131,6 @@ impl TargetManager {
 
 fn map_service_for_localstack(service: &str) -> String {
     match service {
-        "events" => "eventbridge".to_string(),
         "states" => "stepfunctions".to_string(),
         _ => service.to_string(),
     }
