@@ -115,6 +115,7 @@
     "cleanup": []
   },
   {"id":"events-lifecycle","profile":"all-services-smoke","service":"events","setup":[{"id":"events-lifecycle-create-bus","protocol":"json","command":["events","create-event-bus","--name","bus-{{run_id}}"],"expect_success":true,"capture_json":null}],"steps":[{"id":"events-lifecycle-put-rule","protocol":"json","command":["events","put-rule","--name","rule-{{run_id}}","--schedule-expression","rate(5 minutes)","--event-bus-name","bus-{{run_id}}"],"expect_success":true,"capture_json":null},{"id":"events-lifecycle-describe-rule-enabled","protocol":"json","command":["events","describe-rule","--name","rule-{{run_id}}","--event-bus-name","bus-{{run_id}}"],"expect_success":true,"capture_json":null},{"id":"events-lifecycle-put-targets","protocol":"json","command":["events","put-targets","--rule","rule-{{run_id}}","--event-bus-name","bus-{{run_id}}","--targets","[{\"Id\":\"t1\",\"Arn\":\"arn:aws:sqs:us-east-1:000000000000:dummy-queue\"}]"],"expect_success":true,"capture_json":null},{"id":"events-lifecycle-list-targets","protocol":"json","command":["events","list-targets-by-rule","--rule","rule-{{run_id}}","--event-bus-name","bus-{{run_id}}"],"expect_success":true,"capture_json":null},{"id":"events-lifecycle-disable-rule","protocol":"json","command":["events","disable-rule","--name","rule-{{run_id}}","--event-bus-name","bus-{{run_id}}"],"expect_success":true,"capture_json":null},{"id":"events-lifecycle-describe-rule-disabled","protocol":"json","command":["events","describe-rule","--name","rule-{{run_id}}","--event-bus-name","bus-{{run_id}}"],"expect_success":true,"capture_json":null},{"id":"events-lifecycle-enable-rule","protocol":"json","command":["events","enable-rule","--name","rule-{{run_id}}","--event-bus-name","bus-{{run_id}}"],"expect_success":true,"capture_json":null},{"id":"events-lifecycle-describe-rule-reenabled","protocol":"json","command":["events","describe-rule","--name","rule-{{run_id}}","--event-bus-name","bus-{{run_id}}"],"expect_success":true,"capture_json":null},{"id":"events-lifecycle-remove-targets","protocol":"json","command":["events","remove-targets","--rule","rule-{{run_id}}","--event-bus-name","bus-{{run_id}}","--ids","t1"],"expect_success":true,"capture_json":null},{"id":"events-lifecycle-delete-rule","protocol":"json","command":["events","delete-rule","--name","rule-{{run_id}}","--event-bus-name","bus-{{run_id}}"],"expect_success":true,"capture_json":null}],"assertions":[],"cleanup":[{"id":"events-lifecycle-delete-bus","protocol":"json","command":["events","delete-event-bus","--name","bus-{{run_id}}"],"expect_success":true,"capture_json":null}]},
+  {"id":"events-describe-event-bus","profile":"all-services-smoke","service":"events","setup":[{"id":"events-describe-create-bus","protocol":"json","command":["events","create-event-bus","--name","describe-bus-{{run_id}}"],"expect_success":true,"capture_json":null}],"steps":[{"id":"events-describe-event-bus-step","protocol":"json","command":["events","describe-event-bus","--name","describe-bus-{{run_id}}"],"expect_success":true,"capture_json":null}],"assertions":[],"cleanup":[{"id":"events-describe-delete-bus","protocol":"json","command":["events","delete-event-bus","--name","describe-bus-{{run_id}}"],"expect_success":true,"capture_json":null}]},
   {"id":"firehose-probe","profile":"all-services-smoke","service":"firehose","setup":[],"steps":[{"id":"firehose-probe-step","protocol":"json","command":["firehose","describe-delivery-stream"],"expect_success":false,"capture_json":null}],"assertions":[],"cleanup":[]},
   {"id":"iam-probe","profile":"all-services-smoke","service":"iam","setup":[],"steps":[{"id":"iam-probe-step","protocol":"query-xml","command":["iam","list-users"],"expect_success":true,"capture_json":null}],"assertions":[],"cleanup":[]},
   {"id":"kinesis-probe","profile":"all-services-smoke","service":"kinesis","setup":[],"steps":[{"id":"kinesis-probe-step","protocol":"json","command":["kinesis","put-record"],"expect_success":false,"capture_json":null}],"assertions":[],"cleanup":[]},
@@ -123,6 +124,102 @@
   {"id":"opensearch-probe","profile":"all-services-smoke","service":"opensearch","setup":[],"steps":[{"id":"opensearch-probe-step","protocol":"rest-json","command":["opensearch","list-domain-names"],"expect_success":true,"capture_json":null}],"assertions":[],"cleanup":[]},
   {"id":"redshift-probe","profile":"all-services-smoke","service":"redshift","setup":[],"steps":[{"id":"redshift-probe-step","protocol":"query-xml","command":["redshift","delete-cluster"],"expect_success":false,"capture_json":null}],"assertions":[],"cleanup":[]},
   {"id":"route53-probe","profile":"all-services-smoke","service":"route53","setup":[],"steps":[{"id":"route53-probe-step","protocol":"rest-xml","command":["route53","list-resource-record-sets"],"expect_success":false,"capture_json":null}],"assertions":[],"cleanup":[]},
+  {
+    "id": "route53-get-hosted-zone",
+    "profile": "all-services-smoke",
+    "service": "route53",
+    "setup": [
+      {
+        "id": "route53-get-hosted-zone-create",
+        "protocol": "rest-xml",
+        "command": [
+          "route53", "create-hosted-zone",
+          "--name", "hz-{{run_id}}.example.com",
+          "--caller-reference", "hz-{{run_id}}"
+        ],
+        "expect_success": true,
+        "capture_json": { "output_key": "route53_hosted_zone_id", "json_pointer": "/HostedZone/Id" }
+      }
+    ],
+    "steps": [
+      {
+        "id": "route53-get-hosted-zone-step",
+        "protocol": "rest-xml",
+        "command": ["route53", "get-hosted-zone", "--id", "{{route53_hosted_zone_id}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "assertions": [],
+    "cleanup": [
+      {
+        "id": "route53-get-hosted-zone-delete",
+        "protocol": "rest-xml",
+        "command": ["route53", "delete-hosted-zone", "--id", "{{route53_hosted_zone_id}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
+  {
+    "id": "route53-get-change",
+    "profile": "all-services-smoke",
+    "service": "route53",
+    "setup": [
+      {
+        "id": "route53-get-change-create-zone",
+        "protocol": "rest-xml",
+        "command": [
+          "route53", "create-hosted-zone",
+          "--name", "change-{{run_id}}.example.com",
+          "--caller-reference", "change-{{run_id}}"
+        ],
+        "expect_success": true,
+        "capture_json": { "output_key": "route53_change_hosted_zone_id", "json_pointer": "/HostedZone/Id" }
+      },
+      {
+        "id": "route53-get-change-create-rrset",
+        "protocol": "rest-xml",
+        "command": [
+          "route53", "change-resource-record-sets",
+          "--hosted-zone-id", "{{route53_change_hosted_zone_id}}",
+          "--change-batch", "{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{\"Name\":\"www.change-{{run_id}}.example.com\",\"Type\":\"A\",\"TTL\":60,\"ResourceRecords\":[{\"Value\":\"1.2.3.4\"}]}}]}"
+        ],
+        "expect_success": true,
+        "capture_json": { "output_key": "route53_change_id", "json_pointer": "/ChangeInfo/Id" }
+      }
+    ],
+    "steps": [
+      {
+        "id": "route53-get-change-step",
+        "protocol": "rest-xml",
+        "command": ["route53", "get-change", "--id", "{{route53_change_id}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ],
+    "assertions": [],
+    "cleanup": [
+      {
+        "id": "route53-get-change-delete-rrset",
+        "protocol": "rest-xml",
+        "command": [
+          "route53", "change-resource-record-sets",
+          "--hosted-zone-id", "{{route53_change_hosted_zone_id}}",
+          "--change-batch", "{\"Changes\":[{\"Action\":\"DELETE\",\"ResourceRecordSet\":{\"Name\":\"www.change-{{run_id}}.example.com\",\"Type\":\"A\",\"TTL\":60,\"ResourceRecords\":[{\"Value\":\"1.2.3.4\"}]}}]}"
+        ],
+        "expect_success": true,
+        "capture_json": null
+      },
+      {
+        "id": "route53-get-change-delete-zone",
+        "protocol": "rest-xml",
+        "command": ["route53", "delete-hosted-zone", "--id", "{{route53_change_hosted_zone_id}}"],
+        "expect_success": true,
+        "capture_json": null
+      }
+    ]
+  },
   {"id":"s3-probe","profile":"all-services-smoke","service":"s3","setup":[],"steps":[{"id":"s3-probe-step","protocol":"rest-xml","command":["s3api","get-bucket-location"],"expect_success":false,"capture_json":null}],"assertions":[],"cleanup":[],"requires_restart":true},
   {"id":"secretsmanager-probe","profile":"all-services-smoke","service":"secretsmanager","setup":[],"steps":[{"id":"secretsmanager-probe-step","protocol":"json","command":["secretsmanager","get-secret-value"],"expect_success":false,"capture_json":null}],"assertions":[],"cleanup":[]},
   {"id":"ses-probe","profile":"all-services-smoke","service":"ses","setup":[],"steps":[{"id":"ses-probe-step","protocol":"query-xml","command":["ses","list-identities"],"expect_success":true,"capture_json":null}],"assertions":[],"cleanup":[]},
