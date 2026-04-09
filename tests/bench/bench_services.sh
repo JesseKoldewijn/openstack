@@ -1777,6 +1777,13 @@ if is_active "kms"; then
 
   KMS_HEADERS=(-H "Content-Type: application/x-amz-json-1.1")
 
+  # Moto's multi-service root can mis-route KMS JSON-target requests to S3
+  # unless SigV4-like headers are present.
+  MOTO_EXTRA=(
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/kms/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy"
+    -H "X-Amz-Date: 20260101T000000Z"
+  )
+
   bench_dynamic_targets "kms" "create_key" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
     '{"Description":"bench-key-{i}"}' \
     "${KMS_HEADERS[@]}" \
@@ -1793,6 +1800,8 @@ if is_active "kms"; then
   _kms_seed_moto=$(curl -s -X POST "$MOTO_BASE" \
     -H "Content-Type: application/x-amz-json-1.1" \
     -H "X-Amz-Target: TrentService.CreateKey" \
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=testing/20260101/us-east-1/kms/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy" \
+    -H "X-Amz-Date: 20260101T000000Z" \
     -d '{"Description":"bench-describe-key-moto"}' || true)
 
   _kms_key_id_os=$(printf '%s' "$_kms_seed_os" | jq -r '.KeyMetadata.KeyId // empty' 2>/dev/null)
@@ -1840,6 +1849,8 @@ if is_active "kms"; then
     "${KMS_HEADERS[@]}" \
     -H "X-Amz-Target: TrentService.ListKeys" \
     -d '{}'
+
+  MOTO_EXTRA=()
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
