@@ -2486,10 +2486,12 @@ fn service_from_query_action(
         | "ChangeMessageVisibility"
         | "ChangeMessageVisibilityBatch" => Some("sqs"),
         // STS
-        "GetCallerIdentity" | "AssumeRole" => Some("sts"),
+        "GetCallerIdentity" | "AssumeRole" | "GetSessionToken" | "GetAccessKeyInfo"
+        | "DecodeAuthorizationMessage" => Some("sts"),
         // SNS
         "CreateTopic" | "DeleteTopic" | "Publish" | "Subscribe" | "Unsubscribe" | "ListTopics"
-        | "SetTopicAttributes" | "GetTopicAttributes" => Some("sns"),
+        | "SetTopicAttributes" | "GetTopicAttributes" | "ListSubscriptions"
+        | "ListSubscriptionsByTopic" | "GetSubscriptionAttributes" => Some("sns"),
         // IAM
         "CreateRole" | "DeleteRole" | "ListRoles" | "GetRole" | "CreateUser" | "DeleteUser"
         | "ListUsers" | "GetUser" => Some("iam"),
@@ -2497,7 +2499,8 @@ fn service_from_query_action(
         "CreateStack" | "DeleteStack" | "DescribeStacks" | "ListStacks" | "GetTemplate"
         | "ValidateTemplate" | "UpdateStack" => Some("cloudformation"),
         // CloudWatch (query actions)
-        "PutMetricData" | "ListMetrics" | "GetMetricStatistics" => Some("cloudwatch"),
+        "PutMetricData" | "ListMetrics" | "GetMetricStatistics" | "DescribeAlarms"
+        | "PutMetricAlarm" | "DeleteAlarms" | "SetAlarmState" => Some("cloudwatch"),
         // EC2
         "DescribeVpcs"
         | "CreateVpc"
@@ -2511,9 +2514,11 @@ fn service_from_query_action(
         | "DescribeInstances"
         | "TerminateInstances" => Some("ec2"),
         // Redshift
-        "CreateCluster" | "DeleteCluster" | "DescribeClusters" => Some("redshift"),
+        "CreateCluster" | "DeleteCluster" | "DescribeClusters" | "ModifyCluster"
+        | "RebootCluster" => Some("redshift"),
         // SES
-        "VerifyEmailIdentity" | "ListIdentities" | "SendEmail" | "SendRawEmail" => Some("ses"),
+        "VerifyEmailIdentity" | "VerifyDomainIdentity" | "ListIdentities" | "SendEmail"
+        | "SendRawEmail" | "GetIdentityVerificationAttributes" | "DeleteIdentity" => Some("ses"),
         _ => None,
     }
 }
@@ -3005,6 +3010,8 @@ fn is_s3_object_body_request(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use axum::http::{HeaderMap, HeaderValue, Method};
     use bytes::Bytes;
     use serde_json::json;
@@ -3047,10 +3054,43 @@ mod tests {
             "host",
             HeaderValue::from_static("es.us-east-1.localhost.localstack.cloud"),
         );
-        let query = std::collections::HashMap::new();
+        let query = HashMap::new();
 
         let service = detect_service("/my-index/_doc/1", &query, &headers, &Bytes::new(), None);
         assert_eq!(service, "opensearch");
+    }
+
+    #[test]
+    fn detect_service_maps_extended_query_protocol_actions() {
+        let headers = HeaderMap::new();
+        let query = HashMap::new();
+
+        let cases = [
+            ("Action=DescribeAlarms&Version=2010-08-01", "cloudwatch"),
+            (
+                "Action=GetIdentityVerificationAttributes&Version=2010-12-01&Identities.member.1=bench%40example.com",
+                "ses",
+            ),
+            ("Action=ListSubscriptions&Version=2010-03-31", "sns"),
+            ("Action=GetSessionToken&Version=2011-06-15", "sts"),
+            (
+                "Action=GetAccessKeyInfo&AccessKeyId=AKIAIOSFODNN7EXAMPLE&Version=2011-06-15",
+                "sts",
+            ),
+            (
+                "Action=ModifyCluster&Version=2012-12-01&ClusterIdentifier=bench&NodeType=ra3.xlplus",
+                "redshift",
+            ),
+            (
+                "Action=RebootCluster&Version=2012-12-01&ClusterIdentifier=bench",
+                "redshift",
+            ),
+        ];
+
+        for (body, expected) in cases {
+            let service = detect_service("/", &query, &headers, &Bytes::from(body), None);
+            assert_eq!(service, expected, "body={body}");
+        }
     }
 
     #[test]
