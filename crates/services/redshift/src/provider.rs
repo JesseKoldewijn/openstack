@@ -270,7 +270,14 @@ impl ServiceProvider for RedshiftProvider {
                         if let Some(db_name) = str_param(ctx, "DBName") {
                             cluster.db_name = db_name.to_string();
                         }
-                        if let Some(port) = str_param(ctx, "Port").and_then(|s| s.parse().ok()) {
+                        if let Some(port_str) = str_param(ctx, "Port") {
+                            let Ok(port) = port_str.parse::<u16>() else {
+                                return Ok(xml_error(
+                                    "InvalidParameterValue",
+                                    "Port must be a valid 16-bit integer",
+                                    400,
+                                ));
+                            };
                             cluster.port = port;
                             if let Some(endpoint) = cluster.endpoint.as_mut() {
                                 endpoint.port = port;

@@ -319,7 +319,14 @@ impl ServiceProvider for OpenSearchProvider {
                             if let Some(instance_count) =
                                 cluster_config.get("InstanceCount").and_then(|v| v.as_u64())
                             {
-                                domain.cluster_config.instance_count = instance_count as u32;
+                                let Ok(instance_count) = u32::try_from(instance_count) else {
+                                    return Ok(json_error(
+                                        "ValidationException",
+                                        "ClusterConfig.InstanceCount is too large",
+                                        400,
+                                    ));
+                                };
+                                domain.cluster_config.instance_count = instance_count;
                             }
                         }
                         Ok(json_ok(json!({

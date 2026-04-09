@@ -210,6 +210,64 @@ async fn test_reboot_cluster() {
 }
 
 #[tokio::test]
+async fn test_modify_cluster_not_found() {
+    let p = RedshiftProvider::new();
+    let mut modify = HashMap::new();
+    modify.insert(
+        "ClusterIdentifier".to_string(),
+        "missing-cluster".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("ModifyCluster", modify))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("ClusterNotFound"));
+    assert!(body.contains("missing-cluster"));
+}
+
+#[tokio::test]
+async fn test_modify_cluster_rejects_invalid_port() {
+    let p = RedshiftProvider::new();
+    let mut params = HashMap::new();
+    params.insert("ClusterIdentifier".to_string(), "port-cluster".to_string());
+    p.dispatch(&make_ctx("CreateCluster", params))
+        .await
+        .unwrap();
+
+    let mut modify = HashMap::new();
+    modify.insert("ClusterIdentifier".to_string(), "port-cluster".to_string());
+    modify.insert("Port".to_string(), "not-a-port".to_string());
+    let resp = p
+        .dispatch(&make_ctx("ModifyCluster", modify))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("InvalidParameterValue"));
+    assert!(body.contains("Port must be a valid 16-bit integer"));
+}
+
+#[tokio::test]
+async fn test_reboot_cluster_not_found() {
+    let p = RedshiftProvider::new();
+    let mut reboot = HashMap::new();
+    reboot.insert(
+        "ClusterIdentifier".to_string(),
+        "missing-reboot-cluster".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("RebootCluster", reboot))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("ClusterNotFound"));
+    assert!(body.contains("missing-reboot-cluster"));
+}
+
+#[tokio::test]
 async fn test_create_cluster_missing_identifier() {
     let p = RedshiftProvider::new();
     let resp = p

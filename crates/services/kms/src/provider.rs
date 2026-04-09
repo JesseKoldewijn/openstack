@@ -267,7 +267,14 @@ impl ServiceProvider for KmsProvider {
                         404,
                     )),
                     Some(k) => {
-                        k.key_state = KeyState::Enabled;
+                        if k.key_state != KeyState::PendingDeletion {
+                            return Ok(json_error(
+                                "KMSInvalidStateException",
+                                "Key is not pending deletion",
+                                400,
+                            ));
+                        }
+                        k.key_state = KeyState::Disabled;
                         Ok(json_ok(json!({
                             "KeyId": k.key_id,
                         })))

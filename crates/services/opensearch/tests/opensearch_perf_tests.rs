@@ -124,3 +124,31 @@ async fn perf_update_domain_config_round_trip() {
         elapsed.as_millis()
     );
 }
+
+#[tokio::test]
+async fn perf_describe_domain_config_many() {
+    let p = OpenSearchProvider::new();
+    create_domain(&p, "perf-describe-domain").await;
+
+    let start = Instant::now();
+    for _ in 0..100usize {
+        let resp = p
+            .dispatch(&make_ctx(
+                "DescribeDomainConfig",
+                json!({}),
+                "/2021-01-01/opensearch/domain/perf-describe-domain/config",
+                "GET",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert!(body(&resp)["DomainConfig"]["EngineVersion"]["Options"].is_string());
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 1000,
+        "DescribeDomainConfig x100 took {}ms — expected <1000ms",
+        elapsed.as_millis()
+    );
+}

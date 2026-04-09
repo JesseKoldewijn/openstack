@@ -296,7 +296,7 @@ async fn test_schedule_key_deletion() {
 }
 
 #[tokio::test]
-async fn test_cancel_key_deletion_restores_enabled_state() {
+async fn test_cancel_key_deletion_restores_disabled_state() {
     let p = KmsProvider::new();
     let key_id = create_key(&p).await;
 
@@ -311,7 +311,10 @@ async fn test_cancel_key_deletion_restores_enabled_state() {
     .unwrap();
 
     let resp = p
-        .dispatch(&make_ctx("CancelKeyDeletion", json!({ "KeyId": key_id })))
+        .dispatch(&make_ctx(
+            "CancelKeyDeletion",
+            json!({ "KeyId": key_id.clone() }),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
@@ -320,7 +323,22 @@ async fn test_cancel_key_deletion_restores_enabled_state() {
         .dispatch(&make_ctx("DescribeKey", json!({ "KeyId": key_id })))
         .await
         .unwrap();
-    assert_eq!(body(&resp)["KeyMetadata"]["KeyState"], "Enabled");
+    assert_eq!(body(&resp)["KeyMetadata"]["KeyState"], "Disabled");
+}
+
+#[tokio::test]
+async fn test_cancel_key_deletion_requires_pending_deletion_state() {
+    let p = KmsProvider::new();
+    let key_id = create_key(&p).await;
+
+    let resp = p
+        .dispatch(&make_ctx("CancelKeyDeletion", json!({ "KeyId": key_id })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    let payload = body(&resp);
+    assert_eq!(payload["__type"], "KMSInvalidStateException");
+    assert_eq!(payload["message"], "Key is not pending deletion");
 }
 
 #[tokio::test]

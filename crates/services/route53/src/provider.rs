@@ -56,7 +56,6 @@ fn xml_created(body: String, location: &str) -> DispatchResponse {
     }
 }
 
-#[allow(dead_code)]
 fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     let body = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\

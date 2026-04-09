@@ -82,6 +82,22 @@ async fn test_describe_event_bus() {
 }
 
 #[tokio::test]
+async fn test_describe_event_bus_not_found() {
+    let p = EventBridgeProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeEventBus",
+            json!({ "Name": "missing-bus" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    let b = body(&resp);
+    assert_eq!(b["__type"], "ResourceNotFoundException");
+    assert!(b["message"].as_str().unwrap().contains("missing-bus"));
+}
+
+#[tokio::test]
 async fn test_delete_event_bus() {
     let p = EventBridgeProvider::new();
     p.dispatch(&make_ctx("CreateEventBus", json!({ "Name": "del-bus" })))

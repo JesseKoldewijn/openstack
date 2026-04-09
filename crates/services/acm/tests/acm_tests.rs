@@ -53,9 +53,12 @@ async fn test_import_certificate() {
         .dispatch(&make_ctx(
             "ImportCertificate",
             json!({
-                "Certificate": "pem-data",
-                "PrivateKey": "private-key",
-                "CertificateChain": "chain",
+                "Certificate": "-----BEGIN CERTIFICATE-----\nimported-cert\n-----END CERTIFICATE-----",
+                "PrivateKey": "-----BEGIN PRIVATE KEY-----\nimported-key\n-----END PRIVATE KEY-----",
+                "CertificateChain": "-----BEGIN CERTIFICATE-----\nimported-chain\n-----END CERTIFICATE-----",
+                "DomainName": "imported.example.com",
+                "SubjectAlternativeNames": ["www.imported.example.com"],
+                "Tags": [{ "Key": "source", "Value": "migration" }],
             }),
         ))
         .await
@@ -67,14 +70,36 @@ async fn test_import_certificate() {
     let resp = p
         .dispatch(&make_ctx(
             "DescribeCertificate",
-            json!({ "CertificateArn": arn }),
+            json!({ "CertificateArn": arn.clone() }),
         ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200);
     let b = body(&resp);
     assert_eq!(b["Certificate"]["Status"], "ISSUED");
-    assert_eq!(b["Certificate"]["DomainName"], "imported.local");
+    assert_eq!(b["Certificate"]["DomainName"], "imported.example.com");
+    assert_eq!(
+        b["Certificate"]["SubjectAlternativeNames"][0],
+        "www.imported.example.com"
+    );
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ExportCertificate",
+            json!({ "CertificateArn": arn }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let exported = body(&resp);
+    assert_eq!(
+        exported["Certificate"],
+        "-----BEGIN CERTIFICATE-----\nimported-cert\n-----END CERTIFICATE-----"
+    );
+    assert_eq!(
+        exported["PrivateKey"],
+        "-----BEGIN PRIVATE KEY-----\nimported-key\n-----END PRIVATE KEY-----"
+    );
 }
 
 #[tokio::test]
@@ -98,11 +123,33 @@ async fn test_export_certificate() {
             .contains("BEGIN CERTIFICATE")
     );
     assert!(
+        b["CertificateChain"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN CERTIFICATE")
+    );
+    assert!(
         b["PrivateKey"]
             .as_str()
             .unwrap()
             .contains("BEGIN PRIVATE KEY")
     );
+}
+
+#[tokio::test]
+async fn test_export_certificate_not_found() {
+    let p = AcmProvider::new();
+    let missing_arn = "arn:aws:acm:us-east-1:000000000000:certificate/nonexistent";
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ExportCertificate",
+            json!({ "CertificateArn": missing_arn }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    assert!(body_str(&resp).contains("ResourceNotFoundException"));
 }
 
 #[tokio::test]
