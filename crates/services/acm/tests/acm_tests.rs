@@ -153,6 +153,37 @@ async fn test_export_certificate_not_found() {
 }
 
 #[tokio::test]
+async fn test_import_certificate_missing_required_fields() {
+    let p = AcmProvider::new();
+
+    let missing_certificate = p
+        .dispatch(&make_ctx(
+            "ImportCertificate",
+            json!({
+                "PrivateKey": "-----BEGIN PRIVATE KEY-----\nimported-key\n-----END PRIVATE KEY-----",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_certificate.status_code, 400);
+    assert!(body_str(&missing_certificate).contains("ValidationException"));
+    assert!(body_str(&missing_certificate).contains("Certificate is required"));
+
+    let missing_private_key = p
+        .dispatch(&make_ctx(
+            "ImportCertificate",
+            json!({
+                "Certificate": "-----BEGIN CERTIFICATE-----\nimported-cert\n-----END CERTIFICATE-----",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_private_key.status_code, 400);
+    assert!(body_str(&missing_private_key).contains("ValidationException"));
+    assert!(body_str(&missing_private_key).contains("PrivateKey is required"));
+}
+
+#[tokio::test]
 async fn test_request_and_describe_certificate() {
     let p = AcmProvider::new();
     let arn = request_cert(&p, "example.com").await;
@@ -320,6 +351,23 @@ async fn test_remove_tags() {
     let tags = body(&resp)["Tags"].as_array().unwrap().clone();
     assert_eq!(tags.len(), 1);
     assert_eq!(tags[0]["Key"], "team");
+}
+
+#[tokio::test]
+async fn test_remove_tags_not_found() {
+    let p = AcmProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "RemoveTagsFromCertificate",
+            json!({
+                "CertificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/nonexistent",
+                "Tags": [{ "Key": "env" }],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400, "{}", body_str(&resp));
+    assert!(body_str(&resp).contains("ResourceNotFoundException"));
 }
 
 #[tokio::test]

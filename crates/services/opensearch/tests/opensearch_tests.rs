@@ -335,6 +335,40 @@ async fn test_update_domain_config_rejects_large_instance_count() {
 }
 
 #[tokio::test]
+async fn test_update_domain_config_rejects_invalid_instance_count_type() {
+    let p = OpenSearchProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateDomain",
+        json!({ "DomainName": "invalid-instance-domain" }),
+        "/2021-01-01/opensearch/domain",
+        "POST",
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "UpdateDomainConfig",
+            json!({
+                "ClusterConfig": {
+                    "InstanceCount": -1
+                }
+            }),
+            "/2021-01-01/opensearch/domain/invalid-instance-domain/config",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let b = body_json(&resp);
+    assert_eq!(b["code"], "ValidationException");
+    assert_eq!(
+        b["message"],
+        "ClusterConfig.InstanceCount must be a non-negative integer"
+    );
+}
+
+#[tokio::test]
 async fn test_describe_domain_config_not_found() {
     let p = OpenSearchProvider::new();
     let resp = p

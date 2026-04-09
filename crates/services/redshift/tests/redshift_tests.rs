@@ -182,6 +182,38 @@ async fn test_modify_cluster() {
 }
 
 #[tokio::test]
+async fn test_modify_cluster_escapes_xml_fields() {
+    let p = RedshiftProvider::new();
+    let mut params = HashMap::new();
+    params.insert(
+        "ClusterIdentifier".to_string(),
+        "mod-xml-cluster".to_string(),
+    );
+    params.insert("NodeType".to_string(), "dc2.large".to_string());
+    params.insert("DBName".to_string(), "dev".to_string());
+    p.dispatch(&make_ctx("CreateCluster", params))
+        .await
+        .unwrap();
+
+    let mut modify = HashMap::new();
+    modify.insert(
+        "ClusterIdentifier".to_string(),
+        "mod-xml-cluster".to_string(),
+    );
+    modify.insert("NodeType".to_string(), "ra3&xl<plus>".to_string());
+    modify.insert("DBName".to_string(), "analytics<&>".to_string());
+
+    let resp = p
+        .dispatch(&make_ctx("ModifyCluster", modify))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("ra3&amp;xl&lt;plus&gt;"), "{body}");
+    assert!(body.contains("analytics&lt;&amp;&gt;"), "{body}");
+}
+
+#[tokio::test]
 async fn test_reboot_cluster() {
     let p = RedshiftProvider::new();
     let mut params = HashMap::new();

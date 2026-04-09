@@ -234,6 +234,7 @@ async fn test_delete_alias_not_found_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    assert_eq!(body(&resp), json!({}), "{}", body_str(&resp));
 }
 
 #[tokio::test]
@@ -287,6 +288,54 @@ async fn test_tag_list_and_untag_resource() {
     let tags = body(&resp)["Tags"].as_array().unwrap().clone();
     assert_eq!(tags.len(), 1);
     assert_eq!(tags[0]["TagKey"], "team");
+}
+
+#[tokio::test]
+async fn test_tag_resource_key_not_found() {
+    let p = KmsProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "TagResource",
+            json!({
+                "KeyId": "nonexistent-key",
+                "Tags": [{ "TagKey": "env", "TagValue": "prod" }]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404, "{}", body_str(&resp));
+    assert_eq!(body(&resp)["__type"], "NotFoundException");
+}
+
+#[tokio::test]
+async fn test_untag_resource_key_not_found() {
+    let p = KmsProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "UntagResource",
+            json!({
+                "KeyId": "nonexistent-key",
+                "TagKeys": ["env"]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404, "{}", body_str(&resp));
+    assert_eq!(body(&resp)["__type"], "NotFoundException");
+}
+
+#[tokio::test]
+async fn test_list_resource_tags_key_not_found() {
+    let p = KmsProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListResourceTags",
+            json!({ "KeyId": "nonexistent-key" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404, "{}", body_str(&resp));
+    assert_eq!(body(&resp)["__type"], "NotFoundException");
 }
 
 #[tokio::test]

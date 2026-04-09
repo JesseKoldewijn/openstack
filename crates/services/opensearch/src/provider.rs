@@ -316,9 +316,15 @@ impl ServiceProvider for OpenSearchProvider {
                             {
                                 domain.cluster_config.instance_type = instance_type.to_string();
                             }
-                            if let Some(instance_count) =
-                                cluster_config.get("InstanceCount").and_then(|v| v.as_u64())
+                            if let Some(instance_count_value) = cluster_config.get("InstanceCount")
                             {
+                                let Some(instance_count) = instance_count_value.as_u64() else {
+                                    return Ok(json_error(
+                                        "ValidationException",
+                                        "ClusterConfig.InstanceCount must be a non-negative integer",
+                                        400,
+                                    ));
+                                };
                                 let Ok(instance_count) = u32::try_from(instance_count) else {
                                     return Ok(json_error(
                                         "ValidationException",

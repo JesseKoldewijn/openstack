@@ -70,6 +70,7 @@ async fn test_create_hosted_zone() {
     assert!(body.contains("CreateHostedZoneResponse"));
     assert!(body.contains("example.com."));
     assert!(body.contains("<Id>/hostedzone/"));
+    assert!(body.contains("<CallerReference>ref-1</CallerReference>"));
     // Check Location header is set
     let loc_header = resp
         .headers
@@ -78,6 +79,27 @@ async fn test_create_hosted_zone() {
         .map(|(_, v)| v.as_str());
     assert!(loc_header.is_some());
     assert!(loc_header.unwrap().starts_with("/2013-04-01/hostedzone/"));
+}
+
+#[tokio::test]
+async fn test_create_hosted_zone_requires_caller_reference() {
+    let p = Route53Provider::new();
+    let xml = r#"<CreateHostedZoneRequest><Name>missing-ref.example.com</Name></CreateHostedZoneRequest>"#;
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "CreateHostedZone",
+            xml,
+            "/2013-04-01/hostedzone",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    assert_eq!(resp.content_type, "text/xml");
+    let body = body_str(&resp);
+    assert!(body.contains("<Code>InvalidInput</Code>"));
+    assert!(body.contains("<Message>CallerReference is required</Message>"));
 }
 
 #[tokio::test]
@@ -177,6 +199,10 @@ async fn test_get_hosted_zone() {
     let create_body = body_str(&create_resp);
     let id_raw = xml_text(&create_body, "Id").unwrap();
     let zone_id = id_raw.trim_start_matches("/hostedzone/").to_string();
+    assert_eq!(
+        xml_text(&create_body, "CallerReference").as_deref(),
+        Some("r-get")
+    );
 
     let resp = p
         .dispatch(&make_ctx(
@@ -192,6 +218,26 @@ async fn test_get_hosted_zone() {
     assert!(body.contains("GetHostedZoneResponse"));
     assert!(body.contains("get-zone.com."));
     assert!(body.contains(&format!("/hostedzone/{zone_id}")));
+    assert!(body.contains("<CallerReference>r-get</CallerReference>"));
+}
+
+#[tokio::test]
+async fn test_get_hosted_zone_not_found() {
+    let p = Route53Provider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetHostedZone",
+            "",
+            "/2013-04-01/hostedzone/does-not-exist",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    assert_eq!(resp.content_type, "text/xml");
+    let body = body_str(&resp);
+    assert!(body.contains("<Code>NoSuchHostedZone</Code>"));
+    assert!(body.contains("No hosted zone found with ID: does-not-exist"));
 }
 
 #[tokio::test]

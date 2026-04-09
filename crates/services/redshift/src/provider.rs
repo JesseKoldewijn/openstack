@@ -7,6 +7,7 @@ use chrono::Utc;
 use openstack_service_framework::traits::{
     DispatchError, DispatchResponse, RequestContext, ResponseBody, ServiceProvider,
 };
+use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
@@ -85,7 +86,8 @@ fn cluster_xml(c: &Cluster) -> String {
         .map(|e| {
             format!(
                 "<Endpoint><Address>{}</Address><Port>{}</Port></Endpoint>",
-                e.address, e.port
+                xml_escape(&e.address),
+                e.port
             )
         })
         .unwrap_or_default();
@@ -96,7 +98,11 @@ fn cluster_xml(c: &Cluster) -> String {
 <DBName>{}</DBName>\
 <ClusterStatus>{}</ClusterStatus>\
 {endpoint_xml}",
-        c.cluster_identifier, c.node_type, c.master_username, c.db_name, c.cluster_status
+        xml_escape(&c.cluster_identifier),
+        xml_escape(&c.node_type),
+        xml_escape(&c.master_username),
+        xml_escape(&c.db_name),
+        xml_escape(&c.cluster_status)
     )
 }
 

@@ -160,7 +160,13 @@ impl ServiceProvider for Route53Provider {
                 } else {
                     format!("{name_raw}.")
                 };
-                let caller_reference = xml_text(&raw, "CallerReference").unwrap_or_default();
+                let Some(caller_reference) = xml_text(&raw, "CallerReference") else {
+                    return Ok(xml_error(
+                        "InvalidInput",
+                        "CallerReference is required",
+                        400,
+                    ));
+                };
                 let comment = xml_text(&raw, "Comment").unwrap_or_default();
 
                 let zone_id = short_id();
