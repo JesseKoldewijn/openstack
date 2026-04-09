@@ -11,10 +11,10 @@ This project uses a two-branch model. Agents must respect it:
 | Branch | Role |
 |--------|------|
 | `develop` | Integration branch. All new work lands here first. |
-| `main` | Stable branch. Only receives merges from `develop`. |
+| `main` | Stable branch. Only receives fast-forward promotions from `develop`. |
 
 **Features, fixes, refactors, and all other changes must be proposed against `develop`.**
-`main` is only updated by merging from `develop` — never directly.
+`main` is only updated by fast-forward promotion from `develop` — never directly.
 
 **Never commit directly to `develop` or `main`.**
 All work must go through a feature branch and be merged into `develop` via a pull request. Direct commits to `develop` bypass review and are not permitted.
@@ -67,9 +67,11 @@ SemVer mapping:
 - Do not force-push to `main` without explicit maintainer approval
 - Merge strategy depends on target branch:
   - **PRs → `develop`**: use **Squash and merge** — one clean commit per PR on `develop`.
-  - **`develop` → `main`**: **fast-forward only** (no PR merge button).
+  - **`develop` → `main`**: **no PR merges; fast-forward promotion only**.
+    - Do not open a PR from `develop` to `main`.
     - Do not squash/rebase/merge-commit into `main`.
-    - Promotion procedure:
+    - Prefer the manual GitHub Actions workflow **Promote develop to main**.
+    - CLI fallback:
       1. `git fetch origin`
       2. `git checkout main && git reset --hard origin/main`
       3. `git merge --ff-only origin/develop`

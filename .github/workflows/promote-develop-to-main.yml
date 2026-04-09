@@ -1,0 +1,75 @@
+name: Promote develop to main
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-develop-to-main
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Fast-forward promote develop to main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require dispatch from develop
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" != "develop" ]]; then
+            echo "::error::Run this workflow from the develop branch only. Current ref: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch promotion refs
+        run: |
+          set -euo pipefail
+          git fetch origin main develop --force --tags
+
+      - name: Verify fast-forward promotion is possible
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor origin/main origin/develop; then
+            echo "::error::main has diverged from develop. Promotion must be a true fast-forward."
+            echo "main:    $(git rev-parse --short origin/main)"
+            echo "develop: $(git rev-parse --short origin/develop)"
+            exit 1
+          fi
+
+      - name: Show promotion range
+        run: |
+          set -euo pipefail
+          echo "Promoting origin/develop -> main"
+          echo "main:    $(git rev-parse --short origin/main)"
+          echo "develop: $(git rev-parse --short origin/develop)"
+          echo
+          git log --oneline --decorate --no-merges origin/main..origin/develop || true
+
+      - name: Fast-forward main
+        run: |
+          set -euo pipefail
+          git checkout -B main origin/main
+          git merge --ff-only origin/develop
+
+      - name: Push main
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main
+
+      - name: Write summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## Promotion complete"
+            echo
+            echo "- Source: \`develop\`"
+            echo "- Target: \`main\`"
+            echo "- New main SHA: \`$(git rev-parse --short HEAD)\`"
+          } >> "$GITHUB_STEP_SUMMARY"

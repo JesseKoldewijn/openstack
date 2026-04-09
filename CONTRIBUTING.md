@@ -11,9 +11,11 @@ This project follows a two-branch model:
 | Branch | Purpose |
 |--------|---------|
 | `develop` | Active development. All features, fixes, and improvements land here first. |
-| `main` | Stable release branch. Only receives merges from `develop` once changes are verified. |
+| `main` | Stable release branch. Only receives fast-forward promotions from `develop` once changes are verified. |
 
-**All pull requests must target `develop`.**
+**All normal pull requests must target `develop`.**
+Do **not** open promotion PRs from `develop` to `main`.
+`develop` is promoted to `main` via the dedicated fast-forward promotion workflow / CLI flow instead.
 Direct PRs to `main` will not be accepted unless they are hotfixes explicitly approved by a maintainer.
 
 **Never commit directly to `develop` or `main`.**
@@ -36,7 +38,7 @@ All work — features, fixes, refactors, documentation — must arrive via a fea
    cargo test
    ```
 5. Open a pull request targeting **`develop`**.
-6. Once reviewed and merged into `develop`, the change will eventually be promoted to `main` by a maintainer.
+6. Once reviewed and merged into `develop`, the change will eventually be promoted to `main` by a maintainer using the dedicated fast-forward promotion path (not a PR merge).
 
 > `develop` is a shared integration branch. Committing to it directly bypasses review and risks destabilising it for other contributors.
 
@@ -79,13 +81,16 @@ The merge strategy depends on the target branch:
 | PR target | Strategy | Why |
 |-----------|----------|-----|
 | `develop` | **Squash and merge** | Keeps `develop` history clean — one commit per PR. |
-| `main` | **Fast-forward only** | Guarantees `develop` is always ahead of or equal to `main`. |
+| `main` | **No PR merges. Fast-forward promotion only** | Guarantees `develop` is always ahead of or equal to `main` and keeps release history clean. |
 
 ### `develop` → `main` promotion (fast-forward only)
 
+Do **not** open a PR from `develop` to `main`.
 Do **not** use GitHub PR merge buttons for `main` promotion.
 
-Use:
+Use the manual GitHub Actions workflow **Promote develop to main** from the `develop` branch.
+
+CLI fallback:
 
 ```bash
 git fetch origin
@@ -106,7 +111,7 @@ If `git merge --ff-only` fails, `main` has drifted and must be reconciled before
 | Gate | Applies to |
 |------|------------|
 | `Required checks (non-main target)` | PRs targeting `develop` |
-| `Required checks (main target)` | PRs targeting `main` |
+| `Required checks (main target)` | exceptional PRs targeting `main` (for example explicitly approved hotfixes) |
 
 These gates cover: formatting (`cargo fmt`), linting (`cargo clippy`), tests, release build verification, harness coverage, Studio UI/asset/coverage checks, parity (core and all-services smoke), and benchmark.
 
@@ -114,10 +119,6 @@ Do not attempt to merge a PR while any required check is pending or failing.
 
 ## Release pipeline
 
-Release automation is currently being reworked on `main`.
+Release and promotion behavior is documented in [`docs/semver-release.md`](docs/semver-release.md).
 
-- legacy `release-plz`/RC helper workflows were removed
-- CI and Docker pipelines remain active and required
-- tag-driven binary builds run on `v*.*.*` tags
-
-See [`docs/semver-release.md`](docs/semver-release.md) for current release-flow status.
+Key rule: `develop` -> `main` is a promotion step, not a PR merge flow.
