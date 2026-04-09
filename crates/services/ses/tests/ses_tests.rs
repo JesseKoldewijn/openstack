@@ -89,8 +89,22 @@ async fn test_verify_domain_identity() {
         .dispatch(&make_ctx("ListIdentities", HashMap::new()))
         .await
         .unwrap();
+    assert_eq!(resp.status_code, 200);
     let body = body_str(&resp);
     assert!(body.contains("example.com"));
+}
+
+#[tokio::test]
+async fn test_verify_domain_identity_missing_domain() {
+    let p = SesProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("VerifyDomainIdentity", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("MissingParameter"));
+    assert!(body.contains("Domain required"));
 }
 
 #[tokio::test]
@@ -119,6 +133,25 @@ async fn test_get_identity_verification_attributes() {
     assert!(body.contains("GetIdentityVerificationAttributesResponse"));
     assert!(body.contains("verified@example.com"));
     assert!(body.contains("Success"));
+}
+
+#[tokio::test]
+async fn test_get_identity_verification_attributes_missing_identity_returns_empty_result() {
+    let p = SesProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetIdentityVerificationAttributes",
+            HashMap::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetIdentityVerificationAttributesResponse"));
+    assert!(
+        body.contains("<VerificationAttributes></VerificationAttributes>")
+            || body.contains("<VerificationAttributes />")
+    );
 }
 
 #[tokio::test]
@@ -212,8 +245,22 @@ async fn test_delete_identity() {
         .dispatch(&make_ctx("ListIdentities", HashMap::new()))
         .await
         .unwrap();
+    assert_eq!(resp.status_code, 200);
     let body = body_str(&resp);
     assert!(!body.contains("gone@example.com"));
+}
+
+#[tokio::test]
+async fn test_delete_identity_missing_identity() {
+    let p = SesProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("DeleteIdentity", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("MissingParameter"));
+    assert!(body.contains("Identity required"));
 }
 
 #[tokio::test]

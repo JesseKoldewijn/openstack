@@ -122,3 +122,112 @@ async fn perf_list_identities_many() {
         elapsed.as_millis()
     );
 }
+
+#[tokio::test]
+async fn perf_verify_domain_identity_throughput() {
+    let p = SesProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let mut params = HashMap::new();
+        params.insert("Domain".to_string(), format!("perf-{i:03}.example.com"));
+        let resp = p
+            .dispatch(&make_ctx("VerifyDomainIdentity", params))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 1500,
+        "VerifyDomainIdentity x{n} took {}ms — expected <1500ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_get_identity_verification_attributes_throughput() {
+    let p = SesProvider::new();
+    for i in 0..50usize {
+        let mut params = HashMap::new();
+        params.insert(
+            "EmailAddress".to_string(),
+            format!("attrs-{i:03}@example.com"),
+        );
+        let resp = p
+            .dispatch(&make_ctx("VerifyEmailIdentity", params))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+    }
+
+    let start = Instant::now();
+    for i in 0..100usize {
+        let mut params = HashMap::new();
+        params.insert(
+            "Identities.member.1".to_string(),
+            format!("attrs-{:03}@example.com", i % 50),
+        );
+        let resp = p
+            .dispatch(&make_ctx("GetIdentityVerificationAttributes", params))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+        assert!(body_str(&resp).contains("Success"));
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 1000,
+        "GetIdentityVerificationAttributes x100 took {}ms — expected <1000ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_delete_identity_throughput() {
+    let p = SesProvider::new();
+    let n = 100usize;
+    for i in 0..n {
+        let mut params = HashMap::new();
+        params.insert(
+            "EmailAddress".to_string(),
+            format!("delete-{i:03}@example.com"),
+        );
+        let resp = p
+            .dispatch(&make_ctx("VerifyEmailIdentity", params))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+    }
+
+    let start = Instant::now();
+    for i in 0..n {
+        let identity = format!("delete-{i:03}@example.com");
+        let mut delete = HashMap::new();
+        delete.insert("Identity".to_string(), identity.clone());
+        let resp = p
+            .dispatch(&make_ctx("DeleteIdentity", delete))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+
+        let mut attrs = HashMap::new();
+        attrs.insert("Identities.member.1".to_string(), identity.clone());
+        let attrs_resp = p
+            .dispatch(&make_ctx("GetIdentityVerificationAttributes", attrs))
+            .await
+            .unwrap();
+        assert_eq!(attrs_resp.status_code, 200);
+        assert!(!body_str(&attrs_resp).contains(&identity));
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 1500,
+        "DeleteIdentity x{n} took {}ms — expected <1500ms",
+        elapsed.as_millis()
+    );
+}

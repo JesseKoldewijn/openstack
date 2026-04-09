@@ -224,6 +224,19 @@ async fn test_delete_alias() {
 }
 
 #[tokio::test]
+async fn test_delete_alias_not_found_is_idempotent() {
+    let p = KmsProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "DeleteAlias",
+            json!({ "AliasName": "alias/nonexistent" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+}
+
+#[tokio::test]
 async fn test_tag_list_and_untag_resource() {
     let p = KmsProvider::new();
     let key_id = create_key(&p).await;

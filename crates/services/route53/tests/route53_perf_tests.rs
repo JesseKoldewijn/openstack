@@ -176,3 +176,86 @@ async fn perf_list_rrsets_many() {
         elapsed.as_millis()
     );
 }
+
+#[tokio::test]
+async fn perf_get_hosted_zone() {
+    let p = Route53Provider::new();
+    let zone_id = create_zone(&p, "perf-get-zone.example.com", "get-zone-ref").await;
+    let path = format!("/2013-04-01/hostedzone/{zone_id}");
+
+    let start = Instant::now();
+    for _ in 0..100usize {
+        let resp = p
+            .dispatch(&make_ctx("GetHostedZone", "", &path, "GET"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert!(body_str(&resp).contains("perf-get-zone.example.com"));
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 500,
+        "GetHostedZone x100 took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_get_change() {
+    let p = Route53Provider::new();
+    let zone_id = create_zone(&p, "perf-get-change.example.com", "get-change-ref").await;
+    let rrset_path = format!("/2013-04-01/hostedzone/{zone_id}/rrset");
+    let rrset_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+  <ChangeBatch>
+    <Changes>
+      <Change>
+        <Action>UPSERT</Action>
+        <ResourceRecordSet>
+          <Name>www.perf-get-change.example.com</Name>
+          <Type>A</Type>
+          <TTL>300</TTL>
+          <ResourceRecords>
+            <ResourceRecord><Value>1.2.3.4</Value></ResourceRecord>
+          </ResourceRecords>
+        </ResourceRecordSet>
+      </Change>
+    </Changes>
+  </ChangeBatch>
+</ChangeResourceRecordSetsRequest>"#;
+
+    let change_resp = p
+        .dispatch(&make_ctx(
+            "ChangeResourceRecordSets",
+            rrset_xml,
+            &rrset_path,
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(change_resp.status_code, 200);
+    let change_xml = body_str(&change_resp);
+    let change_id = xml_text(&change_xml, "Id")
+        .expect("missing change id")
+        .trim_start_matches('/')
+        .to_string();
+    let path = format!("/2013-04-01/{change_id}");
+
+    let start = Instant::now();
+    for _ in 0..100usize {
+        let resp = p
+            .dispatch(&make_ctx("GetChange", "", &path, "GET"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert!(body_str(&resp).contains("INSYNC"));
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 500,
+        "GetChange x100 took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}

@@ -54,6 +54,14 @@ fn body_str(resp: &DispatchResponse) -> String {
         .to_string()
 }
 
+fn xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].to_string())
+}
+
 async fn create_queue(provider: &SqsProvider, name: &str) -> String {
     let body = form_body(&[("Action", "CreateQueue"), ("QueueName", name)]);
     let resp = provider.dispatch(&make_ctx(&body)).await.unwrap();
@@ -132,7 +140,18 @@ async fn perf_send_and_receive_round_trip() {
         ]);
         let receive_resp = provider.dispatch(&make_ctx(&receive)).await.unwrap();
         assert_eq!(receive_resp.status_code, 200);
-        assert!(body_str(&receive_resp).contains(&format!("msg-{i}")));
+        let receive_body = body_str(&receive_resp);
+        assert!(receive_body.contains(&format!("msg-{i}")));
+
+        let receipt_handle =
+            xml_tag(&receive_body, "ReceiptHandle").expect("missing ReceiptHandle");
+        let delete = form_body(&[
+            ("Action", "DeleteMessage"),
+            ("QueueUrl", &queue_url),
+            ("ReceiptHandle", &receipt_handle),
+        ]);
+        let delete_resp = provider.dispatch(&make_ctx(&delete)).await.unwrap();
+        assert_eq!(delete_resp.status_code, 200);
     }
     let elapsed = start.elapsed();
 
