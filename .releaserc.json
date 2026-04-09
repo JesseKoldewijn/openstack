@@ -27,6 +27,7 @@
         "failComment": false,
         "releasedLabels": false
       }
-    ]
+    ],
+    "./scripts/semantic-release-ghcr-links.cjs"
   ]
 }

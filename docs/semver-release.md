@@ -19,6 +19,11 @@
 Those Git tags are for release/version history.
 They are **not** used as an additional Docker publishing path.
 
+GitHub release notes are enriched automatically with a GHCR package link and the relevant pull tags for the release channel:
+
+- stable releases link to `stable` and `latest`
+- beta releases link to `beta` and `beta-<short-sha>`
+
 ## Docker publishing rules
 
 Docker image publication is branch-driven:
