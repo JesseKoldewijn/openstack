@@ -595,17 +595,28 @@ TOTAL_FAILURES=$(( ${#LATENCY_FAILURES[@]} + ${#ERROR_FAILURES[@]} + ${#MEMORY_F
 VERDICT="PASS"
 $GATE_FAILED && VERDICT="FAIL"
 
+# Large nested JSON fragments can exceed argv limits if passed via --argjson.
+# Materialize them to temp files and load them in jq instead.
+_GATE_TMP_DIR=$(mktemp -d)
+printf '%s' "$IGNORED_JSON" > "$_GATE_TMP_DIR/ignored.json"
+printf '%s' "$IGNORED_LATENCY_JSON" > "$_GATE_TMP_DIR/ignored_latency.json"
+printf '%s' "$OP_P95_MAX_JSON" > "$_GATE_TMP_DIR/op_p95.json"
+printf '%s' "$TARGETS_JSON" > "$_GATE_TMP_DIR/targets.json"
+printf '%s' "$SERVICES_MERGED" > "$_GATE_TMP_DIR/services.json"
+printf '%s' "$OVERALL_JSON" > "$_GATE_TMP_DIR/overall.json"
+printf '%s' "$SKIPPED_JSON" > "$_GATE_TMP_DIR/skipped.json"
+printf '%s' "$SEED_FAILURES_JSON" > "$_GATE_TMP_DIR/seed_failures.json"
+printf '%s' "$LATENCY_FAILURES_JSON" > "$_GATE_TMP_DIR/latency_failures.json"
+printf '%s' "$ERROR_FAILURES_JSON" > "$_GATE_TMP_DIR/error_failures.json"
+printf '%s' "$MEMORY_FAILURES_JSON" > "$_GATE_TMP_DIR/memory_failures.json"
+
 GATE_JSON=$(jq -n \
   --arg verdict "$VERDICT" \
   --argjson p95_max "$P95_MAX" \
   --argjson mem_max "${MEMORY_MAX:-null}" \
-  --argjson ignored "$IGNORED_JSON" \
-  --argjson ignored_lat "$IGNORED_LATENCY_JSON" \
-  --argjson op_p95 "$OP_P95_MAX_JSON" \
   --arg profile "$PROFILE" \
   --arg mode "$MODE" \
   --arg timestamp "$TIMESTAMP" \
-  --argjson targets "$TARGETS_JSON" \
   --argjson requests "$REQ_COUNT" \
   --argjson concurrency "$CONCURRENCY" \
   --argjson os_idle "$OS_IDLE_MB" \
@@ -615,28 +626,32 @@ GATE_JSON=$(jq -n \
   --argjson moto_idle "$MOTO_IDLE_MB" \
   --argjson moto_loaded "$MOTO_LOADED_MB" \
   --argjson mem_pass "$([ "$MEMORY_GATE_PASS" == "true" ] && echo true || echo false)" \
-  --argjson services "$SERVICES_MERGED" \
-  --argjson overall "$OVERALL_JSON" \
-  --argjson skipped "$SKIPPED_JSON" \
-  --argjson seed_fail "$SEED_FAILURES_JSON" \
-  --argjson lat_fail "$LATENCY_FAILURES_JSON" \
-  --argjson err_fail "$ERROR_FAILURES_JSON" \
-  --argjson mem_fail "$MEMORY_FAILURES_JSON" \
   --argjson total_fail "$TOTAL_FAILURES" \
+  --slurpfile ignored "$_GATE_TMP_DIR/ignored.json" \
+  --slurpfile ignored_lat "$_GATE_TMP_DIR/ignored_latency.json" \
+  --slurpfile op_p95 "$_GATE_TMP_DIR/op_p95.json" \
+  --slurpfile targets "$_GATE_TMP_DIR/targets.json" \
+  --slurpfile services "$_GATE_TMP_DIR/services.json" \
+  --slurpfile overall "$_GATE_TMP_DIR/overall.json" \
+  --slurpfile skipped "$_GATE_TMP_DIR/skipped.json" \
+  --slurpfile seed_fail "$_GATE_TMP_DIR/seed_failures.json" \
+  --slurpfile lat_fail "$_GATE_TMP_DIR/latency_failures.json" \
+  --slurpfile err_fail "$_GATE_TMP_DIR/error_failures.json" \
+  --slurpfile mem_fail "$_GATE_TMP_DIR/memory_failures.json" \
   '{
     verdict: $verdict,
     thresholds: {
       p95_max_ms: $p95_max,
       memory_max_mb: $mem_max,
-      ignored_errors: $ignored,
-      ignored_latency: $ignored_lat,
-      per_op_p95_thresholds: $op_p95
+      ignored_errors: $ignored[0],
+      ignored_latency: $ignored_lat[0],
+      per_op_p95_thresholds: $op_p95[0]
     },
     metadata: {
       profile: $profile,
       mode: $mode,
       timestamp: $timestamp,
-      targets: $targets,
+      targets: $targets[0],
       requests: $requests,
       concurrency: $concurrency
     },
@@ -646,17 +661,18 @@ GATE_JSON=$(jq -n \
       moto:       {idle_mb: $moto_idle, loaded_mb: $moto_loaded},
       gate_pass:  $mem_pass
     },
-    services: $services,
-    overall: $overall,
-    skipped: $skipped,
-    seed_failures: $seed_fail,
+    services: $services[0],
+    overall: $overall[0],
+    skipped: $skipped[0],
+    seed_failures: $seed_fail[0],
     failures: {
-      latency: $lat_fail,
-      errors:  $err_fail,
-      memory:  $mem_fail,
+      latency: $lat_fail[0],
+      errors:  $err_fail[0],
+      memory:  $mem_fail[0],
       total:   $total_fail
     }
   }')
+rm -rf "$_GATE_TMP_DIR"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Output
