@@ -131,6 +131,11 @@ fn all_service_names() -> Vec<String> {
         "redshift",
         "cloudformation",
         "lambda",
+        "ecs",
+        "rds",
+        "cognito",
+        "elasticache",
+        "cloudtrail",
     ]
     .into_iter()
     .map(|s| s.to_string())
@@ -1605,6 +1610,11 @@ mod tests {
                 "ECR" => "ecr",
                 "OpenSearch Service" => "opensearch",
                 "Redshift" => "redshift",
+                "Elastic Container Service (ECS)" => "ecs",
+                "Relational Database Service (RDS)" => "rds",
+                "Cognito" => "cognito",
+                "ElastiCache" => "elasticache",
+                "CloudTrail" => "cloudtrail",
                 _ => continue,
             };
             readme_services.insert(service.to_string());

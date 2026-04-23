@@ -367,7 +367,11 @@ impl ServiceExplorerViewModel {
 
         let error_rate_pct = if tx_summary.total > 0 {
             let errors = tx_summary.client_error + tx_summary.server_error;
-            ((errors * 100) / tx_summary.total).min(100) as u8
+            errors
+                .saturating_mul(100)
+                .checked_div(tx_summary.total)
+                .unwrap_or(0)
+                .min(100) as u8
         } else {
             0
         };
