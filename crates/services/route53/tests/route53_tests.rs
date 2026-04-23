@@ -392,3 +392,322 @@ async fn test_list_resource_record_sets_missing_zone_returns_no_such_hosted_zone
     assert!(body.contains("<Code>NoSuchHostedZone</Code>"));
     assert!(body.contains("<Message>No hosted zone found with ID: Z1D633PJN98FT9</Message>"));
 }
+
+// ---------------------------------------------------------------------------
+// ListHostedZonesByName
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_list_hosted_zones_by_name_all() {
+    let p = Route53Provider::new();
+    for (name, cref) in [("alpha.com", "ra"), ("beta.com", "rb"), ("gamma.com", "rc")] {
+        let xml = format!(
+            "<CreateHostedZoneRequest><Name>{name}</Name><CallerReference>{cref}</CallerReference></CreateHostedZoneRequest>"
+        );
+        p.dispatch(&make_ctx(
+            "CreateHostedZone",
+            &xml,
+            "/2013-04-01/hostedzone",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    }
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListHostedZonesByName",
+            "",
+            "/2013-04-01/hostedzonesbyname",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("ListHostedZonesByNameResponse"));
+    assert!(body.contains("alpha.com."));
+    assert!(body.contains("beta.com."));
+    assert!(body.contains("gamma.com."));
+}
+
+#[tokio::test]
+async fn test_list_hosted_zones_by_name_filtered() {
+    let p = Route53Provider::new();
+    for (name, cref) in [("foo.example.com", "rf1"), ("bar.other.com", "rf2")] {
+        let xml = format!(
+            "<CreateHostedZoneRequest><Name>{name}</Name><CallerReference>{cref}</CallerReference></CreateHostedZoneRequest>"
+        );
+        p.dispatch(&make_ctx(
+            "CreateHostedZone",
+            &xml,
+            "/2013-04-01/hostedzone",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    }
+
+    let mut ctx = make_ctx(
+        "ListHostedZonesByName",
+        "",
+        "/2013-04-01/hostedzonesbyname",
+        "GET",
+    );
+    ctx.query_params
+        .insert("dnsname".to_string(), "example.com".to_string());
+    let resp = p.dispatch(&ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("foo.example.com."));
+    assert!(!body.contains("bar.other.com."));
+}
+
+// ---------------------------------------------------------------------------
+// GetHostedZoneCount
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_hosted_zone_count_empty() {
+    let p = Route53Provider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetHostedZoneCount",
+            "",
+            "/2013-04-01/hostedzonecount",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetHostedZoneCountResponse"));
+    assert!(body.contains("<HostedZoneCount>0</HostedZoneCount>"));
+}
+
+#[tokio::test]
+async fn test_get_hosted_zone_count_after_create() {
+    let p = Route53Provider::new();
+    for (name, cref) in [("c1.com", "cx1"), ("c2.com", "cx2")] {
+        let xml = format!(
+            "<CreateHostedZoneRequest><Name>{name}</Name><CallerReference>{cref}</CallerReference></CreateHostedZoneRequest>"
+        );
+        p.dispatch(&make_ctx(
+            "CreateHostedZone",
+            &xml,
+            "/2013-04-01/hostedzone",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    }
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetHostedZoneCount",
+            "",
+            "/2013-04-01/hostedzonecount",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("<HostedZoneCount>2</HostedZoneCount>"));
+}
+
+// ---------------------------------------------------------------------------
+// Health Checks
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_create_and_get_health_check() {
+    let p = Route53Provider::new();
+    let hc_xml = r#"<CreateHealthCheckRequest>
+  <CallerReference>hc-ref-1</CallerReference>
+  <HealthCheckConfig>
+    <IPAddress>1.2.3.4</IPAddress>
+    <Port>80</Port>
+    <Type>HTTP</Type>
+    <ResourcePath>/health</ResourcePath>
+    <RequestInterval>30</RequestInterval>
+    <FailureThreshold>3</FailureThreshold>
+  </HealthCheckConfig>
+</CreateHealthCheckRequest>"#;
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "CreateHealthCheck",
+            hc_xml,
+            "/2013-04-01/healthcheck",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 201);
+    let body = body_str(&resp);
+    assert!(body.contains("CreateHealthCheckResponse"));
+    assert!(body.contains("<Type>HTTP</Type>"));
+    assert!(body.contains("1.2.3.4"));
+
+    let hc_id = xml_text(&body, "Id").unwrap();
+
+    let get_resp = p
+        .dispatch(&make_ctx(
+            "GetHealthCheck",
+            "",
+            &format!("/2013-04-01/healthcheck/{hc_id}"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status_code, 200);
+    let get_body = body_str(&get_resp);
+    assert!(get_body.contains("GetHealthCheckResponse"));
+    assert!(get_body.contains("1.2.3.4"));
+    assert!(get_body.contains("<Port>80</Port>"));
+}
+
+#[tokio::test]
+async fn test_get_health_check_not_found() {
+    let p = Route53Provider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetHealthCheck",
+            "",
+            "/2013-04-01/healthcheck/nonexistent",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    let body = body_str(&resp);
+    assert!(body.contains("NoSuchHealthCheck"));
+}
+
+#[tokio::test]
+async fn test_list_health_checks() {
+    let p = Route53Provider::new();
+    for (cref, ip) in [("hc-a", "1.1.1.1"), ("hc-b", "2.2.2.2")] {
+        let xml = format!(
+            "<CreateHealthCheckRequest>\
+<CallerReference>{cref}</CallerReference>\
+<HealthCheckConfig><IPAddress>{ip}</IPAddress><Port>443</Port><Type>HTTPS</Type></HealthCheckConfig>\
+</CreateHealthCheckRequest>"
+        );
+        p.dispatch(&make_ctx(
+            "CreateHealthCheck",
+            &xml,
+            "/2013-04-01/healthcheck",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    }
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListHealthChecks",
+            "",
+            "/2013-04-01/healthcheck",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("ListHealthChecksResponse"));
+    assert!(body.contains("1.1.1.1"));
+    assert!(body.contains("2.2.2.2"));
+}
+
+#[tokio::test]
+async fn test_delete_health_check() {
+    let p = Route53Provider::new();
+    let xml = r#"<CreateHealthCheckRequest>
+  <CallerReference>hc-del</CallerReference>
+  <HealthCheckConfig><Port>80</Port><Type>HTTP</Type></HealthCheckConfig>
+</CreateHealthCheckRequest>"#;
+    let create_resp = p
+        .dispatch(&make_ctx(
+            "CreateHealthCheck",
+            xml,
+            "/2013-04-01/healthcheck",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    let hc_id = xml_text(&body_str(&create_resp), "Id").unwrap();
+
+    let del_resp = p
+        .dispatch(&make_ctx(
+            "DeleteHealthCheck",
+            "",
+            &format!("/2013-04-01/healthcheck/{hc_id}"),
+            "DELETE",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status_code, 200);
+
+    let get_resp = p
+        .dispatch(&make_ctx(
+            "GetHealthCheck",
+            "",
+            &format!("/2013-04-01/healthcheck/{hc_id}"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status_code, 404);
+}
+
+// ---------------------------------------------------------------------------
+// Tagging
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_change_and_list_tags_for_resource() {
+    let p = Route53Provider::new();
+    let xml = r#"<CreateHostedZoneRequest><Name>tagged.com</Name><CallerReference>rt1</CallerReference></CreateHostedZoneRequest>"#;
+    let create_resp = p
+        .dispatch(&make_ctx(
+            "CreateHostedZone",
+            xml,
+            "/2013-04-01/hostedzone",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    let id_raw = xml_text(&body_str(&create_resp), "Id").unwrap();
+    let zone_id = id_raw.trim_start_matches("/hostedzone/").to_string();
+
+    let tag_xml = "<ChangeTagsForResourceRequest>\
+<AddTags>\
+<Tag><Key>env</Key><Value>production</Value></Tag>\
+<Tag><Key>owner</Key><Value>team-a</Value></Tag>\
+</AddTags>\
+</ChangeTagsForResourceRequest>";
+    let tag_path = format!("/2013-04-01/tags/hostedzone/{zone_id}");
+    let resp = p
+        .dispatch(&make_ctx("ChangeTagsForResource", tag_xml, &tag_path, "POST"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+
+    let list_resp = p
+        .dispatch(&make_ctx(
+            "ListTagsForResource",
+            "",
+            &tag_path,
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status_code, 200);
+    let body = body_str(&list_resp);
+    assert!(body.contains("ListTagsForResourceResponse"));
+    assert!(body.contains("<Key>env</Key>"));
+    assert!(body.contains("<Value>production</Value>"));
+    assert!(body.contains("<Key>owner</Key>"));
+    assert!(body.contains("<Value>team-a</Value>"));
+}

@@ -36,6 +36,11 @@ members = [
     "crates/services/ecr",
     "crates/services/opensearch",
     "crates/services/redshift",
+    "crates/services/ecs",
+    "crates/services/rds",
+    "crates/services/cognito",
+    "crates/services/elasticache",
+    "crates/services/cloudtrail",
     "crates/studio-ui",
     "crates/tests/integration",
 ]
@@ -144,6 +149,11 @@ openstack-acm = { path = "crates/services/acm" }
 openstack-ecr = { path = "crates/services/ecr" }
 openstack-opensearch = { path = "crates/services/opensearch" }
 openstack-redshift = { path = "crates/services/redshift" }
+openstack-ecs = { path = "crates/services/ecs" }
+openstack-rds = { path = "crates/services/rds" }
+openstack-cognito = { path = "crates/services/cognito" }
+openstack-elasticache = { path = "crates/services/elasticache" }
+openstack-cloudtrail = { path = "crates/services/cloudtrail" }
 openstack-studio-ui = { path = "crates/studio-ui" }
 
 [workspace.lints.rust]

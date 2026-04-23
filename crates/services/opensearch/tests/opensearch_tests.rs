@@ -425,3 +425,277 @@ async fn test_delete_domain() {
     let lb = body_json(&list_resp);
     assert_eq!(lb["DomainNames"].as_array().unwrap().len(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// DescribeDomains (batch)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_describe_domains_batch() {
+    let p = OpenSearchProvider::new();
+    for name in ["batch-a", "batch-b", "batch-c"] {
+        p.dispatch(&make_ctx(
+            "CreateDomain",
+            json!({ "DomainName": name }),
+            "/2021-01-01/opensearch/domain",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    }
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeDomains",
+            json!({ "DomainNames": ["batch-a", "batch-c"] }),
+            "/2021-01-01/opensearch/domain-info",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body_json(&resp);
+    let list = b["DomainStatusList"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    let names: Vec<&str> = list
+        .iter()
+        .map(|d| d["DomainName"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"batch-a"));
+    assert!(names.contains(&"batch-c"));
+    assert!(!names.contains(&"batch-b"));
+}
+
+#[tokio::test]
+async fn test_describe_domains_empty_list() {
+    let p = OpenSearchProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeDomains",
+            json!({ "DomainNames": [] }),
+            "/2021-01-01/opensearch/domain-info",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body_json(&resp);
+    assert_eq!(b["DomainStatusList"].as_array().unwrap().len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Tags
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_add_and_list_tags() {
+    let p = OpenSearchProvider::new();
+    let create_resp = p
+        .dispatch(&make_ctx(
+            "CreateDomain",
+            json!({ "DomainName": "tag-domain" }),
+            "/2021-01-01/opensearch/domain",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    let arn = body_json(&create_resp)["DomainStatus"]["ARN"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    p.dispatch(&make_ctx(
+        "AddTags",
+        json!({
+            "ARN": arn,
+            "TagList": [
+                {"Key": "env", "Value": "test"},
+                {"Key": "team", "Value": "platform"},
+            ]
+        }),
+        "/2021-01-01/tags",
+        "POST",
+    ))
+    .await
+    .unwrap();
+
+    let mut list_ctx = make_ctx(
+        "ListTags",
+        json!({}),
+        "/2021-01-01/tags",
+        "GET",
+    );
+    list_ctx.query_params.insert("arn".to_string(), arn.clone());
+    let resp = p.dispatch(&list_ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body_json(&resp);
+    let tags = b["TagList"].as_array().unwrap();
+    assert_eq!(tags.len(), 2);
+    let keys: Vec<&str> = tags.iter().map(|t| t["Key"].as_str().unwrap()).collect();
+    assert!(keys.contains(&"env"));
+    assert!(keys.contains(&"team"));
+}
+
+#[tokio::test]
+async fn test_remove_tags() {
+    let p = OpenSearchProvider::new();
+    let create_resp = p
+        .dispatch(&make_ctx(
+            "CreateDomain",
+            json!({ "DomainName": "rmtag-domain" }),
+            "/2021-01-01/opensearch/domain",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    let arn = body_json(&create_resp)["DomainStatus"]["ARN"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    p.dispatch(&make_ctx(
+        "AddTags",
+        json!({
+            "ARN": arn,
+            "TagList": [
+                {"Key": "keep", "Value": "yes"},
+                {"Key": "remove", "Value": "this"},
+            ]
+        }),
+        "/2021-01-01/tags",
+        "POST",
+    ))
+    .await
+    .unwrap();
+
+    p.dispatch(&make_ctx(
+        "RemoveTags",
+        json!({ "ARN": arn, "TagKeys": ["remove"] }),
+        "/2021-01-01/tags-removal",
+        "POST",
+    ))
+    .await
+    .unwrap();
+
+    let mut list_ctx = make_ctx("ListTags", json!({}), "/2021-01-01/tags", "GET");
+    list_ctx.query_params.insert("arn".to_string(), arn.clone());
+    let resp = p.dispatch(&list_ctx).await.unwrap();
+    let b = body_json(&resp);
+    let tags = b["TagList"].as_array().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0]["Key"], "keep");
+}
+
+// ---------------------------------------------------------------------------
+// GetCompatibleVersions / ListVersions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_compatible_versions() {
+    let p = OpenSearchProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetCompatibleVersions",
+            json!({}),
+            "/2021-01-01/opensearch/compatibleVersions",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body_json(&resp);
+    let versions = b["CompatibleVersions"].as_array().unwrap();
+    assert!(!versions.is_empty());
+    assert!(versions
+        .iter()
+        .any(|v| v["SourceVersion"].as_str().unwrap().contains("OpenSearch")));
+}
+
+#[tokio::test]
+async fn test_list_versions() {
+    let p = OpenSearchProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListVersions",
+            json!({}),
+            "/2021-01-01/opensearch/versions",
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body_json(&resp);
+    let versions = b["Versions"].as_array().unwrap();
+    assert!(!versions.is_empty());
+    assert!(versions
+        .iter()
+        .any(|v| v.as_str().unwrap().starts_with("OpenSearch")));
+}
+
+// ---------------------------------------------------------------------------
+// StartServiceSoftwareUpdate / CancelServiceSoftwareUpdate
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_start_and_cancel_service_software_update() {
+    let p = OpenSearchProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateDomain",
+        json!({ "DomainName": "sw-update-domain" }),
+        "/2021-01-01/opensearch/domain",
+        "POST",
+    ))
+    .await
+    .unwrap();
+
+    let start_resp = p
+        .dispatch(&make_ctx(
+            "StartServiceSoftwareUpdate",
+            json!({ "DomainName": "sw-update-domain" }),
+            "/2021-01-01/opensearch/serviceSoftwareUpdate/start",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(start_resp.status_code, 200);
+    let b = body_json(&start_resp);
+    assert_eq!(
+        b["ServiceSoftwareOptions"]["UpdateStatus"],
+        "IN_PROGRESS"
+    );
+    assert_eq!(b["ServiceSoftwareOptions"]["Cancellable"], true);
+
+    let cancel_resp = p
+        .dispatch(&make_ctx(
+            "CancelServiceSoftwareUpdate",
+            json!({ "DomainName": "sw-update-domain" }),
+            "/2021-01-01/opensearch/serviceSoftwareUpdate/cancel",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancel_resp.status_code, 200);
+    let cb = body_json(&cancel_resp);
+    assert_eq!(
+        cb["ServiceSoftwareOptions"]["UpdateStatus"],
+        "NOT_ELIGIBLE"
+    );
+    assert_eq!(cb["ServiceSoftwareOptions"]["Cancellable"], false);
+}
+
+#[tokio::test]
+async fn test_start_service_software_update_domain_not_found() {
+    let p = OpenSearchProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "StartServiceSoftwareUpdate",
+            json!({ "DomainName": "nonexistent" }),
+            "/2021-01-01/opensearch/serviceSoftwareUpdate/start",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    let b = body_json(&resp);
+    assert_eq!(b["code"], "ResourceNotFoundException");
+}

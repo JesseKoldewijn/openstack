@@ -31,6 +31,42 @@ pub struct StoredEmail {
 }
 
 // ---------------------------------------------------------------------------
+// Email template (SES v1 templates)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailTemplate {
+    pub template_name: String,
+    pub subject_part: String,
+    pub html_part: String,
+    pub text_part: String,
+    pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Identity notification attributes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityNotificationAttributes {
+    pub bounce_topic: Option<String>,
+    pub complaint_topic: Option<String>,
+    pub delivery_topic: Option<String>,
+    pub forwarding_enabled: bool,
+}
+
+impl Default for IdentityNotificationAttributes {
+    fn default() -> Self {
+        Self {
+            bounce_topic: None,
+            complaint_topic: None,
+            delivery_topic: None,
+            forwarding_enabled: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
@@ -40,4 +76,8 @@ pub struct SesStore {
     pub identities: HashMap<String, Identity>,
     /// message_id -> StoredEmail
     pub emails: HashMap<String, StoredEmail>,
+    /// template_name -> EmailTemplate
+    pub templates: HashMap<String, EmailTemplate>,
+    /// identity -> IdentityNotificationAttributes
+    pub notification_attrs: HashMap<String, IdentityNotificationAttributes>,
 }

@@ -275,3 +275,316 @@ async fn test_delete_parameters_batch() {
     assert_eq!(b["DeletedParameters"].as_array().unwrap().len(), 2);
     assert_eq!(b["InvalidParameters"].as_array().unwrap().len(), 1);
 }
+
+
+// ---------------------------------------------------------------------------
+// GetParameterHistory
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_parameter_history() {
+    let p = SsmProvider::new();
+    p.dispatch(&make_ctx(
+        "PutParameter",
+        json!({ "Name": "/hist/p", "Value": "v1", "Type": "String" }),
+    ))
+    .await
+    .unwrap();
+    p.dispatch(&make_ctx(
+        "PutParameter",
+        json!({ "Name": "/hist/p", "Value": "v2", "Type": "String", "Overwrite": true }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx("GetParameterHistory", json!({ "Name": "/hist/p" })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    let params = b["Parameters"].as_array().unwrap();
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0]["Version"], 1);
+    assert_eq!(params[1]["Version"], 2);
+}
+
+#[tokio::test]
+async fn test_get_parameter_history_not_found() {
+    let p = SsmProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetParameterHistory",
+            json!({ "Name": "/nonexistent" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let b = body(&resp);
+    assert!(b["__type"].as_str().unwrap().contains("ParameterNotFound"));
+}
+
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_create_and_describe_document() {
+    let p = SsmProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "CreateDocument",
+            json!({
+                "Name": "MyRunbook",
+                "Content": "{\"schemaVersion\":\"2.2\"}",
+                "DocumentType": "Command",
+                "DocumentFormat": "JSON",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert_eq!(b["DocumentDescription"]["Name"], "MyRunbook");
+    assert_eq!(b["DocumentDescription"]["Status"], "Active");
+
+    let desc_resp = p
+        .dispatch(&make_ctx("DescribeDocument", json!({ "Name": "MyRunbook" })))
+        .await
+        .unwrap();
+    assert_eq!(desc_resp.status_code, 200);
+    let db = body(&desc_resp);
+    assert_eq!(db["Document"]["Name"], "MyRunbook");
+    assert_eq!(db["Document"]["DocumentType"], "Command");
+}
+
+#[tokio::test]
+async fn test_create_document_duplicate_fails() {
+    let p = SsmProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateDocument",
+        json!({ "Name": "DupDoc", "Content": "{}", "DocumentType": "Command" }),
+    ))
+    .await
+    .unwrap();
+    let resp = p
+        .dispatch(&make_ctx(
+            "CreateDocument",
+            json!({ "Name": "DupDoc", "Content": "{}", "DocumentType": "Command" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    assert!(body(&resp)["__type"]
+        .as_str()
+        .unwrap()
+        .contains("DocumentAlreadyExists"));
+}
+
+#[tokio::test]
+async fn test_get_document() {
+    let p = SsmProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateDocument",
+        json!({
+            "Name": "GetMe",
+            "Content": "{\"schemaVersion\":\"2.2\",\"mainSteps\":[]}",
+            "DocumentType": "Command",
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx("GetDocument", json!({ "Name": "GetMe" })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body(&resp);
+    assert_eq!(b["Name"], "GetMe");
+    assert!(b["Content"].as_str().unwrap().contains("mainSteps"));
+}
+
+#[tokio::test]
+async fn test_list_documents() {
+    let p = SsmProvider::new();
+    for name in ["DocA", "DocB"] {
+        p.dispatch(&make_ctx(
+            "CreateDocument",
+            json!({ "Name": name, "Content": "{}", "DocumentType": "Command" }),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let resp = p
+        .dispatch(&make_ctx("ListDocuments", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body(&resp);
+    let docs = b["DocumentIdentifiers"].as_array().unwrap();
+    assert_eq!(docs.len(), 2);
+}
+
+#[tokio::test]
+async fn test_delete_document() {
+    let p = SsmProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateDocument",
+        json!({ "Name": "DelDoc", "Content": "{}", "DocumentType": "Command" }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx("DeleteDocument", json!({ "Name": "DelDoc" })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+
+    let desc_resp = p
+        .dispatch(&make_ctx("DescribeDocument", json!({ "Name": "DelDoc" })))
+        .await
+        .unwrap();
+    assert_eq!(desc_resp.status_code, 400);
+}
+
+// ---------------------------------------------------------------------------
+// SendCommand / ListCommands / GetCommandInvocation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_send_command() {
+    let p = SsmProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "SendCommand",
+            json!({
+                "DocumentName": "AWS-RunShellScript",
+                "InstanceIds": ["i-abc123", "i-def456"],
+                "Parameters": { "commands": ["echo hello"] },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert!(b["Command"]["CommandId"].as_str().is_some());
+    assert_eq!(b["Command"]["DocumentName"], "AWS-RunShellScript");
+    assert_eq!(b["Command"]["Status"], "Success");
+}
+
+#[tokio::test]
+async fn test_list_commands() {
+    let p = SsmProvider::new();
+    p.dispatch(&make_ctx(
+        "SendCommand",
+        json!({
+            "DocumentName": "AWS-RunShellScript",
+            "InstanceIds": ["i-111"],
+        }),
+    ))
+    .await
+    .unwrap();
+    p.dispatch(&make_ctx(
+        "SendCommand",
+        json!({
+            "DocumentName": "AWS-RunPowerShellScript",
+            "InstanceIds": ["i-222"],
+        }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx("ListCommands", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let b = body(&resp);
+    assert_eq!(b["Commands"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_list_commands_filter_by_instance() {
+    let p = SsmProvider::new();
+    p.dispatch(&make_ctx(
+        "SendCommand",
+        json!({ "DocumentName": "Doc1", "InstanceIds": ["i-filter-me"] }),
+    ))
+    .await
+    .unwrap();
+    p.dispatch(&make_ctx(
+        "SendCommand",
+        json!({ "DocumentName": "Doc2", "InstanceIds": ["i-other"] }),
+    ))
+    .await
+    .unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "ListCommands",
+            json!({ "InstanceId": "i-filter-me" }),
+        ))
+        .await
+        .unwrap();
+    let b = body(&resp);
+    assert_eq!(b["Commands"].as_array().unwrap().len(), 1);
+    assert_eq!(b["Commands"][0]["DocumentName"], "Doc1");
+}
+
+#[tokio::test]
+async fn test_get_command_invocation() {
+    let p = SsmProvider::new();
+    let send_resp = p
+        .dispatch(&make_ctx(
+            "SendCommand",
+            json!({
+                "DocumentName": "AWS-RunShellScript",
+                "InstanceIds": ["i-target"],
+            }),
+        ))
+        .await
+        .unwrap();
+    let command_id = body(&send_resp)["Command"]["CommandId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetCommandInvocation",
+            json!({
+                "CommandId": command_id,
+                "InstanceId": "i-target",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+    let b = body(&resp);
+    assert_eq!(b["InstanceId"], "i-target");
+    assert_eq!(b["Status"], "Success");
+    assert_eq!(b["ResponseCode"], 0);
+}
+
+#[tokio::test]
+async fn test_get_command_invocation_not_found() {
+    let p = SsmProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "GetCommandInvocation",
+            json!({
+                "CommandId": "nonexistent-command-id",
+                "InstanceId": "i-abc",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    assert!(body(&resp)["__type"]
+        .as_str()
+        .unwrap()
+        .contains("InvocationDoesNotExist"));
+}

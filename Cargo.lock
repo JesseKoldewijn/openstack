@@ -2149,12 +2149,16 @@ dependencies = [
  "openstack-acm",
  "openstack-apigateway",
  "openstack-cloudformation",
+ "openstack-cloudtrail",
  "openstack-cloudwatch",
+ "openstack-cognito",
  "openstack-config",
  "openstack-dns",
  "openstack-dynamodb",
  "openstack-ec2",
  "openstack-ecr",
+ "openstack-ecs",
+ "openstack-elasticache",
  "openstack-eventbridge",
  "openstack-firehose",
  "openstack-gateway",
@@ -2164,6 +2168,7 @@ dependencies = [
  "openstack-kms",
  "openstack-lambda",
  "openstack-opensearch",
+ "openstack-rds",
  "openstack-redshift",
  "openstack-route53",
  "openstack-s3",
@@ -2267,6 +2272,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "openstack-cloudtrail"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "openstack-aws-protocol",
+ "openstack-config",
+ "openstack-service-framework",
+ "openstack-state",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "openstack-cloudwatch"
 version = "0.1.5"
 dependencies = [
@@ -2282,6 +2308,27 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "openstack-cognito"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "openstack-aws-protocol",
+ "openstack-config",
+ "openstack-service-framework",
+ "openstack-state",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2360,6 +2407,48 @@ dependencies = [
 
 [[package]]
 name = "openstack-ecr"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "openstack-aws-protocol",
+ "openstack-config",
+ "openstack-service-framework",
+ "openstack-state",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "openstack-ecs"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "openstack-aws-protocol",
+ "openstack-config",
+ "openstack-service-framework",
+ "openstack-state",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "openstack-elasticache"
 version = "0.1.5"
 dependencies = [
  "anyhow",
@@ -2622,6 +2711,27 @@ dependencies = [
 
 [[package]]
 name = "openstack-opensearch"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "openstack-aws-protocol",
+ "openstack-config",
+ "openstack-service-framework",
+ "openstack-state",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "openstack-rds"
 version = "0.1.5"
 dependencies = [
  "anyhow",

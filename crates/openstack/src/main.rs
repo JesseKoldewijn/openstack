@@ -696,6 +696,17 @@ fn register_services(
         openstack_opensearch::OpenSearchProvider::new()
     );
     register!("redshift", openstack_redshift::RedshiftProvider::new());
+    register!("ecs", openstack_ecs::EcsProvider::new());
+    register!("rds", openstack_rds::RdsProvider::new());
+    register!("cognito-idp", openstack_cognito::CognitoProvider::new());
+    register!(
+        "elasticache",
+        openstack_elasticache::ElastiCacheProvider::new()
+    );
+    register!(
+        "cloudtrail",
+        openstack_cloudtrail::CloudTrailProvider::new()
+    );
 
     persistable_stores
 }

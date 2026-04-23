@@ -10,7 +10,7 @@ use openstack_service_framework::traits::{
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
-use crate::store::{Identity, SesStore, StoredEmail};
+use crate::store::{EmailTemplate, Identity, SesStore, StoredEmail};
 
 pub struct SesProvider {
     store: Arc<AccountRegionBundle<SesStore>>,
@@ -283,6 +283,310 @@ impl ServiceProvider for SesProvider {
                 let mut store = self.store.get_or_create(account_id, region);
                 store.identities.remove(&identity);
                 Ok(xml_no_result("DeleteIdentity", &rid))
+            }
+
+            // ----------------------------------------------------------------
+            // GetSendQuota
+            // ----------------------------------------------------------------
+            "GetSendQuota" => {
+                let sent_count = self
+                    .store
+                    .get(account_id, region)
+                    .map(|s| s.emails.len() as f64)
+                    .unwrap_or(0.0);
+                let inner = format!(
+                    "<Max24HourSend>50000.0</Max24HourSend>\
+<MaxSendRate>14.0</MaxSendRate>\
+<SentLast24Hours>{sent_count}</SentLast24Hours>"
+                );
+                Ok(xml_resp("GetSendQuota", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
+            // GetSendStatistics
+            // ----------------------------------------------------------------
+            "GetSendStatistics" => {
+                let data_points = self
+                    .store
+                    .get(account_id, region)
+                    .map(|store| {
+                        // Group emails by hour bucket for realistic stats
+                        let total = store.emails.len() as u64;
+                        if total == 0 {
+                            return String::new();
+                        }
+                        format!(
+                            "<member>\
+<Timestamp>{}</Timestamp>\
+<DeliveryAttempts>{total}</DeliveryAttempts>\
+<Bounces>0</Bounces>\
+<Complaints>0</Complaints>\
+<Rejects>0</Rejects>\
+</member>",
+                            Utc::now().format("%Y-%m-%dT%H:00:00Z")
+                        )
+                    })
+                    .unwrap_or_default();
+                let inner = format!("<SendDataPoints>{data_points}</SendDataPoints>");
+                Ok(xml_resp("GetSendStatistics", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
+            // CreateTemplate
+            // ----------------------------------------------------------------
+            "CreateTemplate" => {
+                let template_name = match str_param(ctx, "Template.TemplateName") {
+                    Some(n) => n.to_string(),
+                    None => {
+                        return Ok(xml_error(
+                            "MissingParameter",
+                            "Template.TemplateName required",
+                            400,
+                        ));
+                    }
+                };
+                let subject_part = str_param(ctx, "Template.SubjectPart")
+                    .unwrap_or("")
+                    .to_string();
+                let html_part = str_param(ctx, "Template.HtmlPart").unwrap_or("").to_string();
+                let text_part = str_param(ctx, "Template.TextPart").unwrap_or("").to_string();
+
+                let mut store = self.store.get_or_create(account_id, region);
+                if store.templates.contains_key(&template_name) {
+                    return Ok(xml_error(
+                        "AlreadyExists",
+                        &format!("Template {template_name} already exists"),
+                        400,
+                    ));
+                }
+                store.templates.insert(
+                    template_name.clone(),
+                    EmailTemplate {
+                        template_name,
+                        subject_part,
+                        html_part,
+                        text_part,
+                        created_at: Utc::now(),
+                    },
+                );
+                Ok(xml_no_result("CreateTemplate", &rid))
+            }
+
+            // ----------------------------------------------------------------
+            // DeleteTemplate
+            // ----------------------------------------------------------------
+            "DeleteTemplate" => {
+                let template_name = match str_param(ctx, "TemplateName") {
+                    Some(n) => n.to_string(),
+                    None => {
+                        return Ok(xml_error(
+                            "MissingParameter",
+                            "TemplateName required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                store.templates.remove(&template_name);
+                Ok(xml_no_result("DeleteTemplate", &rid))
+            }
+
+            // ----------------------------------------------------------------
+            // GetTemplate
+            // ----------------------------------------------------------------
+            "GetTemplate" => {
+                let template_name = match str_param(ctx, "TemplateName") {
+                    Some(n) => n.to_string(),
+                    None => {
+                        return Ok(xml_error(
+                            "MissingParameter",
+                            "TemplateName required",
+                            400,
+                        ));
+                    }
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_error(
+                        "TemplateDoesNotExist",
+                        &format!("Template {template_name} does not exist"),
+                        400,
+                    ));
+                };
+                match store.templates.get(&template_name) {
+                    Some(t) => {
+                        let inner = format!(
+                            "<Template>\
+<TemplateName>{}</TemplateName>\
+<SubjectPart>{}</SubjectPart>\
+<HtmlPart>{}</HtmlPart>\
+<TextPart>{}</TextPart>\
+</Template>",
+                            t.template_name, t.subject_part, t.html_part, t.text_part
+                        );
+                        Ok(xml_resp("GetTemplate", &rid, &inner))
+                    }
+                    None => Ok(xml_error(
+                        "TemplateDoesNotExist",
+                        &format!("Template {template_name} does not exist"),
+                        400,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // ListTemplates
+            // ----------------------------------------------------------------
+            "ListTemplates" => {
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(xml_resp(
+                        "ListTemplates",
+                        &rid,
+                        "<TemplatesMetadata />",
+                    ));
+                };
+                let members: String = store
+                    .templates
+                    .values()
+                    .map(|t| {
+                        format!(
+                            "<member><Name>{}</Name><CreatedTimestamp>{}</CreatedTimestamp></member>",
+                            t.template_name,
+                            t.created_at.format("%Y-%m-%dT%H:%M:%SZ")
+                        )
+                    })
+                    .collect();
+                let inner = if members.is_empty() {
+                    "<TemplatesMetadata />".to_string()
+                } else {
+                    format!("<TemplatesMetadata>{members}</TemplatesMetadata>")
+                };
+                Ok(xml_resp("ListTemplates", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
+            // SendTemplatedEmail
+            // ----------------------------------------------------------------
+            "SendTemplatedEmail" => {
+                let source = match str_param(ctx, "Source") {
+                    Some(s) => s.to_string(),
+                    None => return Ok(xml_error("MissingParameter", "Source required", 400)),
+                };
+                let template_name = match str_param(ctx, "Template") {
+                    Some(t) => t.to_string(),
+                    None => return Ok(xml_error("MissingParameter", "Template required", 400)),
+                };
+                let to = addresses_from_params(ctx, "Destination.ToAddresses.member");
+                let cc = addresses_from_params(ctx, "Destination.CcAddresses.member");
+                let bcc = addresses_from_params(ctx, "Destination.BccAddresses.member");
+
+                let (subject, html_part, text_part) = {
+                    let Some(store) = self.store.get(account_id, region) else {
+                        return Ok(xml_error(
+                            "TemplateDoesNotExist",
+                            &format!("Template {template_name} does not exist"),
+                            400,
+                        ));
+                    };
+                    match store.templates.get(&template_name) {
+                        Some(t) => (
+                            t.subject_part.clone(),
+                            t.html_part.clone(),
+                            t.text_part.clone(),
+                        ),
+                        None => {
+                            return Ok(xml_error(
+                                "TemplateDoesNotExist",
+                                &format!("Template {template_name} does not exist"),
+                                400,
+                            ));
+                        }
+                    }
+                };
+
+                let message_id = Uuid::new_v4().to_string();
+                let email = StoredEmail {
+                    message_id: message_id.clone(),
+                    source,
+                    destination_to: to,
+                    destination_cc: cc,
+                    destination_bcc: bcc,
+                    subject,
+                    body_text: text_part,
+                    body_html: html_part,
+                    sent_at: Utc::now(),
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                store.emails.insert(message_id.clone(), email);
+                let inner = format!("<MessageId>{message_id}</MessageId>");
+                Ok(xml_resp("SendTemplatedEmail", &rid, &inner))
+            }
+
+            // ----------------------------------------------------------------
+            // SetIdentityFeedbackForwardingEnabled
+            // ----------------------------------------------------------------
+            "SetIdentityFeedbackForwardingEnabled" => {
+                let identity = match str_param(ctx, "Identity") {
+                    Some(i) => i.to_string(),
+                    None => return Ok(xml_error("MissingParameter", "Identity required", 400)),
+                };
+                let enabled = str_param(ctx, "ForwardingEnabled")
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(true);
+                let mut store = self.store.get_or_create(account_id, region);
+                let attrs = store
+                    .notification_attrs
+                    .entry(identity)
+                    .or_default();
+                attrs.forwarding_enabled = enabled;
+                Ok(xml_no_result("SetIdentityFeedbackForwardingEnabled", &rid))
+            }
+
+            // ----------------------------------------------------------------
+            // GetIdentityNotificationAttributes
+            // ----------------------------------------------------------------
+            "GetIdentityNotificationAttributes" => {
+                let identities = addresses_from_params(ctx, "Identities.member");
+                let entries = self
+                    .store
+                    .get(account_id, region)
+                    .map(|store| {
+                        identities
+                            .iter()
+                            .map(|id| {
+                                let attrs = store
+                                    .notification_attrs
+                                    .get(id)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let bounce = attrs
+                                    .bounce_topic
+                                    .as_deref()
+                                    .map(|t| format!("<BounceTopic>{t}</BounceTopic>"))
+                                    .unwrap_or_default();
+                                let complaint = attrs
+                                    .complaint_topic
+                                    .as_deref()
+                                    .map(|t| format!("<ComplaintTopic>{t}</ComplaintTopic>"))
+                                    .unwrap_or_default();
+                                let delivery = attrs
+                                    .delivery_topic
+                                    .as_deref()
+                                    .map(|t| format!("<DeliveryTopic>{t}</DeliveryTopic>"))
+                                    .unwrap_or_default();
+                                format!(
+                                    "<entry><key>{id}</key><value>\
+{bounce}{complaint}{delivery}\
+<ForwardingEnabled>{}</ForwardingEnabled>\
+</value></entry>",
+                                    attrs.forwarding_enabled
+                                )
+                            })
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                let inner =
+                    format!("<NotificationAttributes>{entries}</NotificationAttributes>");
+                Ok(xml_resp("GetIdentityNotificationAttributes", &rid, &inner))
             }
 
             _ => Err(DispatchError::NotImplemented(ctx.operation.clone())),
