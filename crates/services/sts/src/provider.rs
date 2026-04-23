@@ -159,8 +159,8 @@ impl ServiceProvider for StsProvider {
                     .to_string();
                 let session_name =
                     param(ctx, "RoleSessionName").unwrap_or_else(|| "web-session".to_string());
-                let provider_id = param(ctx, "ProviderId")
-                    .unwrap_or_else(|| "www.amazon.com".to_string());
+                let provider_id =
+                    param(ctx, "ProviderId").unwrap_or_else(|| "www.amazon.com".to_string());
                 let subject = param(ctx, "WebIdentityToken")
                     .map(|t| t[..t.len().min(12)].to_string())
                     .unwrap_or_else(|| "sub-fake-0000".to_string());
@@ -189,10 +189,9 @@ impl ServiceProvider for StsProvider {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("default")
                     .to_string();
-                let principal_arn = param(ctx, "PrincipalArn")
-                    .unwrap_or_else(|| {
-                        format!("arn:aws:iam::{account_id}:saml-provider/MyProvider")
-                    });
+                let principal_arn = param(ctx, "PrincipalArn").unwrap_or_else(|| {
+                    format!("arn:aws:iam::{account_id}:saml-provider/MyProvider")
+                });
                 let session_name = "saml-session".to_string();
                 let creds = temp_credentials_xml("saml//");
                 let role_id_suffix =

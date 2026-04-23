@@ -97,12 +97,22 @@ fn cluster_xml(c: &CacheCluster, region: &str) -> String {
     let subnet_xml = c
         .cache_subnet_group_name
         .as_deref()
-        .map(|n| format!("<CacheSubnetGroupName>{}</CacheSubnetGroupName>", xml_escape(n)))
+        .map(|n| {
+            format!(
+                "<CacheSubnetGroupName>{}</CacheSubnetGroupName>",
+                xml_escape(n)
+            )
+        })
         .unwrap_or_default();
     let rg_xml = c
         .replication_group_id
         .as_deref()
-        .map(|id| format!("<ReplicationGroupId>{}</ReplicationGroupId>", xml_escape(id)))
+        .map(|id| {
+            format!(
+                "<ReplicationGroupId>{}</ReplicationGroupId>",
+                xml_escape(id)
+            )
+        })
         .unwrap_or_default();
     format!(
         "<CacheClusterId>{}</CacheClusterId>\
@@ -294,10 +304,8 @@ impl ServiceProvider for ElastiCacheProvider {
                 let mut store = self.store.get_or_create(account_id, region);
                 match store.clusters.remove(&cluster_id) {
                     Some(c) => {
-                        let inner = format!(
-                            "<CacheCluster>{}</CacheCluster>",
-                            cluster_xml(&c, region)
-                        );
+                        let inner =
+                            format!("<CacheCluster>{}</CacheCluster>", cluster_xml(&c, region));
                         Ok(xml_resp("DeleteCacheCluster", &rid, &inner))
                     }
                     None => Ok(xml_error(
@@ -323,11 +331,7 @@ impl ServiceProvider for ElastiCacheProvider {
                 let items: String = store
                     .clusters
                     .values()
-                    .filter(|c| {
-                        filter_id
-                            .map(|id| c.cache_cluster_id == id)
-                            .unwrap_or(true)
-                    })
+                    .filter(|c| filter_id.map(|id| c.cache_cluster_id == id).unwrap_or(true))
                     .map(|c| format!("<member>{}</member>", cluster_xml(c, region)))
                     .collect();
                 let inner = format!("<CacheClusters>{items}</CacheClusters>");
@@ -506,8 +510,10 @@ impl ServiceProvider for ElastiCacheProvider {
                     created: Utc::now(),
                 };
                 store.replication_groups.insert(rg_id, rg.clone());
-                let inner =
-                    format!("<ReplicationGroup>{}</ReplicationGroup>", rg_xml(&rg, region));
+                let inner = format!(
+                    "<ReplicationGroup>{}</ReplicationGroup>",
+                    rg_xml(&rg, region)
+                );
                 Ok(xml_resp("CreateReplicationGroup", &rid, &inner))
             }
 

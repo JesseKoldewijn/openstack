@@ -360,13 +360,17 @@ impl ServiceProvider for SsmProvider {
                 let content = match str_param(ctx, "Content") {
                     Some(c) => c,
                     None => {
-                        return Ok(json_error("ValidationException", "Content is required", 400));
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Content is required",
+                            400,
+                        ));
                     }
                 };
-                let document_type = str_param(ctx, "DocumentType")
-                    .unwrap_or_else(|| "Command".to_string());
-                let document_format = str_param(ctx, "DocumentFormat")
-                    .unwrap_or_else(|| "JSON".to_string());
+                let document_type =
+                    str_param(ctx, "DocumentType").unwrap_or_else(|| "Command".to_string());
+                let document_format =
+                    str_param(ctx, "DocumentFormat").unwrap_or_else(|| "JSON".to_string());
 
                 let mut store = self.store.get_or_create(account_id, region);
                 if store.documents.contains_key(&name) {
@@ -644,14 +648,11 @@ impl ServiceProvider for SsmProvider {
                     ));
                 };
 
-                let invocation = store
-                    .commands
-                    .get(&command_id)
-                    .and_then(|cmd| {
-                        cmd.invocations
-                            .iter()
-                            .find(|inv| inv.instance_id == instance_id)
-                    });
+                let invocation = store.commands.get(&command_id).and_then(|cmd| {
+                    cmd.invocations
+                        .iter()
+                        .find(|inv| inv.instance_id == instance_id)
+                });
 
                 match invocation {
                     Some(inv) => Ok(json_ok(json!({
@@ -760,7 +761,9 @@ impl ServiceProvider for SsmProvider {
                 if resource_type == "Document"
                     && let Some(doc) = store.documents.get_mut(&resource_id)
                 {
-                    for k in &tag_keys { doc.tags.remove(k); }
+                    for k in &tag_keys {
+                        doc.tags.remove(k);
+                    }
                 }
                 Ok(json_ok(json!({})))
             }

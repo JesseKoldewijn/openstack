@@ -92,7 +92,10 @@ async fn perf_describe_db_instances_many() {
 async fn perf_create_snapshot_throughput() {
     let p = RdsProvider::new();
     let mut db_params = HashMap::new();
-    db_params.insert("DBInstanceIdentifier".to_string(), "snap-src-db".to_string());
+    db_params.insert(
+        "DBInstanceIdentifier".to_string(),
+        "snap-src-db".to_string(),
+    );
     db_params.insert("DBInstanceClass".to_string(), "db.t3.micro".to_string());
     db_params.insert("Engine".to_string(), "mysql".to_string());
     db_params.insert("MasterUsername".to_string(), "admin".to_string());

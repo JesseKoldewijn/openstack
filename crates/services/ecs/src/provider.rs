@@ -167,7 +167,8 @@ impl ServiceProvider for EcsProvider {
             // CreateCluster
             // ----------------------------------------------------------------
             "CreateCluster" => {
-                let cluster_name = str_param(ctx, "clusterName").unwrap_or_else(|| "default".to_string());
+                let cluster_name =
+                    str_param(ctx, "clusterName").unwrap_or_else(|| "default".to_string());
                 let arn = cluster_arn(account_id, region, &cluster_name);
 
                 let mut store = self.store.get_or_create(account_id, region);
@@ -287,7 +288,8 @@ impl ServiceProvider for EcsProvider {
                         ));
                     }
                 };
-                let network_mode = str_param(ctx, "networkMode").unwrap_or_else(|| "bridge".to_string());
+                let network_mode =
+                    str_param(ctx, "networkMode").unwrap_or_else(|| "bridge".to_string());
                 let cpu = str_param(ctx, "cpu");
                 let memory = str_param(ctx, "memory");
 
@@ -304,9 +306,14 @@ impl ServiceProvider for EcsProvider {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("nginx")
                                     .to_string();
-                                let cpu_val = cd.get("cpu").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                                let mem = cd.get("memory").and_then(|v| v.as_u64()).map(|m| m as u32);
-                                let essential = cd.get("essential").and_then(|v| v.as_bool()).unwrap_or(true);
+                                let cpu_val =
+                                    cd.get("cpu").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                let mem =
+                                    cd.get("memory").and_then(|v| v.as_u64()).map(|m| m as u32);
+                                let essential = cd
+                                    .get("essential")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
                                 Some(ContainerDefinition {
                                     name,
                                     image,
@@ -364,9 +371,7 @@ impl ServiceProvider for EcsProvider {
                     store
                         .task_definitions
                         .values()
-                        .find(|td| {
-                            format!("{}:{}", td.family, td.revision) == task_def_ref
-                        })
+                        .find(|td| format!("{}:{}", td.family, td.revision) == task_def_ref)
                         .map(|td| td.task_definition_arn.clone())
                         .unwrap_or(task_def_ref.clone())
                 };
@@ -374,7 +379,9 @@ impl ServiceProvider for EcsProvider {
                     Some(td) => {
                         td.status = "INACTIVE".to_string();
                         let td_clone = td.clone();
-                        Ok(json_ok(json!({ "taskDefinition": task_def_json(&td_clone) })))
+                        Ok(json_ok(
+                            json!({ "taskDefinition": task_def_json(&td_clone) }),
+                        ))
                     }
                     None => Ok(json_error(
                         "InvalidParameterException",
@@ -447,7 +454,9 @@ impl ServiceProvider for EcsProvider {
                             .collect()
                     })
                     .unwrap_or_default();
-                Ok(json_ok(json!({ "taskDefinitionArns": arns, "nextToken": null })))
+                Ok(json_ok(
+                    json!({ "taskDefinitionArns": arns, "nextToken": null }),
+                ))
             }
 
             // ----------------------------------------------------------------
@@ -464,7 +473,8 @@ impl ServiceProvider for EcsProvider {
                         ));
                     }
                 };
-                let cluster_ref = str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
+                let cluster_ref =
+                    str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
                 let task_definition = match str_param(ctx, "taskDefinition") {
                     Some(t) => t,
                     None => {
@@ -531,7 +541,8 @@ impl ServiceProvider for EcsProvider {
                         ));
                     }
                 };
-                let cluster_ref = str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
+                let cluster_ref =
+                    str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
                 let s_arn = if service_ref.starts_with("arn:") {
                     service_ref.clone()
                 } else {
@@ -562,7 +573,8 @@ impl ServiceProvider for EcsProvider {
                         ));
                     }
                 };
-                let cluster_ref = str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
+                let cluster_ref =
+                    str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
                 let s_arn = if service_ref.starts_with("arn:") {
                     service_ref.clone()
                 } else {
@@ -606,7 +618,8 @@ impl ServiceProvider for EcsProvider {
                             .collect()
                     })
                     .unwrap_or_default();
-                let cluster_ref = str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
+                let cluster_ref =
+                    str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
 
                 let Some(store) = self.store.get(account_id, region) else {
                     return Ok(json_ok(json!({ "services": [], "failures": [] })));
@@ -631,7 +644,8 @@ impl ServiceProvider for EcsProvider {
             // ListServices
             // ----------------------------------------------------------------
             "ListServices" => {
-                let cluster_ref = str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
+                let cluster_ref =
+                    str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
                 let c_arn = if cluster_ref.starts_with("arn:") {
                     cluster_ref.clone()
                 } else {
@@ -666,7 +680,8 @@ impl ServiceProvider for EcsProvider {
                         ));
                     }
                 };
-                let cluster_ref = str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
+                let cluster_ref =
+                    str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
                 let count = ctx
                     .request_body
                     .get("count")
@@ -752,7 +767,8 @@ impl ServiceProvider for EcsProvider {
                     }
                 };
                 let reason = str_param(ctx, "reason");
-                let cluster_ref = str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
+                let cluster_ref =
+                    str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
 
                 let t_arn = if task_ref.starts_with("arn:") {
                     task_ref.clone()
@@ -772,7 +788,8 @@ impl ServiceProvider for EcsProvider {
                         task.desired_status = "STOPPED".to_string();
                         task.stopped_at = Some(Utc::now());
                         task.stop_code = Some("UserInitiated".to_string());
-                        task.stopped_reason = reason.or_else(|| Some("Task stopped by user".to_string()));
+                        task.stopped_reason =
+                            reason.or_else(|| Some("Task stopped by user".to_string()));
                         let task_clone = task.clone();
                         Ok(json_ok(json!({ "task": task_json(&task_clone) })))
                     }
@@ -798,7 +815,8 @@ impl ServiceProvider for EcsProvider {
                             .collect()
                     })
                     .unwrap_or_default();
-                let cluster_ref = str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
+                let cluster_ref =
+                    str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
                 let c_arn = if cluster_ref.starts_with("arn:") {
                     cluster_ref.clone()
                 } else {
@@ -832,7 +850,8 @@ impl ServiceProvider for EcsProvider {
             // ListTasks
             // ----------------------------------------------------------------
             "ListTasks" => {
-                let cluster_ref = str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
+                let cluster_ref =
+                    str_param(ctx, "cluster").unwrap_or_else(|| "default".to_string());
                 let c_arn = if cluster_ref.starts_with("arn:") {
                     cluster_ref.clone()
                 } else {

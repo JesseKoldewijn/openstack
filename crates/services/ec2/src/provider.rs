@@ -11,7 +11,7 @@ use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
 use crate::store::{
-    Address, Ec2Store, Instance, InternetGateway, IgwAttachment, IpPermission, KeyPair,
+    Address, Ec2Store, IgwAttachment, Instance, InternetGateway, IpPermission, KeyPair,
     SecurityGroup, Subnet, Volume, VolumeAttachment, Vpc,
 };
 
@@ -334,11 +334,7 @@ impl ServiceProvider for Ec2Provider {
                                 let ranges: String = r
                                     .ip_ranges
                                     .iter()
-                                    .map(|ip| {
-                                        format!(
-                                            "<item><cidrIp>{ip}</cidrIp></item>"
-                                        )
-                                    })
+                                    .map(|ip| format!("<item><cidrIp>{ip}</cidrIp></item>"))
                                     .collect();
                                 format!(
                                     "<item>\
@@ -708,9 +704,18 @@ impl ServiceProvider for Ec2Provider {
                     ));
                 }
                 let key_pair_id = format!("key-{}", short_id());
-                let fingerprint = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    rand_byte(), rand_byte(), rand_byte(), rand_byte(), rand_byte(), rand_byte());
-                let key_material = format!("-----BEGIN RSA PRIVATE KEY-----\nMIIFake{key_name}\n-----END RSA PRIVATE KEY-----");
+                let fingerprint = format!(
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    rand_byte(),
+                    rand_byte(),
+                    rand_byte(),
+                    rand_byte(),
+                    rand_byte(),
+                    rand_byte()
+                );
+                let key_material = format!(
+                    "-----BEGIN RSA PRIVATE KEY-----\nMIIFake{key_name}\n-----END RSA PRIVATE KEY-----"
+                );
                 let kp = KeyPair {
                     key_pair_id: key_pair_id.clone(),
                     key_name: key_name.clone(),
@@ -786,12 +791,7 @@ impl ServiceProvider for Ec2Provider {
             "AllocateAddress" => {
                 let domain = str_param(ctx, "Domain").unwrap_or("vpc").to_string();
                 let allocation_id = format!("eipalloc-{}", short_id());
-                let public_ip = format!(
-                    "54.{}.{}.{}",
-                    rand_byte(),
-                    rand_byte(),
-                    rand_byte()
-                );
+                let public_ip = format!("54.{}.{}.{}", rand_byte(), rand_byte(), rand_byte());
                 let addr = Address {
                     allocation_id: allocation_id.clone(),
                     public_ip: public_ip.clone(),
@@ -836,7 +836,11 @@ impl ServiceProvider for Ec2Provider {
             // ----------------------------------------------------------------
             "DescribeAddresses" => {
                 let Some(store) = self.store.get(account_id, region) else {
-                    return Ok(xml_ok("DescribeAddresses", &rid, "<addressesSet></addressesSet>"));
+                    return Ok(xml_ok(
+                        "DescribeAddresses",
+                        &rid,
+                        "<addressesSet></addressesSet>",
+                    ));
                 };
                 let items: String = store
                     .addresses
@@ -904,11 +908,7 @@ impl ServiceProvider for Ec2Provider {
                 let association_id = match str_param(ctx, "AssociationId") {
                     Some(id) => id.to_string(),
                     None => {
-                        return Ok(xml_error(
-                            "MissingParameter",
-                            "AssociationId required",
-                            400,
-                        ));
+                        return Ok(xml_error("MissingParameter", "AssociationId required", 400));
                     }
                 };
                 let mut store = self.store.get_or_create(account_id, region);
@@ -968,7 +968,11 @@ impl ServiceProvider for Ec2Provider {
                         400,
                     ));
                 }
-                Ok(xml_ok("DeleteInternetGateway", &rid, "<return>true</return>"))
+                Ok(xml_ok(
+                    "DeleteInternetGateway",
+                    &rid,
+                    "<return>true</return>",
+                ))
             }
 
             // ----------------------------------------------------------------
@@ -1037,7 +1041,11 @@ impl ServiceProvider for Ec2Provider {
                             vpc_id,
                             state: "available".to_string(),
                         });
-                        Ok(xml_ok("AttachInternetGateway", &rid, "<return>true</return>"))
+                        Ok(xml_ok(
+                            "AttachInternetGateway",
+                            &rid,
+                            "<return>true</return>",
+                        ))
                     }
                     None => Ok(xml_error(
                         "InvalidInternetGatewayID.NotFound",
@@ -1069,7 +1077,11 @@ impl ServiceProvider for Ec2Provider {
                         igw.state = "detached".to_string();
                     }
                 }
-                Ok(xml_ok("DetachInternetGateway", &rid, "<return>true</return>"))
+                Ok(xml_ok(
+                    "DetachInternetGateway",
+                    &rid,
+                    "<return>true</return>",
+                ))
             }
 
             // ----------------------------------------------------------------
@@ -1355,9 +1367,16 @@ impl ServiceProvider for Ec2Provider {
             // ----------------------------------------------------------------
             "DescribeRegions" => {
                 let regions = [
-                    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-                    "eu-west-1", "eu-west-2", "eu-central-1",
-                    "ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
+                    "us-east-1",
+                    "us-east-2",
+                    "us-west-1",
+                    "us-west-2",
+                    "eu-west-1",
+                    "eu-west-2",
+                    "eu-central-1",
+                    "ap-southeast-1",
+                    "ap-southeast-2",
+                    "ap-northeast-1",
                 ];
                 let items: String = regions
                     .iter()
@@ -1414,17 +1433,12 @@ fn collect_indexed_params(ctx: &RequestContext, prefix: &str) -> Vec<String> {
     let mut idx = 1usize;
     loop {
         let key = format!("{prefix}.{idx}");
-        if let Some(val) = ctx
-            .query_params
-            .get(&key)
-            .cloned()
-            .or_else(|| {
-                ctx.request_body
-                    .get(&key)
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-        {
+        if let Some(val) = ctx.query_params.get(&key).cloned().or_else(|| {
+            ctx.request_body
+                .get(&key)
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        }) {
             result.push(val);
             idx += 1;
         } else {
@@ -1438,11 +1452,7 @@ fn rand_byte() -> u8 {
     (Uuid::new_v4().as_bytes()[0]) ^ (Uuid::new_v4().as_bytes()[1])
 }
 
-fn apply_tags_to_resource(
-    store: &mut Ec2Store,
-    id: &str,
-    tags: &[(String, String)],
-) {
+fn apply_tags_to_resource(store: &mut Ec2Store, id: &str, tags: &[(String, String)]) {
     macro_rules! try_apply {
         ($map:expr) => {
             if let Some(r) = $map.get_mut(id) {
@@ -1483,4 +1493,3 @@ fn remove_tags_from_resource(store: &mut Ec2Store, id: &str, keys: &[String]) {
     try_remove!(store.internet_gateways);
     try_remove!(store.volumes);
 }
-

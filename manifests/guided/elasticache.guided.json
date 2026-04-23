@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.2",
+  "service": "elasticache",
+  "protocol": "query",
+  "inputs": [
+    { "name": "cluster_id", "type": "string", "required": true, "description": "Cache cluster identifier (lowercase, hyphens allowed)" }
+  ],
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create-cache-cluster",
+          "title": "Create cache cluster",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateCacheCluster&CacheClusterId={{inputs.cluster_id}}&Engine=redis&CacheNodeType=cache.t3.micro&NumCacheNodes=1&Version=2015-02-02"
+          },
+          "captures": [{ "name": "cache_cluster_id", "source": "CacheClusterId" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-cache-clusters",
+          "title": "Describe cache clusters",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DescribeCacheClusters&CacheClusterId={{captures.cache_cluster_id}}&Version=2015-02-02"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-cache-cluster",
+          "title": "Delete cache cluster",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteCacheCluster&CacheClusterId={{captures.cache_cluster_id}}&Version=2015-02-02"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}

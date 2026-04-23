@@ -519,12 +519,7 @@ async fn test_add_and_list_tags() {
     .await
     .unwrap();
 
-    let mut list_ctx = make_ctx(
-        "ListTags",
-        json!({}),
-        "/2021-01-01/tags",
-        "GET",
-    );
+    let mut list_ctx = make_ctx("ListTags", json!({}), "/2021-01-01/tags", "GET");
     list_ctx.query_params.insert("arn".to_string(), arn.clone());
     let resp = p.dispatch(&list_ctx).await.unwrap();
     assert_eq!(resp.status_code, 200);
@@ -606,9 +601,11 @@ async fn test_get_compatible_versions() {
     let b = body_json(&resp);
     let versions = b["CompatibleVersions"].as_array().unwrap();
     assert!(!versions.is_empty());
-    assert!(versions
-        .iter()
-        .any(|v| v["SourceVersion"].as_str().unwrap().contains("OpenSearch")));
+    assert!(
+        versions
+            .iter()
+            .any(|v| v["SourceVersion"].as_str().unwrap().contains("OpenSearch"))
+    );
 }
 
 #[tokio::test]
@@ -627,9 +624,11 @@ async fn test_list_versions() {
     let b = body_json(&resp);
     let versions = b["Versions"].as_array().unwrap();
     assert!(!versions.is_empty());
-    assert!(versions
-        .iter()
-        .any(|v| v.as_str().unwrap().starts_with("OpenSearch")));
+    assert!(
+        versions
+            .iter()
+            .any(|v| v.as_str().unwrap().starts_with("OpenSearch"))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -659,10 +658,7 @@ async fn test_start_and_cancel_service_software_update() {
         .unwrap();
     assert_eq!(start_resp.status_code, 200);
     let b = body_json(&start_resp);
-    assert_eq!(
-        b["ServiceSoftwareOptions"]["UpdateStatus"],
-        "IN_PROGRESS"
-    );
+    assert_eq!(b["ServiceSoftwareOptions"]["UpdateStatus"], "IN_PROGRESS");
     assert_eq!(b["ServiceSoftwareOptions"]["Cancellable"], true);
 
     let cancel_resp = p
@@ -676,10 +672,7 @@ async fn test_start_and_cancel_service_software_update() {
         .unwrap();
     assert_eq!(cancel_resp.status_code, 200);
     let cb = body_json(&cancel_resp);
-    assert_eq!(
-        cb["ServiceSoftwareOptions"]["UpdateStatus"],
-        "NOT_ELIGIBLE"
-    );
+    assert_eq!(cb["ServiceSoftwareOptions"]["UpdateStatus"], "NOT_ELIGIBLE");
     assert_eq!(cb["ServiceSoftwareOptions"]["Cancellable"], false);
 }
 

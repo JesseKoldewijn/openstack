@@ -276,7 +276,6 @@ async fn test_delete_parameters_batch() {
     assert_eq!(b["InvalidParameters"].as_array().unwrap().len(), 1);
 }
 
-
 // ---------------------------------------------------------------------------
 // GetParameterHistory
 // ---------------------------------------------------------------------------
@@ -298,7 +297,10 @@ async fn test_get_parameter_history() {
     .unwrap();
 
     let resp = p
-        .dispatch(&make_ctx("GetParameterHistory", json!({ "Name": "/hist/p" })))
+        .dispatch(&make_ctx(
+            "GetParameterHistory",
+            json!({ "Name": "/hist/p" }),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
@@ -349,7 +351,10 @@ async fn test_create_and_describe_document() {
     assert_eq!(b["DocumentDescription"]["Status"], "Active");
 
     let desc_resp = p
-        .dispatch(&make_ctx("DescribeDocument", json!({ "Name": "MyRunbook" })))
+        .dispatch(&make_ctx(
+            "DescribeDocument",
+            json!({ "Name": "MyRunbook" }),
+        ))
         .await
         .unwrap();
     assert_eq!(desc_resp.status_code, 200);
@@ -375,10 +380,12 @@ async fn test_create_document_duplicate_fails() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body(&resp)["__type"]
-        .as_str()
-        .unwrap()
-        .contains("DocumentAlreadyExists"));
+    assert!(
+        body(&resp)["__type"]
+            .as_str()
+            .unwrap()
+            .contains("DocumentAlreadyExists")
+    );
 }
 
 #[tokio::test]
@@ -583,8 +590,10 @@ async fn test_get_command_invocation_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body(&resp)["__type"]
-        .as_str()
-        .unwrap()
-        .contains("InvocationDoesNotExist"));
+    assert!(
+        body(&resp)["__type"]
+            .as_str()
+            .unwrap()
+            .contains("InvocationDoesNotExist")
+    );
 }

@@ -167,7 +167,12 @@ fn health_check_xml(hc: &HealthCheck) -> String {
         .config
         .fully_qualified_domain_name
         .as_deref()
-        .map(|f| format!("<FullyQualifiedDomainName>{}</FullyQualifiedDomainName>", xml_escape(f)))
+        .map(|f| {
+            format!(
+                "<FullyQualifiedDomainName>{}</FullyQualifiedDomainName>",
+                xml_escape(f)
+            )
+        })
         .unwrap_or_default();
     format!(
         "<Id>{}</Id>\
@@ -527,8 +532,7 @@ impl ServiceProvider for Route53Provider {
             // ----------------------------------------------------------------
             "CreateHealthCheck" => {
                 let raw = String::from_utf8_lossy(ctx.raw_body_bytes());
-                let caller_reference =
-                    xml_text(&raw, "CallerReference").unwrap_or_else(req_id);
+                let caller_reference = xml_text(&raw, "CallerReference").unwrap_or_else(req_id);
                 let health_check_type =
                     xml_text(&raw, "Type").unwrap_or_else(|| "HTTP".to_string());
                 let ip_address = xml_text(&raw, "IPAddress");
@@ -677,10 +681,7 @@ impl ServiceProvider for Route53Provider {
 
                 let raw = String::from_utf8_lossy(ctx.raw_body_bytes());
                 let mut store = self.store.get_or_create(account_id, ROUTE53_REGION);
-                let tag_map = store
-                    .tags
-                    .entry((resource_type, resource_id))
-                    .or_default();
+                let tag_map = store.tags.entry((resource_type, resource_id)).or_default();
 
                 // Parse <AddTags><Tag><Key>...</Key><Value>...</Value></Tag></AddTags>
                 let mut rest = raw.as_ref();
@@ -700,7 +701,9 @@ impl ServiceProvider for Route53Provider {
                 let mut remove_rest = raw.as_ref();
                 if let Some(remove_start) = remove_rest.find("<RemoveTagKeys>") {
                     let remove_chunk = &remove_rest[remove_start..];
-                    let remove_end = remove_chunk.find("</RemoveTagKeys>").unwrap_or(remove_chunk.len());
+                    let remove_end = remove_chunk
+                        .find("</RemoveTagKeys>")
+                        .unwrap_or(remove_chunk.len());
                     let remove_block = &remove_chunk[..remove_end];
                     remove_rest = remove_block;
                     while let Some(ks) = remove_rest.find("<Key>") {

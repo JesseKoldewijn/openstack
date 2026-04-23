@@ -489,7 +489,11 @@ impl ServiceProvider for CloudTrailProvider {
                     .cloned()
                     .unwrap_or_default();
 
-                let key = resource_id.rsplit('/').next().unwrap_or(&resource_id).to_string();
+                let key = resource_id
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&resource_id)
+                    .to_string();
                 let mut store = self.store.get_or_create(account_id, region);
                 if let Some(trail) = store.trails.get_mut(&key) {
                     for tag in &tag_list {
@@ -562,7 +566,11 @@ impl ServiceProvider for CloudTrailProvider {
                     .filter_map(|t| t.get("Key").and_then(|v| v.as_str()))
                     .collect();
 
-                let key = resource_id.rsplit('/').next().unwrap_or(&resource_id).to_string();
+                let key = resource_id
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&resource_id)
+                    .to_string();
                 let mut store = self.store.get_or_create(account_id, region);
                 if let Some(trail) = store.trails.get_mut(&key) {
                     for k in &keys {

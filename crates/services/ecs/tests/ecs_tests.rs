@@ -35,7 +35,10 @@ fn body_json(resp: &openstack_service_framework::traits::DispatchResponse) -> Va
 async fn test_create_cluster() {
     let p = EcsProvider::new();
     let resp = p
-        .dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "my-cluster" })))
+        .dispatch(&make_ctx(
+            "CreateCluster",
+            json!({ "clusterName": "my-cluster" }),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200);
@@ -51,11 +54,17 @@ async fn test_create_cluster() {
 #[tokio::test]
 async fn test_create_cluster_duplicate_fails() {
     let p = EcsProvider::new();
-    p.dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "dup-cluster" })))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateCluster",
+        json!({ "clusterName": "dup-cluster" }),
+    ))
+    .await
+    .unwrap();
     let resp = p
-        .dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "dup-cluster" })))
+        .dispatch(&make_ctx(
+            "CreateCluster",
+            json!({ "clusterName": "dup-cluster" }),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
@@ -73,7 +82,10 @@ async fn test_describe_and_list_clusters() {
     }
 
     let desc_resp = p
-        .dispatch(&make_ctx("DescribeClusters", json!({ "clusters": ["c1", "c2"] })))
+        .dispatch(&make_ctx(
+            "DescribeClusters",
+            json!({ "clusters": ["c1", "c2"] }),
+        ))
         .await
         .unwrap();
     assert_eq!(desc_resp.status_code, 200);
@@ -91,12 +103,18 @@ async fn test_describe_and_list_clusters() {
 #[tokio::test]
 async fn test_delete_cluster() {
     let p = EcsProvider::new();
-    p.dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "del-cluster" })))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateCluster",
+        json!({ "clusterName": "del-cluster" }),
+    ))
+    .await
+    .unwrap();
 
     let resp = p
-        .dispatch(&make_ctx("DeleteCluster", json!({ "cluster": "del-cluster" })))
+        .dispatch(&make_ctx(
+            "DeleteCluster",
+            json!({ "cluster": "del-cluster" }),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200);
@@ -120,7 +138,10 @@ async fn test_delete_cluster() {
 async fn test_delete_cluster_not_found() {
     let p = EcsProvider::new();
     let resp = p
-        .dispatch(&make_ctx("DeleteCluster", json!({ "cluster": "nonexistent" })))
+        .dispatch(&make_ctx(
+            "DeleteCluster",
+            json!({ "cluster": "nonexistent" }),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
@@ -268,9 +289,12 @@ async fn test_list_task_definitions() {
 #[tokio::test]
 async fn test_create_and_list_service() {
     let p = EcsProvider::new();
-    p.dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "svc-cluster" })))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateCluster",
+        json!({ "clusterName": "svc-cluster" }),
+    ))
+    .await
+    .unwrap();
     p.dispatch(&make_ctx(
         "RegisterTaskDefinition",
         json!({ "family": "web-task", "containerDefinitions": [] }),
@@ -297,7 +321,10 @@ async fn test_create_and_list_service() {
     assert_eq!(b["service"]["status"], "ACTIVE");
 
     let list_resp = p
-        .dispatch(&make_ctx("ListServices", json!({ "cluster": "svc-cluster" })))
+        .dispatch(&make_ctx(
+            "ListServices",
+            json!({ "cluster": "svc-cluster" }),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -312,9 +339,12 @@ async fn test_create_and_list_service() {
 #[tokio::test]
 async fn test_update_service() {
     let p = EcsProvider::new();
-    p.dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "upd-cluster" })))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateCluster",
+        json!({ "clusterName": "upd-cluster" }),
+    ))
+    .await
+    .unwrap();
     p.dispatch(&make_ctx(
         "CreateService",
         json!({
@@ -346,9 +376,12 @@ async fn test_update_service() {
 #[tokio::test]
 async fn test_delete_service() {
     let p = EcsProvider::new();
-    p.dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "del-svc-cluster" })))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateCluster",
+        json!({ "clusterName": "del-svc-cluster" }),
+    ))
+    .await
+    .unwrap();
     p.dispatch(&make_ctx(
         "CreateService",
         json!({
@@ -379,9 +412,12 @@ async fn test_delete_service() {
 #[tokio::test]
 async fn test_run_and_list_tasks() {
     let p = EcsProvider::new();
-    p.dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "task-cluster" })))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateCluster",
+        json!({ "clusterName": "task-cluster" }),
+    ))
+    .await
+    .unwrap();
     p.dispatch(&make_ctx(
         "RegisterTaskDefinition",
         json!({ "family": "run-task", "containerDefinitions": [] }),
@@ -418,9 +454,12 @@ async fn test_run_and_list_tasks() {
 #[tokio::test]
 async fn test_stop_task() {
     let p = EcsProvider::new();
-    p.dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "stop-cluster" })))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateCluster",
+        json!({ "clusterName": "stop-cluster" }),
+    ))
+    .await
+    .unwrap();
     p.dispatch(&make_ctx(
         "RegisterTaskDefinition",
         json!({ "family": "stop-task-def", "containerDefinitions": [] }),
@@ -464,9 +503,12 @@ async fn test_stop_task() {
 #[tokio::test]
 async fn test_describe_tasks() {
     let p = EcsProvider::new();
-    p.dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "desc-task-cluster" })))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateCluster",
+        json!({ "clusterName": "desc-task-cluster" }),
+    ))
+    .await
+    .unwrap();
     p.dispatch(&make_ctx(
         "RegisterTaskDefinition",
         json!({ "family": "desc-td", "containerDefinitions": [] }),

@@ -11,9 +11,7 @@ use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
-use crate::store::{
-    DbEndpoint, DbInstance, DbParameterGroup, DbSnapshot, DbSubnetGroup, RdsStore,
-};
+use crate::store::{DbEndpoint, DbInstance, DbParameterGroup, DbSnapshot, DbSubnetGroup, RdsStore};
 
 pub struct RdsProvider {
     store: Arc<AccountRegionBundle<RdsStore>>,
@@ -222,9 +220,7 @@ impl ServiceProvider for RdsProvider {
                     .unwrap_or("db.t3.micro")
                     .to_string();
                 let engine = str_param(ctx, "Engine").unwrap_or("mysql").to_string();
-                let engine_version = str_param(ctx, "EngineVersion")
-                    .unwrap_or("8.0")
-                    .to_string();
+                let engine_version = str_param(ctx, "EngineVersion").unwrap_or("8.0").to_string();
                 let master_username = str_param(ctx, "MasterUsername")
                     .unwrap_or("admin")
                     .to_string();
@@ -441,7 +437,12 @@ impl ServiceProvider for RdsProvider {
                         )
                     })
                     .unwrap_or_else(|| {
-                        ("mysql".to_string(), "8.0".to_string(), 20, "admin".to_string())
+                        (
+                            "mysql".to_string(),
+                            "8.0".to_string(),
+                            20,
+                            "admin".to_string(),
+                        )
                     });
                 let snap = DbSnapshot {
                     db_snapshot_identifier: snapshot_id.clone(),
@@ -630,10 +631,7 @@ impl ServiceProvider for RdsProvider {
                     status: "Complete".to_string(),
                 };
                 store.subnet_groups.insert(name, sg.clone());
-                let inner = format!(
-                    "<DBSubnetGroup>{}</DBSubnetGroup>",
-                    subnet_group_xml(&sg)
-                );
+                let inner = format!("<DBSubnetGroup>{}</DBSubnetGroup>", subnet_group_xml(&sg));
                 Ok(xml_resp("CreateDBSubnetGroup", &rid, &inner))
             }
 

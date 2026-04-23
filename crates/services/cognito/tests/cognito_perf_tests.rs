@@ -42,7 +42,12 @@ async fn perf_create_user_pool_throughput() {
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status_code, 200, "{}", String::from_utf8_lossy(resp.body.as_bytes()));
+        assert_eq!(
+            resp.status_code,
+            200,
+            "{}",
+            String::from_utf8_lossy(resp.body.as_bytes())
+        );
     }
     let elapsed = start.elapsed();
     assert!(
@@ -56,7 +61,10 @@ async fn perf_create_user_pool_throughput() {
 async fn perf_admin_create_user_throughput() {
     let p = CognitoProvider::new();
     let pool_resp = p
-        .dispatch(&make_ctx("CreateUserPool", json!({ "PoolName": "perf-user-pool" })))
+        .dispatch(&make_ctx(
+            "CreateUserPool",
+            json!({ "PoolName": "perf-user-pool" }),
+        ))
         .await
         .unwrap();
     let pool_id = body_json(&pool_resp)["UserPool"]["Id"]
@@ -77,7 +85,12 @@ async fn perf_admin_create_user_throughput() {
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status_code, 200, "{}", String::from_utf8_lossy(resp.body.as_bytes()));
+        assert_eq!(
+            resp.status_code,
+            200,
+            "{}",
+            String::from_utf8_lossy(resp.body.as_bytes())
+        );
     }
     let elapsed = start.elapsed();
     assert!(
@@ -91,7 +104,10 @@ async fn perf_admin_create_user_throughput() {
 async fn perf_list_users_many() {
     let p = CognitoProvider::new();
     let pool_resp = p
-        .dispatch(&make_ctx("CreateUserPool", json!({ "PoolName": "perf-list-pool" })))
+        .dispatch(&make_ctx(
+            "CreateUserPool",
+            json!({ "PoolName": "perf-list-pool" }),
+        ))
         .await
         .unwrap();
     let pool_id = body_json(&pool_resp)["UserPool"]["Id"]
@@ -115,10 +131,7 @@ async fn perf_list_users_many() {
         .unwrap();
     let elapsed = start.elapsed();
     assert_eq!(resp.status_code, 200);
-    assert_eq!(
-        body_json(&resp)["Users"].as_array().unwrap().len(),
-        n
-    );
+    assert_eq!(body_json(&resp)["Users"].as_array().unwrap().len(), n);
     assert!(
         elapsed.as_millis() < 500,
         "ListUsers({n}) took {}ms — expected <500ms",

@@ -109,7 +109,15 @@ fn domain_status_json(d: &Domain) -> Value {
 
 // Static list of compatible OpenSearch/Elasticsearch upgrade paths
 static COMPATIBLE_VERSIONS: &[(&str, &[&str])] = &[
-    ("Elasticsearch_7.10", &["OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"]),
+    (
+        "Elasticsearch_7.10",
+        &[
+            "OpenSearch_1.0",
+            "OpenSearch_1.1",
+            "OpenSearch_1.2",
+            "OpenSearch_1.3",
+        ],
+    ),
     ("OpenSearch_1.3", &["OpenSearch_2.3", "OpenSearch_2.5"]),
     ("OpenSearch_2.3", &["OpenSearch_2.5", "OpenSearch_2.7"]),
     ("OpenSearch_2.5", &["OpenSearch_2.7", "OpenSearch_2.11"]),
@@ -524,12 +532,10 @@ impl ServiceProvider for OpenSearchProvider {
             // ----------------------------------------------------------------
             // ListVersions  GET /2021-01-01/opensearch/versions
             // ----------------------------------------------------------------
-            "ListVersions" => {
-                Ok(json_ok(json!({
-                    "Versions": SUPPORTED_VERSIONS,
-                    "NextToken": null,
-                })))
-            }
+            "ListVersions" => Ok(json_ok(json!({
+                "Versions": SUPPORTED_VERSIONS,
+                "NextToken": null,
+            }))),
 
             // ----------------------------------------------------------------
             // StartServiceSoftwareUpdate  POST /2021-01-01/opensearch/serviceSoftwareUpdate/start
@@ -548,8 +554,7 @@ impl ServiceProvider for OpenSearchProvider {
                 let mut store = self.store.get_or_create(account_id, region);
                 match store.domains.get_mut(&domain_name) {
                     Some(domain) => {
-                        domain.service_software_options.update_status =
-                            "IN_PROGRESS".to_string();
+                        domain.service_software_options.update_status = "IN_PROGRESS".to_string();
                         domain.service_software_options.update_available = false;
                         domain.service_software_options.cancellable = true;
                         domain.service_software_options.description =
@@ -591,8 +596,7 @@ impl ServiceProvider for OpenSearchProvider {
                 let mut store = self.store.get_or_create(account_id, region);
                 match store.domains.get_mut(&domain_name) {
                     Some(domain) => {
-                        domain.service_software_options.update_status =
-                            "NOT_ELIGIBLE".to_string();
+                        domain.service_software_options.update_status = "NOT_ELIGIBLE".to_string();
                         domain.service_software_options.cancellable = false;
                         domain.service_software_options.description =
                             "Service software update was cancelled.".to_string();

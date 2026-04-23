@@ -361,10 +361,7 @@ async fn test_get_send_statistics_after_sends() {
 async fn test_create_and_get_template() {
     let p = SesProvider::new();
     let mut params = HashMap::new();
-    params.insert(
-        "Template.TemplateName".to_string(),
-        "welcome".to_string(),
-    );
+    params.insert("Template.TemplateName".to_string(), "welcome".to_string());
     params.insert(
         "Template.SubjectPart".to_string(),
         "Welcome {{name}}!".to_string(),
@@ -373,10 +370,7 @@ async fn test_create_and_get_template() {
         "Template.HtmlPart".to_string(),
         "<h1>Hi {{name}}</h1>".to_string(),
     );
-    params.insert(
-        "Template.TextPart".to_string(),
-        "Hi {{name}}".to_string(),
-    );
+    params.insert("Template.TextPart".to_string(), "Hi {{name}}".to_string());
     let resp = p
         .dispatch(&make_ctx("CreateTemplate", params))
         .await
@@ -420,10 +414,7 @@ async fn test_get_template_not_found() {
     let p = SesProvider::new();
     let mut params = HashMap::new();
     params.insert("TemplateName".to_string(), "nonexistent".to_string());
-    let resp = p
-        .dispatch(&make_ctx("GetTemplate", params))
-        .await
-        .unwrap();
+    let resp = p.dispatch(&make_ctx("GetTemplate", params)).await.unwrap();
     assert_eq!(resp.status_code, 400);
     let body = body_str(&resp);
     assert!(body.contains("TemplateDoesNotExist"));
@@ -551,10 +542,7 @@ async fn test_set_identity_feedback_forwarding_enabled() {
     params.insert("Identity".to_string(), "notif@example.com".to_string());
     params.insert("ForwardingEnabled".to_string(), "false".to_string());
     let resp = p
-        .dispatch(&make_ctx(
-            "SetIdentityFeedbackForwardingEnabled",
-            params,
-        ))
+        .dispatch(&make_ctx("SetIdentityFeedbackForwardingEnabled", params))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200);
@@ -566,10 +554,7 @@ async fn test_set_identity_feedback_forwarding_enabled() {
 async fn test_get_identity_notification_attributes() {
     let p = SesProvider::new();
     let mut verify = HashMap::new();
-    verify.insert(
-        "EmailAddress".to_string(),
-        "notif2@example.com".to_string(),
-    );
+    verify.insert("EmailAddress".to_string(), "notif2@example.com".to_string());
     p.dispatch(&make_ctx("VerifyEmailIdentity", verify))
         .await
         .unwrap();

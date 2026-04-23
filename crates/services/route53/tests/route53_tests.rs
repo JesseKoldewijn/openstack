@@ -689,18 +689,18 @@ async fn test_change_and_list_tags_for_resource() {
 </ChangeTagsForResourceRequest>";
     let tag_path = format!("/2013-04-01/tags/hostedzone/{zone_id}");
     let resp = p
-        .dispatch(&make_ctx("ChangeTagsForResource", tag_xml, &tag_path, "POST"))
+        .dispatch(&make_ctx(
+            "ChangeTagsForResource",
+            tag_xml,
+            &tag_path,
+            "POST",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200);
 
     let list_resp = p
-        .dispatch(&make_ctx(
-            "ListTagsForResource",
-            "",
-            &tag_path,
-            "GET",
-        ))
+        .dispatch(&make_ctx("ListTagsForResource", "", &tag_path, "GET"))
         .await
         .unwrap();
     assert_eq!(list_resp.status_code, 200);

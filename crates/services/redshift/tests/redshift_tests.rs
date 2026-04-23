@@ -323,10 +323,7 @@ async fn test_create_and_describe_snapshot() {
         .unwrap();
 
     let mut params = HashMap::new();
-    params.insert(
-        "SnapshotIdentifier".to_string(),
-        "snap-001".to_string(),
-    );
+    params.insert("SnapshotIdentifier".to_string(), "snap-001".to_string());
     params.insert("ClusterIdentifier".to_string(), "snap-cluster".to_string());
     let resp = p
         .dispatch(&make_ctx("CreateClusterSnapshot", params))
@@ -436,10 +433,7 @@ async fn test_describe_snapshots_filtered_by_cluster() {
 async fn test_create_and_describe_subnet_group() {
     let p = RedshiftProvider::new();
     let mut params = HashMap::new();
-    params.insert(
-        "ClusterSubnetGroupName".to_string(),
-        "my-sg".to_string(),
-    );
+    params.insert("ClusterSubnetGroupName".to_string(), "my-sg".to_string());
     params.insert("Description".to_string(), "test subnet group".to_string());
     params.insert("VpcId".to_string(), "vpc-12345".to_string());
     params.insert(
@@ -515,10 +509,7 @@ async fn test_delete_subnet_group_not_found() {
 async fn test_create_and_describe_parameter_group() {
     let p = RedshiftProvider::new();
     let mut params = HashMap::new();
-    params.insert(
-        "ParameterGroupName".to_string(),
-        "my-pg".to_string(),
-    );
+    params.insert("ParameterGroupName".to_string(), "my-pg".to_string());
     params.insert(
         "ParameterGroupFamily".to_string(),
         "redshift-1.0".to_string(),

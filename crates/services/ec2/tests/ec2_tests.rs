@@ -471,14 +471,13 @@ async fn test_delete_key_pair() {
     let p = Ec2Provider::new();
     let mut params = HashMap::new();
     params.insert("KeyName".to_string(), "del-key".to_string());
-    p.dispatch(&make_ctx("CreateKeyPair", params)).await.unwrap();
+    p.dispatch(&make_ctx("CreateKeyPair", params))
+        .await
+        .unwrap();
 
     let mut del = HashMap::new();
     del.insert("KeyName".to_string(), "del-key".to_string());
-    let resp = p
-        .dispatch(&make_ctx("DeleteKeyPair", del))
-        .await
-        .unwrap();
+    let resp = p.dispatch(&make_ctx("DeleteKeyPair", del)).await.unwrap();
     assert_eq!(resp.status_code, 200);
 
     let desc = p
@@ -559,10 +558,7 @@ async fn test_release_address() {
 
     let mut rel = HashMap::new();
     rel.insert("AllocationId".to_string(), allocation_id.clone());
-    let resp = p
-        .dispatch(&make_ctx("ReleaseAddress", rel))
-        .await
-        .unwrap();
+    let resp = p.dispatch(&make_ctx("ReleaseAddress", rel)).await.unwrap();
     assert_eq!(resp.status_code, 200);
 
     let desc = p
@@ -669,10 +665,7 @@ async fn test_create_and_describe_volume() {
     params.insert("AvailabilityZone".to_string(), "us-east-1a".to_string());
     params.insert("Size".to_string(), "20".to_string());
     params.insert("VolumeType".to_string(), "gp3".to_string());
-    let resp = p
-        .dispatch(&make_ctx("CreateVolume", params))
-        .await
-        .unwrap();
+    let resp = p.dispatch(&make_ctx("CreateVolume", params)).await.unwrap();
     assert_eq!(resp.status_code, 200);
     let body = body_str(&resp);
     assert!(body.contains("<volumeId>vol-"));
@@ -733,10 +726,7 @@ async fn test_delete_volume() {
 
     let mut del = HashMap::new();
     del.insert("VolumeId".to_string(), volume_id.clone());
-    let resp = p
-        .dispatch(&make_ctx("DeleteVolume", del))
-        .await
-        .unwrap();
+    let resp = p.dispatch(&make_ctx("DeleteVolume", del)).await.unwrap();
     assert_eq!(resp.status_code, 200);
 
     let desc = p
@@ -764,10 +754,7 @@ async fn test_create_and_describe_tags() {
     tag_p.insert("Tag.1.Value".to_string(), "my-vpc".to_string());
     tag_p.insert("Tag.2.Key".to_string(), "Env".to_string());
     tag_p.insert("Tag.2.Value".to_string(), "test".to_string());
-    let resp = p
-        .dispatch(&make_ctx("CreateTags", tag_p))
-        .await
-        .unwrap();
+    let resp = p.dispatch(&make_ctx("CreateTags", tag_p)).await.unwrap();
     assert_eq!(resp.status_code, 200);
 
     let desc = p

@@ -132,7 +132,12 @@ fn subnet_group_xml(sg: &ClusterSubnetGroup) -> String {
     let subnets: String = sg
         .subnet_ids
         .iter()
-        .map(|id| format!("<member><SubnetIdentifier>{}</SubnetIdentifier></member>", xml_escape(id)))
+        .map(|id| {
+            format!(
+                "<member><SubnetIdentifier>{}</SubnetIdentifier></member>",
+                xml_escape(id)
+            )
+        })
         .collect();
     format!(
         "<ClusterSubnetGroupName>{}</ClusterSubnetGroupName>\
@@ -411,7 +416,9 @@ impl ServiceProvider for RedshiftProvider {
                     db_name,
                     master_username,
                 };
-                store.snapshots.insert(snapshot_id.clone(), snapshot.clone());
+                store
+                    .snapshots
+                    .insert(snapshot_id.clone(), snapshot.clone());
                 let inner = format!("<Snapshot>{}</Snapshot>", snapshot_xml(&snapshot));
                 Ok(xml_resp("CreateClusterSnapshot", &rid, &inner))
             }
@@ -545,11 +552,7 @@ impl ServiceProvider for RedshiftProvider {
                         400,
                     ));
                 }
-                Ok(xml_resp(
-                    "DeleteClusterSubnetGroup",
-                    &rid,
-                    "",
-                ))
+                Ok(xml_resp("DeleteClusterSubnetGroup", &rid, ""))
             }
 
             // ----------------------------------------------------------------
@@ -566,15 +569,9 @@ impl ServiceProvider for RedshiftProvider {
                 let items_xml: String = store
                     .subnet_groups
                     .values()
-                    .map(|sg| {
-                        format!(
-                            "<member>{}</member>",
-                            subnet_group_xml(sg)
-                        )
-                    })
+                    .map(|sg| format!("<member>{}</member>", subnet_group_xml(sg)))
                     .collect();
-                let inner =
-                    format!("<ClusterSubnetGroups>{items_xml}</ClusterSubnetGroups>");
+                let inner = format!("<ClusterSubnetGroups>{items_xml}</ClusterSubnetGroups>");
                 Ok(xml_resp("DescribeClusterSubnetGroups", &rid, &inner))
             }
 
@@ -659,8 +656,7 @@ impl ServiceProvider for RedshiftProvider {
                     .values()
                     .map(|pg| format!("<member>{}</member>", param_group_xml(pg)))
                     .collect();
-                let inner =
-                    format!("<ParameterGroups>{items_xml}</ParameterGroups>");
+                let inner = format!("<ParameterGroups>{items_xml}</ParameterGroups>");
                 Ok(xml_resp("DescribeClusterParameterGroups", &rid, &inner))
             }
 

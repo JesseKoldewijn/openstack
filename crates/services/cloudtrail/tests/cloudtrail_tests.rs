@@ -62,27 +62,36 @@ async fn test_create_trail() {
 async fn test_create_trail_duplicate_fails() {
     let p = CloudTrailProvider::new();
     let body = json!({ "Name": "dup-trail", "S3BucketName": "bucket" });
-    p.dispatch(&make_ctx("CreateTrail", body.clone())).await.unwrap();
+    p.dispatch(&make_ctx("CreateTrail", body.clone()))
+        .await
+        .unwrap();
     let resp = p.dispatch(&make_ctx("CreateTrail", body)).await.unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body_json(&resp)["__type"]
-        .as_str()
-        .unwrap()
-        .contains("TrailAlreadyExistsException"));
+    assert!(
+        body_json(&resp)["__type"]
+            .as_str()
+            .unwrap()
+            .contains("TrailAlreadyExistsException")
+    );
 }
 
 #[tokio::test]
 async fn test_create_trail_missing_bucket_fails() {
     let p = CloudTrailProvider::new();
     let resp = p
-        .dispatch(&make_ctx("CreateTrail", json!({ "Name": "no-bucket-trail" })))
+        .dispatch(&make_ctx(
+            "CreateTrail",
+            json!({ "Name": "no-bucket-trail" }),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body_json(&resp)["__type"]
-        .as_str()
-        .unwrap()
-        .contains("InvalidS3BucketNameException"));
+    assert!(
+        body_json(&resp)["__type"]
+            .as_str()
+            .unwrap()
+            .contains("InvalidS3BucketNameException")
+    );
 }
 
 #[tokio::test]
@@ -158,10 +167,12 @@ async fn test_get_trail_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 404);
-    assert!(body_json(&resp)["__type"]
-        .as_str()
-        .unwrap()
-        .contains("TrailNotFoundException"));
+    assert!(
+        body_json(&resp)["__type"]
+            .as_str()
+            .unwrap()
+            .contains("TrailNotFoundException")
+    );
 }
 
 #[tokio::test]
@@ -184,7 +195,10 @@ async fn test_delete_trail() {
         .dispatch(&make_ctx("DescribeTrails", json!({})))
         .await
         .unwrap();
-    let trails = body_json(&desc_resp)["trailList"].as_array().unwrap().clone();
+    let trails = body_json(&desc_resp)["trailList"]
+        .as_array()
+        .unwrap()
+        .clone();
     assert!(!trails.iter().any(|t| t["Name"] == "del-trail"));
 }
 
@@ -196,10 +210,12 @@ async fn test_delete_trail_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
-    assert!(body_json(&resp)["__type"]
-        .as_str()
-        .unwrap()
-        .contains("TrailNotFoundException"));
+    assert!(
+        body_json(&resp)["__type"]
+            .as_str()
+            .unwrap()
+            .contains("TrailNotFoundException")
+    );
 }
 
 #[tokio::test]
@@ -339,7 +355,9 @@ async fn test_add_and_list_tags() {
     let b = body_json(&list_resp);
     let tag_list = b["ResourceTagList"][0]["TagsList"].as_array().unwrap();
     assert_eq!(tag_list.len(), 2);
-    assert!(tag_list
-        .iter()
-        .any(|t| t["Key"] == "env" && t["Value"] == "prod"));
+    assert!(
+        tag_list
+            .iter()
+            .any(|t| t["Key"] == "env" && t["Value"] == "prod")
+    );
 }

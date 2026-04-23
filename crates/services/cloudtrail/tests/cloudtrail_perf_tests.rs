@@ -45,7 +45,12 @@ async fn perf_create_trail_throughput() {
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status_code, 200, "{}", String::from_utf8_lossy(resp.body.as_bytes()));
+        assert_eq!(
+            resp.status_code,
+            200,
+            "{}",
+            String::from_utf8_lossy(resp.body.as_bytes())
+        );
     }
     let elapsed = start.elapsed();
     assert!(

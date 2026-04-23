@@ -60,11 +60,17 @@ async fn test_create_db_instance() {
 #[tokio::test]
 async fn test_create_db_instance_duplicate_fails() {
     let p = RdsProvider::new();
-    p.dispatch(&make_ctx("CreateDBInstance", base_instance_params("dup-db")))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateDBInstance",
+        base_instance_params("dup-db"),
+    ))
+    .await
+    .unwrap();
     let resp = p
-        .dispatch(&make_ctx("CreateDBInstance", base_instance_params("dup-db")))
+        .dispatch(&make_ctx(
+            "CreateDBInstance",
+            base_instance_params("dup-db"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 400);
@@ -224,10 +230,7 @@ async fn test_create_and_describe_snapshot() {
 
     let mut params = HashMap::new();
     params.insert("DBInstanceIdentifier".to_string(), "snap-db".to_string());
-    params.insert(
-        "DBSnapshotIdentifier".to_string(),
-        "snap-001".to_string(),
-    );
+    params.insert("DBSnapshotIdentifier".to_string(), "snap-001".to_string());
     let resp = p
         .dispatch(&make_ctx("CreateDBSnapshot", params))
         .await
@@ -261,12 +264,14 @@ async fn test_delete_snapshot() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200);
-    assert!(!body_str(
-        &p.dispatch(&make_ctx("DescribeDBSnapshots", HashMap::new()))
-            .await
-            .unwrap()
-    )
-    .contains("del-snap"));
+    assert!(
+        !body_str(
+            &p.dispatch(&make_ctx("DescribeDBSnapshots", HashMap::new()))
+                .await
+                .unwrap()
+        )
+        .contains("del-snap")
+    );
 }
 
 #[tokio::test]
@@ -302,10 +307,7 @@ async fn test_restore_db_instance_from_snapshot() {
         "restore-snap".to_string(),
     );
     let resp = p
-        .dispatch(&make_ctx(
-            "RestoreDBInstanceFromDBSnapshot",
-            restore_params,
-        ))
+        .dispatch(&make_ctx("RestoreDBInstanceFromDBSnapshot", restore_params))
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200);
@@ -322,10 +324,7 @@ async fn test_restore_db_instance_from_snapshot() {
 async fn test_create_and_describe_subnet_group() {
     let p = RdsProvider::new();
     let mut params = HashMap::new();
-    params.insert(
-        "DBSubnetGroupName".to_string(),
-        "my-rds-sg".to_string(),
-    );
+    params.insert("DBSubnetGroupName".to_string(), "my-rds-sg".to_string());
     params.insert(
         "DBSubnetGroupDescription".to_string(),
         "test subnet group".to_string(),
@@ -372,12 +371,14 @@ async fn test_delete_subnet_group() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200);
-    assert!(!body_str(
-        &p.dispatch(&make_ctx("DescribeDBSubnetGroups", HashMap::new()))
-            .await
-            .unwrap()
-    )
-    .contains("sg-del"));
+    assert!(
+        !body_str(
+            &p.dispatch(&make_ctx("DescribeDBSubnetGroups", HashMap::new()))
+                .await
+                .unwrap()
+        )
+        .contains("sg-del")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -388,14 +389,8 @@ async fn test_delete_subnet_group() {
 async fn test_create_and_describe_parameter_group() {
     let p = RdsProvider::new();
     let mut params = HashMap::new();
-    params.insert(
-        "DBParameterGroupName".to_string(),
-        "my-pg".to_string(),
-    );
-    params.insert(
-        "DBParameterGroupFamily".to_string(),
-        "mysql8.0".to_string(),
-    );
+    params.insert("DBParameterGroupName".to_string(), "my-pg".to_string());
+    params.insert("DBParameterGroupFamily".to_string(), "mysql8.0".to_string());
     params.insert("Description".to_string(), "test pg".to_string());
     let resp = p
         .dispatch(&make_ctx("CreateDBParameterGroup", params))
@@ -429,10 +424,12 @@ async fn test_delete_parameter_group() {
         .await
         .unwrap();
     assert_eq!(resp.status_code, 200);
-    assert!(!body_str(
-        &p.dispatch(&make_ctx("DescribeDBParameterGroups", HashMap::new()))
-            .await
-            .unwrap()
-    )
-    .contains("pg-del"));
+    assert!(
+        !body_str(
+            &p.dispatch(&make_ctx("DescribeDBParameterGroups", HashMap::new()))
+                .await
+                .unwrap()
+        )
+        .contains("pg-del")
+    );
 }

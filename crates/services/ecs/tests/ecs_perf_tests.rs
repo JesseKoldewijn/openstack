@@ -42,7 +42,12 @@ async fn perf_create_cluster_throughput() {
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status_code, 200, "{}", String::from_utf8_lossy(resp.body.as_bytes()));
+        assert_eq!(
+            resp.status_code,
+            200,
+            "{}",
+            String::from_utf8_lossy(resp.body.as_bytes())
+        );
     }
     let elapsed = start.elapsed();
     assert!(
@@ -96,7 +101,12 @@ async fn perf_register_task_definition_throughput() {
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status_code, 200, "{}", String::from_utf8_lossy(resp.body.as_bytes()));
+        assert_eq!(
+            resp.status_code,
+            200,
+            "{}",
+            String::from_utf8_lossy(resp.body.as_bytes())
+        );
     }
     let elapsed = start.elapsed();
     assert!(
@@ -109,9 +119,12 @@ async fn perf_register_task_definition_throughput() {
 #[tokio::test]
 async fn perf_run_task_throughput() {
     let p = EcsProvider::new();
-    p.dispatch(&make_ctx("CreateCluster", json!({ "clusterName": "perf-run-cluster" })))
-        .await
-        .unwrap();
+    p.dispatch(&make_ctx(
+        "CreateCluster",
+        json!({ "clusterName": "perf-run-cluster" }),
+    ))
+    .await
+    .unwrap();
     p.dispatch(&make_ctx(
         "RegisterTaskDefinition",
         json!({ "family": "perf-run-td", "containerDefinitions": [] }),
@@ -133,7 +146,12 @@ async fn perf_run_task_throughput() {
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status_code, 200, "{}", String::from_utf8_lossy(resp.body.as_bytes()));
+        assert_eq!(
+            resp.status_code,
+            200,
+            "{}",
+            String::from_utf8_lossy(resp.body.as_bytes())
+        );
     }
     let elapsed = start.elapsed();
     assert!(

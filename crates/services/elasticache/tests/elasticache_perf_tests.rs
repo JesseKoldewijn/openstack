@@ -36,7 +36,10 @@ async fn perf_create_cache_cluster_throughput() {
         let mut params = HashMap::new();
         params.insert("CacheClusterId".to_string(), format!("perf-cluster-{i:03}"));
         params.insert("Engine".to_string(), "redis".to_string());
-        let resp = svc.dispatch(&make_ctx("CreateCacheCluster", params)).await.unwrap();
+        let resp = svc
+            .dispatch(&make_ctx("CreateCacheCluster", params))
+            .await
+            .unwrap();
         assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
     }
     let elapsed = start.elapsed();
@@ -55,10 +58,15 @@ async fn perf_describe_cache_clusters_many() {
         let mut params = HashMap::new();
         params.insert("CacheClusterId".to_string(), format!("list-cluster-{i:03}"));
         params.insert("Engine".to_string(), "redis".to_string());
-        svc.dispatch(&make_ctx("CreateCacheCluster", params)).await.unwrap();
+        svc.dispatch(&make_ctx("CreateCacheCluster", params))
+            .await
+            .unwrap();
     }
     let start = Instant::now();
-    let resp = svc.dispatch(&make_ctx("DescribeCacheClusters", HashMap::new())).await.unwrap();
+    let resp = svc
+        .dispatch(&make_ctx("DescribeCacheClusters", HashMap::new()))
+        .await
+        .unwrap();
     let elapsed = start.elapsed();
     assert_eq!(resp.status_code, 200);
     assert!(body_str(&resp).contains("list-cluster-000"));

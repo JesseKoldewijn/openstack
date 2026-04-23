@@ -455,7 +455,9 @@ impl ServiceProvider for CognitoProvider {
                             .collect()
                     })
                     .unwrap_or_default();
-                Ok(json_ok(json!({ "UserPoolClients": clients, "NextToken": null })))
+                Ok(json_ok(
+                    json!({ "UserPoolClients": clients, "NextToken": null }),
+                ))
             }
 
             // ----------------------------------------------------------------
@@ -791,12 +793,12 @@ impl ServiceProvider for CognitoProvider {
                 match store.users.get_mut(&key) {
                     Some(user) => {
                         for (name, value) in updates {
-                            if let Some(attr) =
-                                user.attributes.iter_mut().find(|a| a.name == name)
+                            if let Some(attr) = user.attributes.iter_mut().find(|a| a.name == name)
                             {
                                 attr.value = value;
                             } else {
-                                user.attributes.push(crate::store::UserAttribute { name, value });
+                                user.attributes
+                                    .push(crate::store::UserAttribute { name, value });
                             }
                         }
                         user.user_last_modified_date = Utc::now();

@@ -17,7 +17,7 @@ pub struct CacheClusterEndpoint {
 pub struct CacheCluster {
     pub cache_cluster_id: String,
     pub cache_node_type: String,
-    pub engine: String,        // "redis" | "memcached"
+    pub engine: String, // "redis" | "memcached"
     pub engine_version: String,
     pub cache_cluster_status: String, // "available" | "creating" | "deleting"
     pub num_cache_nodes: u32,
@@ -35,7 +35,7 @@ pub struct CacheCluster {
 pub struct ReplicationGroup {
     pub replication_group_id: String,
     pub description: String,
-    pub status: String, // "available" | "creating" | "deleting"
+    pub status: String,             // "available" | "creating" | "deleting"
     pub automatic_failover: String, // "enabled" | "disabled"
     pub multi_az: String,           // "enabled" | "disabled"
     pub num_cache_clusters: u32,

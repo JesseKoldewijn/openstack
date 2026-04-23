@@ -348,8 +348,12 @@ impl ServiceProvider for SesProvider {
                 let subject_part = str_param(ctx, "Template.SubjectPart")
                     .unwrap_or("")
                     .to_string();
-                let html_part = str_param(ctx, "Template.HtmlPart").unwrap_or("").to_string();
-                let text_part = str_param(ctx, "Template.TextPart").unwrap_or("").to_string();
+                let html_part = str_param(ctx, "Template.HtmlPart")
+                    .unwrap_or("")
+                    .to_string();
+                let text_part = str_param(ctx, "Template.TextPart")
+                    .unwrap_or("")
+                    .to_string();
 
                 let mut store = self.store.get_or_create(account_id, region);
                 if store.templates.contains_key(&template_name) {
@@ -379,11 +383,7 @@ impl ServiceProvider for SesProvider {
                 let template_name = match str_param(ctx, "TemplateName") {
                     Some(n) => n.to_string(),
                     None => {
-                        return Ok(xml_error(
-                            "MissingParameter",
-                            "TemplateName required",
-                            400,
-                        ));
+                        return Ok(xml_error("MissingParameter", "TemplateName required", 400));
                     }
                 };
                 let mut store = self.store.get_or_create(account_id, region);
@@ -398,11 +398,7 @@ impl ServiceProvider for SesProvider {
                 let template_name = match str_param(ctx, "TemplateName") {
                     Some(n) => n.to_string(),
                     None => {
-                        return Ok(xml_error(
-                            "MissingParameter",
-                            "TemplateName required",
-                            400,
-                        ));
+                        return Ok(xml_error("MissingParameter", "TemplateName required", 400));
                     }
                 };
                 let Some(store) = self.store.get(account_id, region) else {
@@ -438,11 +434,7 @@ impl ServiceProvider for SesProvider {
             // ----------------------------------------------------------------
             "ListTemplates" => {
                 let Some(store) = self.store.get(account_id, region) else {
-                    return Ok(xml_resp(
-                        "ListTemplates",
-                        &rid,
-                        "<TemplatesMetadata />",
-                    ));
+                    return Ok(xml_resp("ListTemplates", &rid, "<TemplatesMetadata />"));
                 };
                 let members: String = store
                     .templates
@@ -533,10 +525,7 @@ impl ServiceProvider for SesProvider {
                     .map(|v| v.eq_ignore_ascii_case("true"))
                     .unwrap_or(true);
                 let mut store = self.store.get_or_create(account_id, region);
-                let attrs = store
-                    .notification_attrs
-                    .entry(identity)
-                    .or_default();
+                let attrs = store.notification_attrs.entry(identity).or_default();
                 attrs.forwarding_enabled = enabled;
                 Ok(xml_no_result("SetIdentityFeedbackForwardingEnabled", &rid))
             }
@@ -584,8 +573,7 @@ impl ServiceProvider for SesProvider {
                             .collect::<String>()
                     })
                     .unwrap_or_default();
-                let inner =
-                    format!("<NotificationAttributes>{entries}</NotificationAttributes>");
+                let inner = format!("<NotificationAttributes>{entries}</NotificationAttributes>");
                 Ok(xml_resp("GetIdentityNotificationAttributes", &rid, &inner))
             }
 

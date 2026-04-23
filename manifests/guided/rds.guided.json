@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.2",
+  "service": "rds",
+  "protocol": "query",
+  "inputs": [
+    { "name": "db_instance_id", "type": "string", "required": true, "description": "DB instance identifier (lowercase, hyphens allowed)" }
+  ],
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create-db-instance",
+          "title": "Create DB instance",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateDBInstance&DBInstanceIdentifier={{inputs.db_instance_id}}&DBInstanceClass=db.t3.micro&Engine=mysql&MasterUsername=admin&MasterUserPassword=Passw0rd%21&Version=2014-10-31"
+          },
+          "captures": [{ "name": "db_id", "source": "DBInstanceIdentifier" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-db-instances",
+          "title": "Describe DB instances",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DescribeDBInstances&DBInstanceIdentifier={{captures.db_id}}&Version=2014-10-31"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "create-db-snapshot",
+          "title": "Create DB snapshot",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=CreateDBSnapshot&DBInstanceIdentifier={{captures.db_id}}&DBSnapshotIdentifier={{captures.db_id}}-snap&Version=2014-10-31"
+          },
+          "captures": [{ "name": "snapshot_id", "source": "DBSnapshotIdentifier" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-db-snapshot",
+          "title": "Delete DB snapshot",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteDBSnapshot&DBSnapshotIdentifier={{captures.snapshot_id}}&Version=2014-10-31"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "delete-db-instance",
+          "title": "Delete DB instance",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "body": "Action=DeleteDBInstance&DBInstanceIdentifier={{captures.db_id}}&SkipFinalSnapshot=true&Version=2014-10-31"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}
