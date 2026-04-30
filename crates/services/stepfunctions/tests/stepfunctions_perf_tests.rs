@@ -61,6 +61,22 @@ async fn create_machine(p: &StepFunctionsProvider, name: &str) -> String {
     body(&resp)["stateMachineArn"].as_str().unwrap().to_string()
 }
 
+async fn start_execution(p: &StepFunctionsProvider, arn: &str, name: &str) -> String {
+    let resp = p
+        .dispatch(&make_ctx(
+            "StartExecution",
+            json!({
+                "stateMachineArn": arn,
+                "input": serde_json::to_string(&json!({ "name": name })).unwrap(),
+                "name": name,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    body(&resp)["executionArn"].as_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn perf_create_state_machine_throughput() {
     let p = StepFunctionsProvider::new();
@@ -141,6 +157,34 @@ async fn perf_start_execution_throughput() {
     assert!(
         elapsed.as_millis() < 2000,
         "StartExecution x{n} took {}ms — expected <2000ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_start_and_describe_execution_round_trip() {
+    let p = StepFunctionsProvider::new();
+    let arn = create_machine(&p, "perf-describe-exec-machine").await;
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let execution_arn = start_execution(&p, &arn, &format!("perf-exec-{i:03}")).await;
+        let resp = p
+            .dispatch(&make_ctx(
+                "DescribeExecution",
+                json!({ "executionArn": execution_arn }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(body(&resp)["status"], "SUCCEEDED");
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2000,
+        "StartExecution+DescribeExecution round-trip x{n} took {}ms — expected <2000ms",
         elapsed.as_millis()
     );
 }
