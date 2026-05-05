@@ -44,6 +44,19 @@ async fn create_domain(p: &OpenSearchProvider, name: &str) {
     assert_eq!(resp.status_code, 200);
 }
 
+async fn delete_domain(p: &OpenSearchProvider, name: &str) {
+    let resp = p
+        .dispatch(&make_ctx(
+            "DeleteDomain",
+            json!({}),
+            &format!("/2021-01-01/opensearch/domain/{name}"),
+            "DELETE",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+}
+
 #[tokio::test]
 async fn perf_create_domain_throughput() {
     let p = OpenSearchProvider::new();
@@ -149,6 +162,26 @@ async fn perf_describe_domain_config_many() {
     assert!(
         elapsed.as_millis() < 1000,
         "DescribeDomainConfig x100 took {}ms — expected <1000ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_create_and_delete_domain_round_trip() {
+    let p = OpenSearchProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let name = format!("perf-delete-domain-{i:03}");
+        create_domain(&p, &name).await;
+        delete_domain(&p, &name).await;
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2500,
+        "CreateDomain/DeleteDomain x{n} took {}ms — expected <2500ms",
         elapsed.as_millis()
     );
 }

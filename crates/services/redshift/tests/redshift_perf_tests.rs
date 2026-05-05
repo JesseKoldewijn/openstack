@@ -44,6 +44,16 @@ async fn create_cluster(p: &RedshiftProvider, name: &str) {
     assert_eq!(resp.status_code, 200);
 }
 
+async fn delete_cluster(p: &RedshiftProvider, name: &str) {
+    let mut params = HashMap::new();
+    params.insert("ClusterIdentifier".to_string(), name.to_string());
+    let resp = p
+        .dispatch(&make_ctx("DeleteCluster", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+}
+
 #[tokio::test]
 async fn perf_create_cluster_throughput() {
     let p = RedshiftProvider::new();
@@ -124,6 +134,26 @@ async fn perf_modify_and_reboot_round_trip() {
     assert!(
         elapsed.as_millis() < 500,
         "ModifyCluster + RebootCluster took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_create_delete_cluster_round_trip() {
+    let p = RedshiftProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let name = format!("perf-delete-cluster-{i:03}");
+        create_cluster(&p, &name).await;
+        delete_cluster(&p, &name).await;
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2500,
+        "CreateCluster/DeleteCluster x{n} took {}ms — expected <2500ms",
         elapsed.as_millis()
     );
 }

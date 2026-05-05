@@ -63,6 +63,12 @@ async fn create_topic(provider: &SnsProvider, name: &str) -> String {
         .to_string()
 }
 
+async fn delete_topic(provider: &SnsProvider, topic_arn: &str) {
+    let body = form_body(&[("Action", "DeleteTopic"), ("TopicArn", topic_arn)]);
+    let resp = provider.dispatch(&make_ctx(&body)).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+}
+
 #[tokio::test]
 async fn perf_create_topic_throughput() {
     let provider = SnsProvider::new();
@@ -131,6 +137,25 @@ async fn perf_list_topics_many() {
     assert!(
         elapsed.as_millis() < 500,
         "ListTopics({n}) took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_create_and_delete_topic_round_trip() {
+    let provider = SnsProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let topic_arn = create_topic(&provider, &format!("perf-delete-topic-{i:03}")).await;
+        delete_topic(&provider, &topic_arn).await;
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2000,
+        "CreateTopic/DeleteTopic x{n} took {}ms — expected <2000ms",
         elapsed.as_millis()
     );
 }

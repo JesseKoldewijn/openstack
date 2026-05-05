@@ -50,6 +50,17 @@ async fn create_stream(p: &FirehoseProvider, name: &str) {
     assert_eq!(resp.status_code, 200);
 }
 
+async fn describe_stream(p: &FirehoseProvider, name: &str) {
+    let resp = p
+        .dispatch(&make_ctx(
+            "DescribeDeliveryStream",
+            json!({ "DeliveryStreamName": name }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+}
+
 #[tokio::test]
 async fn perf_create_delivery_stream_throughput() {
     let p = FirehoseProvider::new();
@@ -120,6 +131,26 @@ async fn perf_put_record_batch_round_trip() {
     assert!(
         elapsed.as_millis() < 1500,
         "PutRecordBatch x100 took {}ms — expected <1500ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_create_and_describe_delivery_stream_round_trip() {
+    let p = FirehoseProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let name = format!("perf-desc-firehose-{i:03}");
+        create_stream(&p, &name).await;
+        describe_stream(&p, &name).await;
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2500,
+        "CreateDeliveryStream+DescribeDeliveryStream round-trip x{n} took {}ms — expected <2500ms",
         elapsed.as_millis()
     );
 }
