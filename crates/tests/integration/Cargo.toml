@@ -46,6 +46,11 @@ openstack-ses = { workspace = true }
 openstack-ecr = { workspace = true }
 openstack-opensearch = { workspace = true }
 openstack-redshift = { workspace = true }
+openstack-ecs = { workspace = true }
+openstack-rds = { workspace = true }
+openstack-cognito = { workspace = true }
+openstack-elasticache = { workspace = true }
+openstack-cloudtrail = { workspace = true }
 openstack-cloudformation = { workspace = true }
 openstack-lambda = { workspace = true }
 openstack-studio-ui = { workspace = true }

@@ -236,6 +236,17 @@ fn register_all_services(manager: &ServicePluginManager, config: &Config) {
     reg!("route53", openstack_route53::Route53Provider::new());
     reg!("ses", openstack_ses::SesProvider::new());
     reg!("ecr", openstack_ecr::EcrProvider::new());
+    reg!("ecs", openstack_ecs::EcsProvider::new());
+    reg!("rds", openstack_rds::RdsProvider::new());
+    reg!("cognito-idp", openstack_cognito::CognitoProvider::new());
+    reg!(
+        "elasticache",
+        openstack_elasticache::ElastiCacheProvider::new()
+    );
+    reg!(
+        "cloudtrail",
+        openstack_cloudtrail::CloudTrailProvider::new()
+    );
     reg!(
         "opensearch",
         openstack_opensearch::OpenSearchProvider::new()

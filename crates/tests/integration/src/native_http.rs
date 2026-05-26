@@ -369,6 +369,11 @@ fn translate_command(
         ("apigateway", op) => translate_apigateway(op, command),
         ("lambda", op) => translate_lambda(op, command),
         ("opensearch", op) => translate_opensearch(op, command),
+        ("cloudtrail", op) => translate_cloudtrail(op, command),
+        ("cognito-idp", op) => translate_cognito(op, command),
+        ("ecs", op) => translate_ecs(op, command),
+        ("elasticache", op) => translate_elasticache(op, command),
+        ("rds", op) => translate_rds(op, command),
         _ => Err(TranslationOutcome::Unsupported(format!(
             "native HTTP translator not implemented for '{}' '{}'",
             service, operation
@@ -1743,6 +1748,103 @@ fn translate_opensearch(
             "native HTTP translator not implemented for 'opensearch' '{op}'"
         ))),
     }
+}
+
+fn translate_cloudtrail(
+    op: &str,
+    _command: &[String],
+) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let body = match op {
+        "describe-trails" => json!({}),
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'cloudtrail' '{op}'"
+            )));
+        }
+    };
+    json_target_plan(
+        "cloudtrail",
+        op,
+        "com.amazonaws.cloudtrail.v20131101",
+        body,
+        "application/x-amz-json-1.1",
+    )
+}
+
+fn translate_cognito(op: &str, command: &[String]) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let body = match op {
+        "list-user-pools" => json!({
+            "MaxResults": extract_flag_value(command, "--max-results")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10),
+        }),
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'cognito-idp' '{op}'"
+            )));
+        }
+    };
+    json_target_plan(
+        "cognito",
+        op,
+        "AWSCognitoIdentityProviderService",
+        body,
+        "application/x-amz-json-1.1",
+    )
+}
+
+fn translate_ecs(op: &str, _command: &[String]) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let body = match op {
+        "list-clusters" => json!({}),
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'ecs' '{op}'"
+            )));
+        }
+    };
+    json_target_plan(
+        "ecs",
+        op,
+        "AmazonEC2ContainerServiceV20141113",
+        body,
+        "application/x-amz-json-1.1",
+    )
+}
+
+fn translate_elasticache(
+    op: &str,
+    _command: &[String],
+) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let mut params = vec![
+        ("Version", "2015-02-02".to_string()),
+        ("Action", "DescribeCacheClusters".to_string()),
+    ];
+    match op {
+        "describe-cache-clusters" => {
+            params.push(("ShowCacheNodeInfo", "false".to_string()));
+        }
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'elasticache' '{op}'"
+            )));
+        }
+    }
+    query_plan("/", "elasticache", op, params)
+}
+
+fn translate_rds(op: &str, _command: &[String]) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let params = match op {
+        "describe-db-instances" => vec![
+            ("Version", "2014-10-31".to_string()),
+            ("Action", "DescribeDBInstances".to_string()),
+        ],
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'rds' '{op}'"
+            )));
+        }
+    };
+    query_plan("/", "rds", op, params)
 }
 
 fn query_plan(
