@@ -2596,6 +2596,17 @@ fn is_known_service(name: &str) -> bool {
 ///
 /// Uses `eq_ignore_ascii_case` matching throughout — no heap allocation.
 fn service_from_target(target: &str) -> Option<&'static str> {
+    if target
+        .split('.')
+        .next_back()
+        .is_some_and(|segment| segment.starts_with("CloudTrail_"))
+        || target
+            .get(.."com.amazonaws.cloudtrail".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("com.amazonaws.cloudtrail"))
+    {
+        return Some("cloudtrail");
+    }
+
     // Take everything before the first '.' then before the first '_'.
     let prefix = target.split('.').next().unwrap_or(target);
     let prefix = prefix.split('_').next().unwrap_or(prefix);
@@ -2640,9 +2651,7 @@ fn service_from_target(target: &str) -> Option<&'static str> {
         Some("cognito-idp")
     } else if prefix.eq_ignore_ascii_case("amazonec2containerservice") {
         Some("ecs")
-    } else if prefix.eq_ignore_ascii_case("cloudtrail")
-        || prefix.eq_ignore_ascii_case("com.amazonaws.cloudtrail")
-    {
+    } else if prefix.eq_ignore_ascii_case("cloudtrail") {
         Some("cloudtrail")
     } else if prefix.eq_ignore_ascii_case("amazonec2containerregistry")
         || prefix.eq_ignore_ascii_case("ecr")
@@ -3073,6 +3082,7 @@ mod tests {
     use super::{
         detect_service, extract_rest_operation, is_s3_object_body_request,
         rewrite_s3_virtual_hosted_path, should_rewrite_s3_vhost_for_body_check,
+        service_from_target,
     };
 
     #[test]
@@ -3184,6 +3194,24 @@ mod tests {
             let service = detect_service("/", &query, &headers, &Bytes::from(body), None);
             assert_eq!(service, expected, "body={body}");
         }
+    }
+
+    #[test]
+    fn service_from_target_recognizes_cloudtrail_parity_target() {
+        assert_eq!(
+            service_from_target("com.amazonaws.cloudtrail.v20131101.DescribeTrails"),
+            Some("cloudtrail")
+        );
+    }
+
+    #[test]
+    fn service_from_target_recognizes_cloudtrail_guided_target() {
+        assert_eq!(
+            service_from_target(
+                "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.CreateTrail"
+            ),
+            Some("cloudtrail")
+        );
     }
 
     #[test]

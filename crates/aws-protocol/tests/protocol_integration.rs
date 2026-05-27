@@ -252,6 +252,8 @@ mod protocol_integration_tests {
         assert_eq!(AwsProtocol::from_service("ecr"), AwsProtocol::Json);
         assert_eq!(AwsProtocol::from_service("events"), AwsProtocol::Json);
         assert_eq!(AwsProtocol::from_service("states"), AwsProtocol::Json);
+        assert_eq!(AwsProtocol::from_service("cognito"), AwsProtocol::Json);
+        assert_eq!(AwsProtocol::from_service("cognito-idp"), AwsProtocol::Json);
         // unknown service falls back to rest-json
         assert_eq!(AwsProtocol::from_service("unknown"), AwsProtocol::RestJson);
     }

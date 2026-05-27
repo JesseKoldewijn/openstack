@@ -18,7 +18,7 @@ pub enum AwsProtocol {
 
 impl AwsProtocol {
     pub fn from_service(service: &str) -> Self {
-        match service {
+        match canonical_service_name(service) {
             "s3" | "route53" => AwsProtocol::RestXml,
             "sqs" | "sns" | "iam" | "sts" | "cloudformation" | "redshift" | "cloudwatch"
             | "ses" | "elasticache" | "rds" => AwsProtocol::Query,
@@ -38,6 +38,16 @@ impl AwsProtocol {
             AwsProtocol::RestJson => "application/json",
             AwsProtocol::RestXml => "application/xml",
         }
+    }
+}
+
+fn canonical_service_name(service: &str) -> &str {
+    match service {
+        s if s.eq_ignore_ascii_case("es") => "opensearch",
+        s if s.eq_ignore_ascii_case("cognito") || s.eq_ignore_ascii_case("cognito-idp") => {
+            "cognito-idp"
+        }
+        _ => service,
     }
 }
 
