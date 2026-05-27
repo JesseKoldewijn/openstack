@@ -3081,8 +3081,8 @@ mod tests {
 
     use super::{
         detect_service, extract_rest_operation, is_s3_object_body_request,
-        rewrite_s3_virtual_hosted_path, should_rewrite_s3_vhost_for_body_check,
-        service_from_target,
+        rewrite_s3_virtual_hosted_path, service_from_target,
+        should_rewrite_s3_vhost_for_body_check,
     };
 
     #[test]
