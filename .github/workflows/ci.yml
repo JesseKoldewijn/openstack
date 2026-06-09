@@ -134,6 +134,32 @@ jobs:
             echo "| Result | \`${{ job.status }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  check:
+    name: Cargo Check
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-check
+          key: check-${{ hashFiles('**/Cargo.lock') }}
+      - name: Compile workspace with warnings denied
+        run: cargo check --workspace --all-targets --all-features
+      - name: Add cargo check table to workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Cargo Check"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Result | \`${{ job.status }}\` |"
+            echo "| Warnings | `denied` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -658,6 +684,7 @@ jobs:
       [
         conventional-pr-title,
         fmt,
+        check,
         clippy,
         test,
         verify-build-artifact,
@@ -682,6 +709,7 @@ jobs:
       [
         conventional-pr-title,
         fmt,
+        check,
         clippy,
         test,
         verify-build-artifact,
@@ -706,6 +734,7 @@ jobs:
       [
         conventional-pr-title,
         fmt,
+        check,
         clippy,
         test,
         verify-build-artifact,
@@ -747,6 +776,7 @@ jobs:
               "| Check | Result |",
               "|---|---|",
               f"| Rustfmt | `{os.environ.get('FMT_RESULT', 'unknown')}` |",
+              f"| Cargo Check | `{os.environ.get('CHECK_RESULT', 'unknown')}` |",
               f"| Clippy | `{os.environ.get('CLIPPY_RESULT', 'unknown')}` |",
               f"| Tests | `{os.environ.get('TEST_RESULT', 'unknown')}` |",
               f"| Build Artifact | `{os.environ.get('BUILD_RESULT', 'unknown')}` |",
@@ -794,6 +824,7 @@ jobs:
         env:
           PR_TITLE_RESULT: ${{ needs.conventional-pr-title.result }}
           FMT_RESULT: ${{ needs.fmt.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           TEST_RESULT: ${{ needs.test.result }}
           BUILD_RESULT: ${{ needs.verify-build-artifact.result }}

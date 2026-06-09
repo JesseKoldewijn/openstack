@@ -365,11 +365,13 @@ impl ServiceExplorerViewModel {
         let tx_summary = log.summary();
         let service_tx_count = log.for_service(service).count();
 
-        let error_rate_pct = if tx_summary.total > 0 {
+        let error_rate_pct = {
             let errors = tx_summary.client_error + tx_summary.server_error;
-            ((errors * 100) / tx_summary.total).min(100) as u8
-        } else {
-            0
+            errors
+                .checked_mul(100)
+                .and_then(|value| value.checked_div(tx_summary.total))
+                .unwrap_or(0)
+                .min(100) as u8
         };
 
         let overview = ServiceOverview {
