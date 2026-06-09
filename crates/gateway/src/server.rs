@@ -2402,6 +2402,9 @@ fn normalize_service_name(service: &str) -> Cow<'static, str> {
     if service.eq_ignore_ascii_case("es") {
         return Cow::Borrowed("opensearch");
     }
+    if service.eq_ignore_ascii_case("cognito") || service.eq_ignore_ascii_case("cognito-idp") {
+        return Cow::Borrowed("cognito-idp");
+    }
     // AWS SDKs always send lowercase service names in credentials, so the
     // common path avoids `to_ascii_lowercase`'s character-by-character scan.
     if service.bytes().all(|b| !b.is_ascii_uppercase()) {
@@ -2445,6 +2448,10 @@ fn known_service_static(name: &str) -> Option<&'static str> {
         "ecr" => Some("ecr"),
         "opensearch" => Some("opensearch"),
         "redshift" => Some("redshift"),
+        "ecs" => Some("ecs"),
+        "cloudtrail" => Some("cloudtrail"),
+        "cognito" => Some("cognito-idp"),
+        "cognito-idp" => Some("cognito-idp"),
         "elasticache" => Some("elasticache"),
         "rds" => Some("rds"),
         _ => None,
@@ -2571,6 +2578,10 @@ fn is_known_service(name: &str) -> bool {
             | "ecr"
             | "opensearch"
             | "redshift"
+            | "ecs"
+            | "cloudtrail"
+            | "cognito"
+            | "cognito-idp"
             | "elasticache"
             | "rds"
     )
@@ -2585,6 +2596,17 @@ fn is_known_service(name: &str) -> bool {
 ///
 /// Uses `eq_ignore_ascii_case` matching throughout — no heap allocation.
 fn service_from_target(target: &str) -> Option<&'static str> {
+    if target
+        .split('.')
+        .next_back()
+        .is_some_and(|segment| segment.starts_with("CloudTrail_"))
+        || target
+            .get(.."com.amazonaws.cloudtrail".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("com.amazonaws.cloudtrail"))
+    {
+        return Some("cloudtrail");
+    }
+
     // Take everything before the first '.' then before the first '_'.
     let prefix = target.split('.').next().unwrap_or(target);
     let prefix = prefix.split('_').next().unwrap_or(prefix);
@@ -2625,6 +2647,12 @@ fn service_from_target(target: &str) -> Option<&'static str> {
         Some("cloudwatch")
     } else if prefix.eq_ignore_ascii_case("awsevents") || prefix.eq_ignore_ascii_case("events") {
         Some("events")
+    } else if prefix.eq_ignore_ascii_case("awscognitoidentityproviderservice") {
+        Some("cognito-idp")
+    } else if prefix.eq_ignore_ascii_case("amazonec2containerservice") {
+        Some("ecs")
+    } else if prefix.eq_ignore_ascii_case("cloudtrail") {
+        Some("cloudtrail")
     } else if prefix.eq_ignore_ascii_case("amazonec2containerregistry")
         || prefix.eq_ignore_ascii_case("ecr")
     {
@@ -3165,6 +3193,24 @@ mod tests {
             let service = detect_service("/", &query, &headers, &Bytes::from(body), None);
             assert_eq!(service, expected, "body={body}");
         }
+    }
+
+    #[test]
+    fn service_from_target_recognizes_cloudtrail_parity_target() {
+        assert_eq!(
+            super::service_from_target("com.amazonaws.cloudtrail.v20131101.DescribeTrails"),
+            Some("cloudtrail")
+        );
+    }
+
+    #[test]
+    fn service_from_target_recognizes_cloudtrail_guided_target() {
+        assert_eq!(
+            super::service_from_target(
+                "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.CreateTrail"
+            ),
+            Some("cloudtrail")
+        );
     }
 
     #[test]

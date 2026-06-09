@@ -21,10 +21,12 @@ impl AwsProtocol {
         match service {
             "s3" | "route53" => AwsProtocol::RestXml,
             "sqs" | "sns" | "iam" | "sts" | "cloudformation" | "redshift" | "cloudwatch"
-            | "ses" => AwsProtocol::Query,
+            | "ses" | "elasticache" | "rds" => AwsProtocol::Query,
             "ec2" => AwsProtocol::Ec2,
             "dynamodb" | "kinesis" | "firehose" | "secretsmanager" | "ssm" | "kms" | "acm"
-            | "ecr" | "events" | "states" => AwsProtocol::Json,
+            | "ecr" | "events" | "states" | "ecs" | "cloudtrail" | "cognito-idp" => {
+                AwsProtocol::Json
+            }
             _ => AwsProtocol::RestJson,
         }
     }

@@ -48,6 +48,66 @@
     "expires_on": "2027-03-30"
   },
   {
+    "id": "kd-cloudtrail-probe-localstack-not-implemented",
+    "service": "cloudtrail",
+    "scenario_id": "cloudtrail-probe",
+    "step_id": "*",
+    "path": "*",
+    "rationale": "LocalStack free tier does not implement CloudTrail for this probe; openstack returns an empty trail list while LocalStack returns 501.",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-05-26",
+    "expires_on": "2027-05-26"
+  },
+  {
+    "id": "kd-cognito-probe-localstack-not-implemented",
+    "service": "cognito",
+    "scenario_id": "cognito-probe",
+    "step_id": "*",
+    "path": "*",
+    "rationale": "LocalStack free tier does not implement Cognito IDP for this probe; openstack returns an empty user-pool list while LocalStack returns 501.",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-05-26",
+    "expires_on": "2027-05-26"
+  },
+  {
+    "id": "kd-ecs-probe-localstack-not-implemented",
+    "service": "ecs",
+    "scenario_id": "ecs-probe",
+    "step_id": "*",
+    "path": "*",
+    "rationale": "LocalStack free tier does not implement ECS for this probe; openstack returns an empty cluster list while LocalStack returns 501.",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-05-26",
+    "expires_on": "2027-05-26"
+  },
+  {
+    "id": "kd-elasticache-probe-localstack-not-implemented",
+    "service": "elasticache",
+    "scenario_id": "elasticache-probe",
+    "step_id": "*",
+    "path": "*",
+    "rationale": "LocalStack free tier does not implement ElastiCache for this probe; openstack returns an empty cache-cluster list while LocalStack returns 501.",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-05-26",
+    "expires_on": "2027-05-26"
+  },
+  {
+    "id": "kd-rds-probe-localstack-not-implemented",
+    "service": "rds",
+    "scenario_id": "rds-probe",
+    "step_id": "*",
+    "path": "*",
+    "rationale": "LocalStack free tier does not implement RDS for this probe; openstack returns an empty DB instance list while LocalStack returns 501.",
+    "owner": "team",
+    "reviewer": "team",
+    "review_date": "2026-05-26",
+    "expires_on": "2027-05-26"
+  },
+  {
     "id": "kd-route53-get-hosted-zone-header-shape",
     "service": "route53",
     "scenario_id": "route53-get-hosted-zone",

@@ -369,6 +369,11 @@ fn translate_command(
         ("apigateway", op) => translate_apigateway(op, command),
         ("lambda", op) => translate_lambda(op, command),
         ("opensearch", op) => translate_opensearch(op, command),
+        ("cloudtrail", op) => translate_cloudtrail(op, command),
+        ("cognito-idp", op) => translate_cognito(op, command),
+        ("ecs", op) => translate_ecs(op, command),
+        ("elasticache", op) => translate_elasticache(op, command),
+        ("rds", op) => translate_rds(op, command),
         _ => Err(TranslationOutcome::Unsupported(format!(
             "native HTTP translator not implemented for '{}' '{}'",
             service, operation
@@ -1745,6 +1750,103 @@ fn translate_opensearch(
     }
 }
 
+fn translate_cloudtrail(
+    op: &str,
+    _command: &[String],
+) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let body = match op {
+        "describe-trails" => json!({}),
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'cloudtrail' '{op}'"
+            )));
+        }
+    };
+    json_target_plan(
+        "cloudtrail",
+        op,
+        "com.amazonaws.cloudtrail.v20131101",
+        body,
+        "application/x-amz-json-1.1",
+    )
+}
+
+fn translate_cognito(op: &str, command: &[String]) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let body = match op {
+        "list-user-pools" => json!({
+            "MaxResults": extract_flag_value(command, "--max-results")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10),
+        }),
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'cognito-idp' '{op}'"
+            )));
+        }
+    };
+    json_target_plan(
+        "cognito",
+        op,
+        "AWSCognitoIdentityProviderService",
+        body,
+        "application/x-amz-json-1.1",
+    )
+}
+
+fn translate_ecs(op: &str, _command: &[String]) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let body = match op {
+        "list-clusters" => json!({}),
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'ecs' '{op}'"
+            )));
+        }
+    };
+    json_target_plan(
+        "ecs",
+        op,
+        "AmazonEC2ContainerServiceV20141113",
+        body,
+        "application/x-amz-json-1.1",
+    )
+}
+
+fn translate_elasticache(
+    op: &str,
+    _command: &[String],
+) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let mut params = vec![
+        ("Version", "2015-02-02".to_string()),
+        ("Action", "DescribeCacheClusters".to_string()),
+    ];
+    match op {
+        "describe-cache-clusters" => {
+            params.push(("ShowCacheNodeInfo", "false".to_string()));
+        }
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'elasticache' '{op}'"
+            )));
+        }
+    }
+    query_plan("/", "elasticache", op, params)
+}
+
+fn translate_rds(op: &str, _command: &[String]) -> Result<NativeHttpPlan, TranslationOutcome> {
+    let params = match op {
+        "describe-db-instances" => vec![
+            ("Version", "2014-10-31".to_string()),
+            ("Action", "DescribeDBInstances".to_string()),
+        ],
+        _ => {
+            return Err(TranslationOutcome::Unsupported(format!(
+                "native HTTP translator not implemented for 'rds' '{op}'"
+            )));
+        }
+    };
+    query_plan("/", "rds", op, params)
+}
+
 fn query_plan(
     path: &str,
     service: &'static str,
@@ -2304,6 +2406,117 @@ mod tests {
             TranslationOutcome::Unsupported(reason) => {
                 panic!("unexpected unsupported error: {reason}")
             }
+        }
+    }
+
+    #[test]
+    fn cloudtrail_probe_translation_uses_expected_target() {
+        let command = vec!["cloudtrail".to_string(), "describe-trails".to_string()];
+
+        let plan = match translate_command("http://127.0.0.1:4566", &dummy_step(), &command) {
+            Ok(plan) => plan,
+            Err(TranslationOutcome::Unsupported(reason))
+            | Err(TranslationOutcome::Invalid(reason)) => {
+                panic!("unexpected translation failure: {reason}")
+            }
+        };
+
+        assert_eq!(plan.path, "/");
+        assert_eq!(plan.translator, "cloudtrail:describe-trails");
+        let headers: BTreeMap<_, _> = plan.headers.into_iter().collect();
+        assert_eq!(
+            headers.get("x-amz-target").map(String::as_str),
+            Some("com.amazonaws.cloudtrail.v20131101.DescribeTrails")
+        );
+    }
+
+    #[test]
+    fn cognito_probe_translation_uses_expected_target_and_body() {
+        let command = vec![
+            "cognito-idp".to_string(),
+            "list-user-pools".to_string(),
+            "--max-results".to_string(),
+            "10".to_string(),
+        ];
+
+        let plan = match translate_command("http://127.0.0.1:4566", &dummy_step(), &command) {
+            Ok(plan) => plan,
+            Err(TranslationOutcome::Unsupported(reason))
+            | Err(TranslationOutcome::Invalid(reason)) => {
+                panic!("unexpected translation failure: {reason}")
+            }
+        };
+
+        let headers: BTreeMap<_, _> = plan.headers.into_iter().collect();
+        assert_eq!(
+            headers.get("x-amz-target").map(String::as_str),
+            Some("AWSCognitoIdentityProviderService.ListUserPools")
+        );
+        assert_eq!(plan.body_preview, r#"{"MaxResults":10}"#);
+    }
+
+    #[test]
+    fn query_probe_translations_cover_ecs_elasticache_and_rds() {
+        let ecs = match translate_command(
+            "http://127.0.0.1:4566",
+            &dummy_step(),
+            &["ecs".to_string(), "list-clusters".to_string()],
+        ) {
+            Ok(plan) => plan,
+            Err(TranslationOutcome::Unsupported(reason))
+            | Err(TranslationOutcome::Invalid(reason)) => {
+                panic!("unexpected ecs translation failure: {reason}")
+            }
+        };
+        let ecs_headers: BTreeMap<_, _> = ecs.headers.into_iter().collect();
+        assert_eq!(
+            ecs_headers.get("x-amz-target").map(String::as_str),
+            Some("AmazonEC2ContainerServiceV20141113.ListClusters")
+        );
+
+        let elasticache = match translate_command(
+            "http://127.0.0.1:4566",
+            &dummy_step(),
+            &[
+                "elasticache".to_string(),
+                "describe-cache-clusters".to_string(),
+            ],
+        ) {
+            Ok(plan) => plan,
+            Err(TranslationOutcome::Unsupported(reason))
+            | Err(TranslationOutcome::Invalid(reason)) => {
+                panic!("unexpected elasticache translation failure: {reason}")
+            }
+        };
+        assert!(
+            elasticache
+                .body_preview
+                .contains("Action=DescribeCacheClusters")
+        );
+        assert!(elasticache.body_preview.contains("Version=2015-02-02"));
+
+        let rds = match translate_command(
+            "http://127.0.0.1:4566",
+            &dummy_step(),
+            &["rds".to_string(), "describe-db-instances".to_string()],
+        ) {
+            Ok(plan) => plan,
+            Err(TranslationOutcome::Unsupported(reason))
+            | Err(TranslationOutcome::Invalid(reason)) => {
+                panic!("unexpected rds translation failure: {reason}")
+            }
+        };
+        assert!(rds.body_preview.contains("Action=DescribeDBInstances"));
+        assert!(rds.body_preview.contains("Version=2014-10-31"));
+    }
+
+    fn dummy_step() -> ScenarioStep {
+        ScenarioStep {
+            id: "probe".to_string(),
+            protocol: ProtocolFamily::Json,
+            command: Vec::new(),
+            expect_success: true,
+            capture_json: None,
         }
     }
 }

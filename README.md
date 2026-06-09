@@ -36,7 +36,7 @@ A Rust reimplementation of [LocalStack](https://localstack.cloud) Community Edit
 | Cloud Control | not implemented | — |
 | CloudFormation | ✅ supported | query (XML) |
 | CloudFront | not implemented | — |
-| CloudTrail | not implemented | — |
+| CloudTrail | ✅ supported | json |
 | CloudWatch (metrics + alarms) | ✅ supported | json |
 | CloudWatch Logs | ✅ supported | json |
 | CodeArtifact | not implemented | — |
@@ -45,7 +45,7 @@ A Rust reimplementation of [LocalStack](https://localstack.cloud) Community Edit
 | CodeConnections | not implemented | — |
 | CodeDeploy | not implemented | — |
 | CodePipeline | not implemented | — |
-| Cognito | not implemented | — |
+| Cognito | ✅ supported | json |
 | Config | not implemented | — |
 | Cost Explorer | not implemented | — |
 | Data Firehose | ✅ supported | json |
@@ -56,12 +56,12 @@ A Rust reimplementation of [LocalStack](https://localstack.cloud) Community Edit
 | EC2 | ✅ supported | ec2 query |
 | ECR | ✅ supported | json |
 | Elastic Beanstalk | not implemented | — |
-| Elastic Container Service (ECS) | not implemented | — |
+| Elastic Container Service (ECS) | ✅ supported | json |
 | Elastic File System (EFS) | not implemented | — |
 | Elastic Kubernetes Service (EKS) | not implemented | — |
 | Elastic Load Balancing (ELB) | not implemented | — |
 | Elastic MapReduce (EMR) | not implemented | — |
-| ElastiCache | not implemented | — |
+| ElastiCache | ✅ supported | query (XML) |
 | Elasticsearch Service | not implemented | — |
 | Elemental MediaConvert | not implemented | — |
 | EventBridge | ✅ supported | json |
@@ -91,7 +91,7 @@ A Rust reimplementation of [LocalStack](https://localstack.cloud) Community Edit
 | Pinpoint | not implemented | — |
 | Private Certificate Authority (ACM PCA) | not implemented | — |
 | Redshift | ✅ supported | query (XML) |
-| Relational Database Service (RDS) | not implemented | — |
+| Relational Database Service (RDS) | ✅ supported | query (XML) |
 | Resource Access Manager (RAM) | not implemented | — |
 | Resource Groups | not implemented | — |
 | Resource Groups Tagging API | not implemented | — |
