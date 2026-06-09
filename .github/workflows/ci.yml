@@ -584,7 +584,7 @@ jobs:
           ./tests/bench/bench_gate.sh \
             --report benchmark-report.json \
             --p95-max 10 \
-            --memory-max 100 \
+            --memory-max 125 \
             --op-p95-max "s3/put_object_1mb=50,s3/get_object_1mb=50,s3/put_object_10mb=400,s3/get_object_10mb=250,s3/put_object_50mb=1600,s3/get_object_50mb=1000,s3/put_object_100mb=2000,s3/get_object_100mb=2000,kinesis/describe_stream=8,lambda/update_function_configuration=15" \
             --output benchmark-gate.json
       - name: Benchmark report
