@@ -362,14 +362,22 @@ impl ServiceExplorerViewModel {
             .get(service)
             .map(|s| s.resource_count())
             .unwrap_or(0);
-        let tx_summary = log.summary();
-        let service_tx_count = log.for_service(service).count();
+        let service_records: Vec<_> = log.for_service(service).collect();
+        let service_tx_count = service_records.len();
 
         let error_rate_pct = {
-            let errors = tx_summary.client_error + tx_summary.server_error;
+            let errors = service_records
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.outcome,
+                        TransactionOutcome::ClientError | TransactionOutcome::ServerError
+                    )
+                })
+                .count();
             errors
                 .checked_mul(100)
-                .and_then(|value| value.checked_div(tx_summary.total))
+                .and_then(|value| value.checked_div(service_tx_count))
                 .unwrap_or(0)
                 .min(100) as u8
         };
@@ -556,5 +564,28 @@ mod tests {
         assert_eq!(vm.overview.status, "running");
         assert!(vm.overview.total_operations > 0);
         assert_eq!(vm.active_tab, ExplorerTab::Overview);
+    }
+
+    #[test]
+    fn service_overview_error_rate_uses_service_transactions_only() {
+        let catalog = base_catalog();
+        let op_catalog = OperationCatalog::build(&[]);
+        let storage = RuntimeStorageState::new();
+        let mut log = TransactionLog::new(50);
+
+        log.push(TransactionRecord::new(0, "s3", "GET", "/", 0).complete(200, "", 5));
+        log.push(TransactionRecord::new(0, "sqs", "POST", "/", 0).complete(500, "", 5));
+
+        let vm = ServiceExplorerViewModel::build(
+            "s3",
+            &catalog,
+            &op_catalog,
+            &storage,
+            &log,
+            ExplorerTab::Overview,
+        );
+
+        assert_eq!(vm.overview.transaction_count, 1);
+        assert_eq!(vm.overview.error_rate_pct, 0);
     }
 }
