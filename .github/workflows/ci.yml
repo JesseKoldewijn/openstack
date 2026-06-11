@@ -767,7 +767,6 @@ jobs:
           import glob
           import json
           import os
-          import subprocess
           from pathlib import Path
 
           def latest(pattern):
@@ -811,29 +810,6 @@ jobs:
                   lines.append(
                       f"| `{profile}` | {ps.get('total_scenarios', 0)} | {ps.get('passed', 0)} | {ps.get('failed', 0)} | {ps.get('accepted_differences', 0)} |"
                   )
-              lines.append("")
-
-          # Include benchmark gate markdown summary if available. If the
-          # benchmark job only uploaded the JSON gate artifact, render the
-          # markdown directly so failed runs still show benchmark details.
-          gate_md = Path("benchmark_gate_summary.md")
-          gate_json = Path("benchmark-gate.json")
-          benchmark_md = None
-          if gate_md.exists():
-              benchmark_md = gate_md.read_text(encoding="utf-8").strip()
-          elif gate_json.exists():
-              benchmark_md = subprocess.check_output(
-                  [
-                      "./.github/actions/benchmark-report/render.sh",
-                      str(gate_json),
-                  ],
-                  text=True,
-              ).strip()
-
-          if benchmark_md:
-              lines.append("### Benchmark")
-              lines.append("")
-              lines.append(benchmark_md)
               lines.append("")
 
           content = "\n".join(lines).strip() + "\n"
