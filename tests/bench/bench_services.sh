@@ -2474,7 +2474,7 @@ if is_active "stepfunctions"; then
 
   SFN_HEADERS=(-H "Content-Type: application/x-amz-json-1.0")
   _sfn_definition='{"StartAt":"Done","States":{"Done":{"Type":"Pass","Result":{"ok":true},"End":true}}}'
-  _sfn_definition_json=$(jq -Rn --arg def "$_sfn_definition" '$def')
+  _sfn_definition_json=$(jq -Rn --arg definition "$_sfn_definition" '$definition')
 
   if seed_all_targets "stepfunctions" POST "$OS_BASE" "$LS_BASE" "$MOTO_BASE" \
        "${SFN_HEADERS[@]}" \

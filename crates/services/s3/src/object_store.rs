@@ -602,10 +602,12 @@ where
 
     let file = fs::File::create(tmp_path).await?;
 
-    // Pre-allocate to avoid block-level fragmentation on ext4/xfs.
+    // Pre-allocate only for larger streamed objects. For mid-sized uploads
+    // (like the 10 MiB benchmark tier), Linux fallocate on container-backed
+    // filesystems can add enough fixed latency to dominate p95.
     #[cfg(target_os = "linux")]
     if let Some(len) = content_length
-        && len > 0
+        && len >= 50 * 1024 * 1024
     {
         use std::os::unix::io::{AsRawFd, BorrowedFd};
 
