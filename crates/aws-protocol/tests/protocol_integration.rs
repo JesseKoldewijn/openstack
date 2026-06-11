@@ -244,6 +244,8 @@ mod protocol_integration_tests {
         assert_eq!(AwsProtocol::from_service("ses"), AwsProtocol::Query);
         assert_eq!(AwsProtocol::from_service("cloudwatch"), AwsProtocol::Query);
         assert_eq!(AwsProtocol::from_service("redshift"), AwsProtocol::Query);
+        assert_eq!(AwsProtocol::from_service("elasticache"), AwsProtocol::Query);
+        assert_eq!(AwsProtocol::from_service("rds"), AwsProtocol::Query);
         assert_eq!(AwsProtocol::from_service("ec2"), AwsProtocol::Ec2);
         assert_eq!(AwsProtocol::from_service("dynamodb"), AwsProtocol::Json);
         assert_eq!(AwsProtocol::from_service("kinesis"), AwsProtocol::Json);
@@ -252,6 +254,9 @@ mod protocol_integration_tests {
         assert_eq!(AwsProtocol::from_service("ecr"), AwsProtocol::Json);
         assert_eq!(AwsProtocol::from_service("events"), AwsProtocol::Json);
         assert_eq!(AwsProtocol::from_service("states"), AwsProtocol::Json);
+        assert_eq!(AwsProtocol::from_service("ecs"), AwsProtocol::Json);
+        assert_eq!(AwsProtocol::from_service("cloudtrail"), AwsProtocol::Json);
+        assert_eq!(AwsProtocol::from_service("cognito-idp"), AwsProtocol::Json);
         // unknown service falls back to rest-json
         assert_eq!(AwsProtocol::from_service("unknown"), AwsProtocol::RestJson);
     }

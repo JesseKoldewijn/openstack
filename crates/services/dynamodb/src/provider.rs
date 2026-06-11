@@ -348,25 +348,17 @@ fn parse_key_condition(
                             hash_val = rhs_str_val;
                         }
                     }
-                    "<" => {
-                        if lhs == range_key_name {
-                            range_cond = Some(RangeCondition::Lt(rhs.clone()));
-                        }
+                    "<" if lhs == range_key_name => {
+                        range_cond = Some(RangeCondition::Lt(rhs.clone()));
                     }
-                    "<=" => {
-                        if lhs == range_key_name {
-                            range_cond = Some(RangeCondition::Lte(rhs.clone()));
-                        }
+                    "<=" if lhs == range_key_name => {
+                        range_cond = Some(RangeCondition::Lte(rhs.clone()));
                     }
-                    ">" => {
-                        if lhs == range_key_name {
-                            range_cond = Some(RangeCondition::Gt(rhs.clone()));
-                        }
+                    ">" if lhs == range_key_name => {
+                        range_cond = Some(RangeCondition::Gt(rhs.clone()));
                     }
-                    ">=" => {
-                        if lhs == range_key_name {
-                            range_cond = Some(RangeCondition::Gte(rhs.clone()));
-                        }
+                    ">=" if lhs == range_key_name => {
+                        range_cond = Some(RangeCondition::Gte(rhs.clone()));
                     }
                     _ => {}
                 }

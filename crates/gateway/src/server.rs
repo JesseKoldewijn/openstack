@@ -2356,7 +2356,7 @@ fn detect_service(
             let potential_service = normalize_service_name(parts[0]);
             if potential_service
                 .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
                 && is_known_service(&potential_service)
             {
                 return potential_service;
@@ -2402,6 +2402,9 @@ fn normalize_service_name(service: &str) -> Cow<'static, str> {
     if service.eq_ignore_ascii_case("es") {
         return Cow::Borrowed("opensearch");
     }
+    if service.eq_ignore_ascii_case("cognito") || service.eq_ignore_ascii_case("cognito-idp") {
+        return Cow::Borrowed("cognito-idp");
+    }
     // AWS SDKs always send lowercase service names in credentials, so the
     // common path avoids `to_ascii_lowercase`'s character-by-character scan.
     if service.bytes().all(|b| !b.is_ascii_uppercase()) {
@@ -2445,6 +2448,10 @@ fn known_service_static(name: &str) -> Option<&'static str> {
         "ecr" => Some("ecr"),
         "opensearch" => Some("opensearch"),
         "redshift" => Some("redshift"),
+        "ecs" => Some("ecs"),
+        "cloudtrail" => Some("cloudtrail"),
+        "cognito" => Some("cognito-idp"),
+        "cognito-idp" => Some("cognito-idp"),
         "elasticache" => Some("elasticache"),
         "rds" => Some("rds"),
         _ => None,
@@ -2571,6 +2578,10 @@ fn is_known_service(name: &str) -> bool {
             | "ecr"
             | "opensearch"
             | "redshift"
+            | "ecs"
+            | "cloudtrail"
+            | "cognito"
+            | "cognito-idp"
             | "elasticache"
             | "rds"
     )
@@ -2585,19 +2596,16 @@ fn is_known_service(name: &str) -> bool {
 ///
 /// Uses `eq_ignore_ascii_case` matching throughout — no heap allocation.
 fn service_from_target(target: &str) -> Option<&'static str> {
+    if has_cloudtrail_target_prefix(target) {
+        return Some("cloudtrail");
+    }
+
     // Take everything before the first '.' then before the first '_'.
     let prefix = target.split('.').next().unwrap_or(target);
     let prefix = prefix.split('_').next().unwrap_or(prefix);
 
     // Strip trailing version suffixes like "V20110615" or "v20120810".
-    let prefix = if prefix.len() > 9
-        && (prefix[prefix.len() - 9..].eq_ignore_ascii_case("v20110615")
-            || prefix[prefix.len() - 9..].eq_ignore_ascii_case("v20120810"))
-    {
-        &prefix[..prefix.len() - 9]
-    } else {
-        prefix
-    };
+    let prefix = strip_version_suffix(prefix);
 
     if prefix.eq_ignore_ascii_case("dynamodb") {
         Some("dynamodb")
@@ -2625,6 +2633,12 @@ fn service_from_target(target: &str) -> Option<&'static str> {
         Some("cloudwatch")
     } else if prefix.eq_ignore_ascii_case("awsevents") || prefix.eq_ignore_ascii_case("events") {
         Some("events")
+    } else if prefix.eq_ignore_ascii_case("awscognitoidentityproviderservice") {
+        Some("cognito-idp")
+    } else if prefix.eq_ignore_ascii_case("amazonec2containerservice") {
+        Some("ecs")
+    } else if prefix.eq_ignore_ascii_case("cloudtrail") {
+        Some("cloudtrail")
     } else if prefix.eq_ignore_ascii_case("amazonec2containerregistry")
         || prefix.eq_ignore_ascii_case("ecr")
     {
@@ -2639,6 +2653,50 @@ fn service_from_target(target: &str) -> Option<&'static str> {
         Some("sts")
     } else {
         None
+    }
+}
+
+fn has_cloudtrail_target_prefix(target: &str) -> bool {
+    let cloudtrail_prefix = "com.amazonaws.cloudtrail";
+
+    if let Some(rest) = target.get(cloudtrail_prefix.len()..)
+        && target
+            .get(..cloudtrail_prefix.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(cloudtrail_prefix))
+    {
+        return rest.is_empty()
+            || rest
+                .chars()
+                .next()
+                .is_some_and(|delimiter| delimiter == '.' || delimiter == '_');
+    }
+
+    target
+        .split('.')
+        .next_back()
+        .is_some_and(|segment| segment.starts_with("CloudTrail_"))
+}
+
+fn strip_version_suffix(prefix: &str) -> &str {
+    if prefix.len() <= 1 {
+        return prefix;
+    }
+
+    let Some(version_start) = prefix.rfind(['V', 'v']) else {
+        return prefix;
+    };
+
+    let suffix = &prefix[version_start..];
+    if suffix.len() > 1
+        && suffix[1..].chars().all(|c| c.is_ascii_digit())
+        && prefix[..version_start]
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        &prefix[..version_start]
+    } else {
+        prefix
     }
 }
 
@@ -3135,6 +3193,19 @@ mod tests {
     }
 
     #[test]
+    fn detect_service_allows_hyphenated_host_aliases() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "host",
+            HeaderValue::from_static("cognito-idp.us-east-1.localhost.localstack.cloud"),
+        );
+        let query = HashMap::new();
+
+        let service = detect_service("/", &query, &headers, &Bytes::new(), None);
+        assert_eq!(service, "cognito-idp");
+    }
+
+    #[test]
     fn detect_service_maps_extended_query_protocol_actions() {
         let headers = HeaderMap::new();
         let query = HashMap::new();
@@ -3165,6 +3236,40 @@ mod tests {
             let service = detect_service("/", &query, &headers, &Bytes::from(body), None);
             assert_eq!(service, expected, "body={body}");
         }
+    }
+
+    #[test]
+    fn service_from_target_recognizes_cloudtrail_parity_target() {
+        assert_eq!(
+            super::service_from_target("com.amazonaws.cloudtrail.v20131101.DescribeTrails"),
+            Some("cloudtrail")
+        );
+    }
+
+    #[test]
+    fn service_from_target_recognizes_cloudtrail_guided_target() {
+        assert_eq!(
+            super::service_from_target(
+                "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.CreateTrail"
+            ),
+            Some("cloudtrail")
+        );
+    }
+
+    #[test]
+    fn service_from_target_rejects_cloudtrail_prefix_overmatch() {
+        assert_eq!(
+            super::service_from_target("com.amazonaws.cloudtrailx.v20131101.DescribeTrails"),
+            None
+        );
+    }
+
+    #[test]
+    fn service_from_target_recognizes_versioned_ecs_target() {
+        assert_eq!(
+            super::service_from_target("AmazonEC2ContainerServiceV20141113.ListClusters"),
+            Some("ecs")
+        );
     }
 
     #[test]
