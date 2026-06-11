@@ -406,16 +406,7 @@ jobs:
         run: |
           set -euo pipefail
           docker --version
-          for attempt in 1 2 3; do
-            if docker pull "$PARITY_LOCALSTACK_IMAGE"; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Failed to pull $PARITY_LOCALSTACK_IMAGE after $attempt attempts"
-              exit 1
-            fi
-            sleep 5
-          done
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity core profile
         run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile core
       - name: Add parity core table to workflow summary
@@ -509,16 +500,7 @@ jobs:
         run: |
           set -euo pipefail
           docker --version
-          for attempt in 1 2 3; do
-            if docker pull "$PARITY_LOCALSTACK_IMAGE"; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Failed to pull $PARITY_LOCALSTACK_IMAGE after $attempt attempts"
-              exit 1
-            fi
-            sleep 5
-          done
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity all-services smoke profile
         run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
       - name: Validate parity lifecycle latest report exists
@@ -582,18 +564,8 @@ jobs:
         run: |
           set -euo pipefail
           docker --version
-          for image in "$PARITY_LOCALSTACK_IMAGE" "$PARITY_MOTO_IMAGE"; do
-            for attempt in 1 2 3; do
-              if docker pull "$image"; then
-                break
-              fi
-              if [ "$attempt" -eq 3 ]; then
-                echo "Failed to pull $image after $attempt attempts"
-                exit 1
-              fi
-              sleep 5
-            done
-          done
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
+          docker pull "$PARITY_MOTO_IMAGE"
       - name: Install oha
         run: |
           set -euo pipefail
@@ -697,16 +669,7 @@ jobs:
         run: |
           set -euo pipefail
           docker --version
-          for attempt in 1 2 3; do
-            if docker pull "$PARITY_LOCALSTACK_IMAGE"; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Failed to pull $PARITY_LOCALSTACK_IMAGE after $attempt attempts"
-              exit 1
-            fi
-            sleep 5
-          done
+          docker pull "$PARITY_LOCALSTACK_IMAGE"
       - name: Run parity all-services smoke profile
         run: cargo run -p openstack-integration-tests --bin parity_runner -- --profile all-services-smoke
       - name: Upload parity push report artifacts
