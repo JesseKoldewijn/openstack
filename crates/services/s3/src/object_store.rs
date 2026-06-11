@@ -214,8 +214,8 @@ impl ObjectFileStore {
     ///
     /// All objects use [`write_via_copy`]: an async read loop with a 512 KiB
     /// `BufReader` feeding an adaptive `BufWriter` (2–8 MiB depending on
-    /// `content_length`).  Pre-allocates the file with `set_len` when size
-    /// is known to avoid block-level fragmentation.
+    /// `content_length`).  On Linux, pre-allocates with `fallocate` for objects
+    /// at or above 50 MiB; smaller known-size objects use `set_len` only.
     ///
     /// Returns `(final_path, bytes_written)`.
     pub async fn write_object_from_reader<R>(

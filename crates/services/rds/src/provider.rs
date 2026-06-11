@@ -417,25 +417,33 @@ impl ServiceProvider for RdsProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
-                if store.snapshots.contains_key(&snapshot_id) {
+                if self
+                    .store
+                    .get(account_id, region)
+                    .is_some_and(|store| store.snapshots.contains_key(&snapshot_id))
+                {
                     return Ok(xml_error(
                         "DBSnapshotAlreadyExists",
                         &format!("Snapshot {snapshot_id} already exists"),
                         400,
                     ));
                 }
-                let Some(db) = store.instances.get(&db_id) else {
+                let Some(db) = self
+                    .store
+                    .get(account_id, region)
+                    .and_then(|store| store.instances.get(&db_id).cloned())
+                else {
                     return Ok(xml_error(
                         "DBInstanceNotFound",
                         &format!("DB instance {db_id} not found"),
                         404,
                     ));
                 };
-                let engine = db.engine.clone();
-                let engine_version = db.engine_version.clone();
+                let mut store = self.store.get_or_create(account_id, region);
+                let engine = db.engine;
+                let engine_version = db.engine_version;
                 let allocated_storage = db.allocated_storage;
-                let master_username = db.master_username.clone();
+                let master_username = db.master_username;
                 let snap = DbSnapshot {
                     db_snapshot_identifier: snapshot_id.clone(),
                     db_instance_identifier: db_id,

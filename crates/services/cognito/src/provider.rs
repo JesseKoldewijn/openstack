@@ -204,7 +204,13 @@ impl ServiceProvider for CognitoProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("User pool {pool_id} not found"),
+                        400,
+                    ));
+                };
                 if store.user_pools.remove(&pool_id).is_none() {
                     return Ok(json_error(
                         "ResourceNotFoundException",
@@ -275,7 +281,13 @@ impl ServiceProvider for CognitoProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("User pool {pool_id} not found"),
+                        400,
+                    ));
+                };
                 match store.user_pools.get_mut(&pool_id) {
                     Some(pool) => {
                         if let Some(mfa) = str_param(ctx, "MfaConfiguration") {
@@ -397,6 +409,16 @@ impl ServiceProvider for CognitoProvider {
             // DeleteUserPoolClient
             // ----------------------------------------------------------------
             "DeleteUserPoolClient" => {
+                let pool_id = match str_param(ctx, "UserPoolId") {
+                    Some(id) => id,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidParameterException",
+                            "UserPoolId is required",
+                            400,
+                        ));
+                    }
+                };
                 let client_id = match str_param(ctx, "ClientId") {
                     Some(id) => id,
                     None => {
@@ -407,14 +429,28 @@ impl ServiceProvider for CognitoProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
-                if store.clients.remove(&client_id).is_none() {
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Client {client_id} not found"),
+                        400,
+                    ));
+                };
+                let Some(client) = store.clients.get(&client_id) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Client {client_id} not found"),
+                        400,
+                    ));
+                };
+                if client.user_pool_id != pool_id {
                     return Ok(json_error(
                         "ResourceNotFoundException",
                         &format!("Client {client_id} not found"),
                         400,
                     ));
                 }
+                store.clients.remove(&client_id);
                 Ok(json_ok(json!({})))
             }
 
@@ -422,6 +458,16 @@ impl ServiceProvider for CognitoProvider {
             // DescribeUserPoolClient
             // ----------------------------------------------------------------
             "DescribeUserPoolClient" => {
+                let pool_id = match str_param(ctx, "UserPoolId") {
+                    Some(id) => id,
+                    None => {
+                        return Ok(json_error(
+                            "InvalidParameterException",
+                            "UserPoolId is required",
+                            400,
+                        ));
+                    }
+                };
                 let client_id = match str_param(ctx, "ClientId") {
                     Some(id) => id,
                     None => {
@@ -440,8 +486,10 @@ impl ServiceProvider for CognitoProvider {
                     ));
                 };
                 match store.clients.get(&client_id) {
-                    Some(c) => Ok(json_ok(json!({ "UserPoolClient": client_json(c) }))),
-                    None => Ok(json_error(
+                    Some(c) if c.user_pool_id == pool_id => {
+                        Ok(json_ok(json!({ "UserPoolClient": client_json(c) })))
+                    }
+                    Some(_) | None => Ok(json_error(
                         "ResourceNotFoundException",
                         &format!("Client {client_id} not found"),
                         400,
@@ -588,7 +636,13 @@ impl ServiceProvider for CognitoProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "UserNotFoundException",
+                        &format!("User {username} not found in pool {pool_id}"),
+                        400,
+                    ));
+                };
                 let key = (pool_id.clone(), username.clone());
                 if store.users.remove(&key).is_none() {
                     return Ok(json_error(
@@ -710,11 +764,17 @@ impl ServiceProvider for CognitoProvider {
                     .get("Permanent")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "UserNotFoundException",
+                        &format!("User {username} not found in pool {pool_id}"),
+                        400,
+                    ));
+                };
                 let key = (pool_id.clone(), username.clone());
                 match store.users.get_mut(&key) {
                     Some(user) => {
-                        user.password = Some(password);
+                        user.password = Some(password.to_string());
                         if permanent {
                             user.user_status = UserStatus::Confirmed;
                         }
@@ -754,7 +814,13 @@ impl ServiceProvider for CognitoProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "UserNotFoundException",
+                        &format!("User {username} not found in pool {pool_id}"),
+                        400,
+                    ));
+                };
                 let key = (pool_id.clone(), username.clone());
                 match store.users.get_mut(&key) {
                     Some(user) => {
@@ -808,7 +874,13 @@ impl ServiceProvider for CognitoProvider {
                             .collect()
                     })
                     .unwrap_or_default();
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "UserNotFoundException",
+                        &format!("User {username} not found in pool {pool_id}"),
+                        400,
+                    ));
+                };
                 let key = (pool_id.clone(), username.clone());
                 match store.users.get_mut(&key) {
                     Some(user) => {
@@ -856,11 +928,17 @@ impl ServiceProvider for CognitoProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let password = auth_params
+                let Some(password) = auth_params
                     .get("PASSWORD")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .filter(|p| !p.is_empty())
+                else {
+                    return Ok(json_error(
+                        "NotAuthorizedException",
+                        "Incorrect username or password",
+                        400,
+                    ));
+                };
 
                 let Some(store) = self.store.get(account_id, region) else {
                     return Ok(json_error(
@@ -879,8 +957,8 @@ impl ServiceProvider for CognitoProvider {
                                 400,
                             ));
                         }
-                        let stored_password = user.password.as_deref().unwrap_or("");
-                        if !password.is_empty() && stored_password != password {
+                        let stored_password = user.password.as_deref();
+                        if stored_password != Some(password) {
                             return Ok(json_error(
                                 "NotAuthorizedException",
                                 "Incorrect username or password",

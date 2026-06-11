@@ -467,8 +467,9 @@ async fn test_delete_domain_removes_tags() {
     let mut list_ctx = make_ctx("ListTags", json!({}), "/2021-01-01/tags", "GET");
     list_ctx.query_params.insert("arn".to_string(), arn);
     let resp = p.dispatch(&list_ctx).await.unwrap();
-    assert_eq!(resp.status_code, 200);
-    assert_eq!(body_json(&resp)["TagList"].as_array().unwrap().len(), 0);
+    assert_eq!(resp.status_code, 404);
+    let b = body_json(&resp);
+    assert_eq!(b["code"], "ResourceNotFoundException");
 }
 
 // ---------------------------------------------------------------------------
@@ -736,4 +737,23 @@ async fn test_start_service_software_update_domain_not_found() {
     assert_eq!(resp.status_code, 404);
     let b = body_json(&resp);
     assert_eq!(b["code"], "ResourceNotFoundException");
+    assert!(b["message"].as_str().unwrap().contains("nonexistent"));
+}
+
+#[tokio::test]
+async fn test_cancel_service_software_update_domain_not_found() {
+    let p = OpenSearchProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "CancelServiceSoftwareUpdate",
+            json!({ "DomainName": "nonexistent" }),
+            "/2021-01-01/opensearch/serviceSoftwareUpdate/cancel",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    let b = body_json(&resp);
+    assert_eq!(b["code"], "ResourceNotFoundException");
+    assert!(b["message"].as_str().unwrap().contains("nonexistent"));
 }

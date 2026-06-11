@@ -79,6 +79,10 @@ fn domain_arn(account_id: &str, region: &str, name: &str) -> String {
     format!("arn:aws:es:{region}:{account_id}:domain/{name}")
 }
 
+fn domain_exists_by_arn(store: &OpenSearchStore, arn: &str) -> bool {
+    store.domains.values().any(|domain| domain.arn == arn)
+}
+
 fn domain_endpoint(name: &str, region: &str) -> String {
     format!("search-{name}-fake.{region}.es.amazonaws.com")
 }
@@ -441,7 +445,20 @@ impl ServiceProvider for OpenSearchProvider {
                     .cloned()
                     .unwrap_or_default();
 
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                };
+                if !domain_exists_by_arn(&store, &arn) {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                }
                 let tag_map = store.tags.entry(arn).or_default();
                 for tag in &tag_list {
                     if let (Some(key), Some(value)) = (
@@ -475,7 +492,20 @@ impl ServiceProvider for OpenSearchProvider {
                     })
                     .unwrap_or_default();
 
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                };
+                if !domain_exists_by_arn(&store, &arn) {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                }
                 if let Some(tag_map) = store.tags.get_mut(&arn) {
                     for key in &tag_keys {
                         tag_map.remove(key);
@@ -500,11 +530,21 @@ impl ServiceProvider for OpenSearchProvider {
                     })
                     .unwrap_or_default();
 
-                let tags = self
-                    .store
-                    .get(account_id, region)
-                    .and_then(|store| store.tags.get(&arn).cloned())
-                    .unwrap_or_default();
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                };
+                if !domain_exists_by_arn(&store, &arn) {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                }
+                let tags = store.tags.get(&arn).cloned().unwrap_or_default();
 
                 let tag_list: Vec<Value> = tags
                     .iter()
@@ -607,6 +647,7 @@ impl ServiceProvider for OpenSearchProvider {
                         Ok(json_ok(json!({
                             "ServiceSoftwareOptions": {
                                 "CurrentVersion": options.current_version,
+                                "NewVersion": options.new_version,
                                 "UpdateAvailable": options.update_available,
                                 "Cancellable": options.cancellable,
                                 "UpdateStatus": options.update_status,

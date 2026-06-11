@@ -60,8 +60,10 @@ fn xml_error(code: &str, message: &str, status: u16) -> DispatchResponse {
     let xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ErrorResponse xmlns=\"{EC_NS}\">\
-<Error><Code>{code}</Code><Message>{message}</Message></Error>\
-</ErrorResponse>"
+<Error><Code>{}</Code><Message>{}</Message></Error>\
+</ErrorResponse>",
+        xml_escape(code),
+        xml_escape(message),
     );
     DispatchResponse {
         status_code: status,
@@ -310,6 +312,12 @@ impl ServiceProvider for ElastiCacheProvider {
                 };
                 match store.clusters.remove(&cluster_id) {
                     Some(c) => {
+                        if let Some(rg_id) = &c.replication_group_id {
+                            if let Some(rg) = store.replication_groups.get_mut(rg_id) {
+                                rg.member_clusters.retain(|id| id != &cluster_id);
+                                rg.num_cache_clusters = rg.member_clusters.len() as u32;
+                            }
+                        }
                         let inner =
                             format!("<CacheCluster>{}</CacheCluster>", cluster_xml(&c, region));
                         Ok(xml_resp("DeleteCacheCluster", &rid, &inner))
@@ -723,13 +731,24 @@ impl ServiceProvider for ElastiCacheProvider {
                         400,
                     ));
                 };
-                if store.subnet_groups.remove(&name).is_none() {
+                if !store.subnet_groups.contains_key(&name) {
                     return Ok(xml_error(
                         "CacheSubnetGroupNotFoundFault",
                         &format!("Cache subnet group {name} not found"),
                         400,
                     ));
                 }
+                let in_use = store.clusters.values().any(|cluster| {
+                    cluster.cache_subnet_group_name.as_deref() == Some(name.as_str())
+                });
+                if in_use {
+                    return Ok(xml_error(
+                        "CacheSubnetGroupInUse",
+                        &format!("Cache subnet group {name} is in use"),
+                        400,
+                    ));
+                }
+                store.subnet_groups.remove(&name);
                 Ok(xml_resp("DeleteCacheSubnetGroup", &rid, ""))
             }
 
