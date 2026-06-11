@@ -269,12 +269,9 @@ async fn test_create_snapshot_missing_instance_fails() {
 #[tokio::test]
 async fn test_delete_snapshot() {
     let p = RdsProvider::new();
-    p.dispatch(&make_ctx(
-        "CreateDBInstance",
-        base_instance_params("db-x"),
-    ))
-    .await
-    .unwrap();
+    p.dispatch(&make_ctx("CreateDBInstance", base_instance_params("db-x")))
+        .await
+        .unwrap();
 
     let mut params = HashMap::new();
     params.insert("DBInstanceIdentifier".to_string(), "db-x".to_string());
