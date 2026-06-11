@@ -878,30 +878,6 @@ async fn handle_get_object_async(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        GET_OBJECT_STREAM_LARGE_CUTOFF, GET_OBJECT_STREAM_READ_BUF_LARGE,
-        GET_OBJECT_STREAM_READ_BUF_SMALL, get_object_stream_read_buf,
-    };
-
-    #[test]
-    fn get_object_stream_read_buf_keeps_existing_size_through_cutoff() {
-        assert_eq!(
-            get_object_stream_read_buf(GET_OBJECT_STREAM_LARGE_CUTOFF),
-            GET_OBJECT_STREAM_READ_BUF_SMALL
-        );
-    }
-
-    #[test]
-    fn get_object_stream_read_buf_grows_above_cutoff() {
-        assert_eq!(
-            get_object_stream_read_buf(GET_OBJECT_STREAM_LARGE_CUTOFF + 1),
-            GET_OBJECT_STREAM_READ_BUF_LARGE
-        );
-    }
-}
-
 fn handle_head_object(store: &S3Store, ctx: &RequestContext) -> DispatchResponse {
     let bucket = match bucket_from_path(&ctx.path) {
         Some(b) => b,
@@ -3349,5 +3325,29 @@ fn derive_s3_operation(ctx: &RequestContext) -> Cow<'static, str> {
             }
         }
         _ => Cow::Owned(format!("Unknown({method})")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GET_OBJECT_STREAM_LARGE_CUTOFF, GET_OBJECT_STREAM_READ_BUF_LARGE,
+        GET_OBJECT_STREAM_READ_BUF_SMALL, get_object_stream_read_buf,
+    };
+
+    #[test]
+    fn get_object_stream_read_buf_keeps_existing_size_through_cutoff() {
+        assert_eq!(
+            get_object_stream_read_buf(GET_OBJECT_STREAM_LARGE_CUTOFF),
+            GET_OBJECT_STREAM_READ_BUF_SMALL
+        );
+    }
+
+    #[test]
+    fn get_object_stream_read_buf_grows_above_cutoff() {
+        assert_eq!(
+            get_object_stream_read_buf(GET_OBJECT_STREAM_LARGE_CUTOFF + 1),
+            GET_OBJECT_STREAM_READ_BUF_LARGE
+        );
     }
 }

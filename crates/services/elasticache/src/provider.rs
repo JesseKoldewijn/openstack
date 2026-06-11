@@ -312,11 +312,11 @@ impl ServiceProvider for ElastiCacheProvider {
                 };
                 match store.clusters.remove(&cluster_id) {
                     Some(c) => {
-                        if let Some(rg_id) = &c.replication_group_id {
-                            if let Some(rg) = store.replication_groups.get_mut(rg_id) {
-                                rg.member_clusters.retain(|id| id != &cluster_id);
-                                rg.num_cache_clusters = rg.member_clusters.len() as u32;
-                            }
+                        if let Some(rg_id) = &c.replication_group_id
+                            && let Some(rg) = store.replication_groups.get_mut(rg_id)
+                        {
+                            rg.member_clusters.retain(|id| id != &cluster_id);
+                            rg.num_cache_clusters = rg.member_clusters.len() as u32;
                         }
                         let inner =
                             format!("<CacheCluster>{}</CacheCluster>", cluster_xml(&c, region));
