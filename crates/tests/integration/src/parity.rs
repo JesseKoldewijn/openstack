@@ -1620,11 +1620,6 @@ mod tests {
                 "OpenSearch Service" => "opensearch",
                 "Relational Database Service (RDS)" => "rds",
                 "Redshift" => "redshift",
-                "Elastic Container Service (ECS)" => "ecs",
-                "Relational Database Service (RDS)" => "rds",
-                "Cognito" => "cognito",
-                "ElastiCache" => "elasticache",
-                "CloudTrail" => "cloudtrail",
                 _ => continue,
             };
             readme_services.insert(service.to_string());
