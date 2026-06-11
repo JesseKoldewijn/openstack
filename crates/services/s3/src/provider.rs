@@ -43,6 +43,18 @@ fn inline_object_threshold() -> u64 {
     })
 }
 
+const GET_OBJECT_STREAM_READ_BUF_SMALL: usize = 1024 * 1024;
+const GET_OBJECT_STREAM_READ_BUF_LARGE: usize = 4 * 1024 * 1024;
+const GET_OBJECT_STREAM_LARGE_CUTOFF: u64 = 10 * 1024 * 1024;
+
+fn get_object_stream_read_buf(size: u64) -> usize {
+    if size <= GET_OBJECT_STREAM_LARGE_CUTOFF {
+        GET_OBJECT_STREAM_READ_BUF_SMALL
+    } else {
+        GET_OBJECT_STREAM_READ_BUF_LARGE
+    }
+}
+
 /// A [`std::io::Read`] adapter that feeds every byte through a running MD5
 /// accumulator.  Used inside `spawn_blocking` for the large-object PUT path
 /// so that hashing and disk writes happen on a blocking thread rather than
@@ -833,14 +845,15 @@ async fn handle_get_object_async(
                             }
                         }
                     } else {
-                        // Stream via ReaderStream with a 1 MiB read buffer.
-                        // This halves blocking-pool dispatches vs the original
-                        // 512 KiB capacity while keeping memory overhead minimal
-                        // (no channel allocation, no extra allocation per chunk).
+                        // Keep smaller streamed objects on the existing 1 MiB
+                        // buffer, but use larger reads once objects exceed
+                        // 10 MiB to reduce chunking overhead on large GETs.
                         match ObjectFileStore::read_object_at(&path).await {
                             Ok(file) => {
-                                const READ_BUF: usize = 1024 * 1024; // 1 MiB
-                                let stream = ReaderStream::with_capacity(file, READ_BUF);
+                                let stream = ReaderStream::with_capacity(
+                                    file,
+                                    get_object_stream_read_buf(size),
+                                );
                                 ResponseBody::Streaming {
                                     stream: Box::pin(stream),
                                     content_length: Some(size),
@@ -862,6 +875,30 @@ async fn handle_get_object_async(
                 headers,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GET_OBJECT_STREAM_LARGE_CUTOFF, GET_OBJECT_STREAM_READ_BUF_LARGE,
+        GET_OBJECT_STREAM_READ_BUF_SMALL, get_object_stream_read_buf,
+    };
+
+    #[test]
+    fn get_object_stream_read_buf_keeps_existing_size_through_cutoff() {
+        assert_eq!(
+            get_object_stream_read_buf(GET_OBJECT_STREAM_LARGE_CUTOFF),
+            GET_OBJECT_STREAM_READ_BUF_SMALL
+        );
+    }
+
+    #[test]
+    fn get_object_stream_read_buf_grows_above_cutoff() {
+        assert_eq!(
+            get_object_stream_read_buf(GET_OBJECT_STREAM_LARGE_CUTOFF + 1),
+            GET_OBJECT_STREAM_READ_BUF_LARGE
+        );
     }
 }
 
