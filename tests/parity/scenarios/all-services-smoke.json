@@ -8,8 +8,8 @@
   {"id":"dynamodb-probe","profile":"all-services-smoke","service":"dynamodb","setup":[],"steps":[{"id":"dynamodb-probe-step","protocol":"json","command":["dynamodb","get-item"],"expect_success":false,"capture_json":null}],"assertions":[],"cleanup":[]},
   {"id":"ec2-probe","profile":"all-services-smoke","service":"ec2","setup":[],"steps":[{"id":"ec2-probe-step","protocol":"query-xml","command":["ec2","terminate-instances"],"expect_success":false,"capture_json":null}],"assertions":[],"cleanup":[]},
   {"id":"ecs-probe","profile":"all-services-smoke","service":"ecs","setup":[],"steps":[{"id":"ecs-probe-step","protocol":"json","command":["ecs","list-clusters"],"expect_success":true,"capture_json":null}],"assertions":[],"cleanup":[]},
-  {"id":"elasticache-probe","profile":"all-services-smoke","service":"elasticache","setup":[],"steps":[{"id":"elasticache-probe-step","protocol":"query-xml","command":["elasticache","describe-cache-clusters"],"expect_success":true,"capture_json":null}],"assertions":[],"cleanup":[]},
   {"id":"ecr-probe","profile":"all-services-smoke","service":"ecr","setup":[],"steps":[{"id":"ecr-probe-step","protocol":"json","command":["ecr","describe-images","--repository-name","nonexistent-repo"],"expect_success":false,"capture_json":null}],"assertions":[],"cleanup":[]},
+  {"id":"elasticache-probe","profile":"all-services-smoke","service":"elasticache","setup":[],"steps":[{"id":"elasticache-probe-step","protocol":"query-xml","command":["elasticache","describe-cache-clusters"],"expect_success":true,"capture_json":null}],"assertions":[],"cleanup":[]},
   {
     "id": "ecr-lifecycle",
     "profile": "all-services-smoke",
