@@ -1,0 +1,85 @@
+{
+  "schemaVersion": "1.2",
+  "service": "cloudtrail",
+  "protocol": "json_target",
+  "inputs": [
+    { "name": "bucket_name", "type": "string", "required": true, "description": "S3 bucket name where CloudTrail logs will be delivered" }
+  ],
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create-trail",
+          "title": "Create trail",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.CreateTrail", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"Name\":\"my-trail\",\"S3BucketName\":\"{{inputs.bucket_name}}\"}"
+          },
+          "captures": [{ "name": "trail_arn", "source": "TrailARN" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-trail",
+          "title": "Get trail",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.GetTrail", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"Name\":\"{{captures.trail_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "start-logging",
+          "title": "Start logging",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.StartLogging", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"Name\":\"{{captures.trail_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "get-trail-status",
+          "title": "Get trail status",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.GetTrailStatus", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"Name\":\"{{captures.trail_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "describe-trails",
+          "title": "Describe trails",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.DescribeTrails", "content-type": "application/x-amz-json-1.1" },
+            "body": "{}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "delete-trail",
+          "title": "Delete trail",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.DeleteTrail", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"Name\":\"{{captures.trail_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}

@@ -10,7 +10,7 @@ use openstack_service_framework::traits::{
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
 
-use crate::store::{ClusterConfig, Domain, OpenSearchStore};
+use crate::store::{ClusterConfig, Domain, OpenSearchStore, ServiceSoftwareOptions};
 
 pub struct OpenSearchProvider {
     store: Arc<AccountRegionBundle<OpenSearchStore>>,
@@ -32,7 +32,6 @@ impl Default for OpenSearchProvider {
 
 // ---------------------------------------------------------------------------
 // Helpers — OpenSearch uses JSON protocol with REST paths (no X-Amz-Target)
-// Operations are derived from HTTP method + path by the gateway layer.
 // ---------------------------------------------------------------------------
 
 fn json_ok(body: Value) -> DispatchResponse {
@@ -80,9 +79,69 @@ fn domain_arn(account_id: &str, region: &str, name: &str) -> String {
     format!("arn:aws:es:{region}:{account_id}:domain/{name}")
 }
 
+fn domain_exists_by_arn(store: &OpenSearchStore, arn: &str) -> bool {
+    store.domains.values().any(|domain| domain.arn == arn)
+}
+
 fn domain_endpoint(name: &str, region: &str) -> String {
     format!("search-{name}-fake.{region}.es.amazonaws.com")
 }
+
+fn domain_status_json(d: &Domain) -> Value {
+    json!({
+        "DomainName": d.domain_name,
+        "ARN": d.arn,
+        "EngineVersion": d.engine_version,
+        "Endpoint": d.endpoint,
+        "Processing": false,
+        "Created": true,
+        "Deleted": false,
+        "ClusterConfig": {
+            "InstanceType": d.cluster_config.instance_type,
+            "InstanceCount": d.cluster_config.instance_count,
+        },
+        "ServiceSoftwareOptions": {
+            "CurrentVersion": d.service_software_options.current_version,
+            "NewVersion": d.service_software_options.new_version,
+            "UpdateAvailable": d.service_software_options.update_available,
+            "Cancellable": d.service_software_options.cancellable,
+            "UpdateStatus": d.service_software_options.update_status,
+            "Description": d.service_software_options.description,
+        }
+    })
+}
+
+// Static list of compatible OpenSearch/Elasticsearch upgrade paths
+static COMPATIBLE_VERSIONS: &[(&str, &[&str])] = &[
+    (
+        "Elasticsearch_7.10",
+        &[
+            "OpenSearch_1.0",
+            "OpenSearch_1.1",
+            "OpenSearch_1.2",
+            "OpenSearch_1.3",
+        ],
+    ),
+    ("OpenSearch_1.3", &["OpenSearch_2.3", "OpenSearch_2.5"]),
+    ("OpenSearch_2.3", &["OpenSearch_2.5", "OpenSearch_2.7"]),
+    ("OpenSearch_2.5", &["OpenSearch_2.7", "OpenSearch_2.11"]),
+];
+
+static SUPPORTED_VERSIONS: &[&str] = &[
+    "OpenSearch_2.11",
+    "OpenSearch_2.7",
+    "OpenSearch_2.5",
+    "OpenSearch_2.3",
+    "OpenSearch_1.3",
+    "OpenSearch_1.2",
+    "OpenSearch_1.1",
+    "OpenSearch_1.0",
+    "Elasticsearch_7.10",
+    "Elasticsearch_7.9",
+    "Elasticsearch_7.8",
+    "Elasticsearch_7.7",
+    "Elasticsearch_6.8",
+];
 
 // ---------------------------------------------------------------------------
 // ServiceProvider
@@ -143,6 +202,10 @@ impl ServiceProvider for OpenSearchProvider {
                     endpoint: Some(endpoint.clone()),
                     status: "ACTIVE".to_string(),
                     created: now,
+                    service_software_options: ServiceSoftwareOptions {
+                        current_version: engine_version.clone(),
+                        ..ServiceSoftwareOptions::default()
+                    },
                 };
 
                 let mut store = self.store.get_or_create(account_id, region);
@@ -153,17 +216,9 @@ impl ServiceProvider for OpenSearchProvider {
                         409,
                     ));
                 }
-                store.domains.insert(domain_name.clone(), domain);
+                store.domains.insert(domain_name.clone(), domain.clone());
                 Ok(json_ok(json!({
-                    "DomainStatus": {
-                        "DomainName": domain_name,
-                        "ARN": arn,
-                        "EngineVersion": engine_version,
-                        "Endpoint": endpoint,
-                        "Processing": false,
-                        "Created": true,
-                        "Deleted": false,
-                    }
+                    "DomainStatus": domain_status_json(&domain)
                 })))
             }
 
@@ -171,17 +226,19 @@ impl ServiceProvider for OpenSearchProvider {
             // DeleteDomain  DELETE /2021-01-01/opensearch/domain/{DomainName}
             // ----------------------------------------------------------------
             "DeleteDomain" => {
-                // domain name is last path segment
                 let domain_name = ctx.path.split('/').next_back().unwrap_or("").to_string();
                 let mut store = self.store.get_or_create(account_id, region);
                 match store.domains.remove(&domain_name) {
-                    Some(d) => Ok(json_ok(json!({
-                        "DomainStatus": {
-                            "DomainName": d.domain_name,
-                            "ARN": d.arn,
-                            "Deleted": true,
-                        }
-                    }))),
+                    Some(d) => {
+                        store.tags.remove(&d.arn);
+                        Ok(json_ok(json!({
+                            "DomainStatus": {
+                                "DomainName": d.domain_name,
+                                "ARN": d.arn,
+                                "Deleted": true,
+                            }
+                        })))
+                    }
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         &format!("Domain not found: {domain_name}"),
@@ -204,19 +261,7 @@ impl ServiceProvider for OpenSearchProvider {
                 };
                 match store.domains.get(&domain_name) {
                     Some(d) => Ok(json_ok(json!({
-                        "DomainStatus": {
-                            "DomainName": d.domain_name,
-                            "ARN": d.arn,
-                            "EngineVersion": d.engine_version,
-                            "Endpoint": d.endpoint,
-                            "Processing": false,
-                            "Created": true,
-                            "Deleted": false,
-                            "ClusterConfig": {
-                                "InstanceType": d.cluster_config.instance_type,
-                                "InstanceCount": d.cluster_config.instance_count,
-                            }
-                        }
+                        "DomainStatus": domain_status_json(d)
                     }))),
                     None => Ok(json_error(
                         "ResourceNotFoundException",
@@ -224,6 +269,34 @@ impl ServiceProvider for OpenSearchProvider {
                         404,
                     )),
                 }
+            }
+
+            // ----------------------------------------------------------------
+            // DescribeDomains  POST /2021-01-01/opensearch/domain-info
+            // ----------------------------------------------------------------
+            "DescribeDomains" => {
+                let domain_names: Vec<String> = ctx
+                    .request_body
+                    .get("DomainNames")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "DomainStatusList": [] })));
+                };
+
+                let statuses: Vec<Value> = domain_names
+                    .iter()
+                    .filter_map(|name| store.domains.get(name))
+                    .map(domain_status_json)
+                    .collect();
+
+                Ok(json_ok(json!({ "DomainStatusList": statuses })))
             }
 
             // ----------------------------------------------------------------
@@ -344,6 +417,241 @@ impl ServiceProvider for OpenSearchProvider {
                                         "InstanceCount": domain.cluster_config.instance_count,
                                     }
                                 }
+                            }
+                        })))
+                    }
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
+                        404,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // AddTags  POST /2021-01-01/tags
+            // ----------------------------------------------------------------
+            "AddTags" => {
+                let arn = match ctx.request_body.get("ARN").and_then(|v| v.as_str()) {
+                    Some(a) => a.to_string(),
+                    None => {
+                        return Ok(json_error("ValidationException", "ARN required", 400));
+                    }
+                };
+                let tag_list = ctx
+                    .request_body
+                    .get("TagList")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                };
+                if !domain_exists_by_arn(&store, &arn) {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                }
+                let tag_map = store.tags.entry(arn).or_default();
+                for tag in &tag_list {
+                    if let (Some(key), Some(value)) = (
+                        tag.get("Key").and_then(|v| v.as_str()),
+                        tag.get("Value").and_then(|v| v.as_str()),
+                    ) {
+                        tag_map.insert(key.to_string(), value.to_string());
+                    }
+                }
+                Ok(json_ok(json!({})))
+            }
+
+            // ----------------------------------------------------------------
+            // RemoveTags  POST /2021-01-01/tags-removal
+            // ----------------------------------------------------------------
+            "RemoveTags" => {
+                let arn = match ctx.request_body.get("ARN").and_then(|v| v.as_str()) {
+                    Some(a) => a.to_string(),
+                    None => {
+                        return Ok(json_error("ValidationException", "ARN required", 400));
+                    }
+                };
+                let tag_keys: Vec<String> = ctx
+                    .request_body
+                    .get("TagKeys")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                };
+                if !domain_exists_by_arn(&store, &arn) {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                }
+                if let Some(tag_map) = store.tags.get_mut(&arn) {
+                    for key in &tag_keys {
+                        tag_map.remove(key);
+                    }
+                }
+                Ok(json_ok(json!({})))
+            }
+
+            // ----------------------------------------------------------------
+            // ListTags  GET /2021-01-01/tags?arn={ARN}
+            // ----------------------------------------------------------------
+            "ListTags" => {
+                let arn = ctx
+                    .query_params
+                    .get("arn")
+                    .cloned()
+                    .or_else(|| {
+                        ctx.request_body
+                            .get("ARN")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                    .unwrap_or_default();
+
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                };
+                if !domain_exists_by_arn(&store, &arn) {
+                    return Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found for ARN: {arn}"),
+                        404,
+                    ));
+                }
+                let tags = store.tags.get(&arn).cloned().unwrap_or_default();
+
+                let tag_list: Vec<Value> = tags
+                    .iter()
+                    .map(|(k, v)| json!({ "Key": k, "Value": v }))
+                    .collect();
+
+                Ok(json_ok(json!({ "TagList": tag_list })))
+            }
+
+            // ----------------------------------------------------------------
+            // GetCompatibleVersions  GET /2021-01-01/opensearch/compatibleVersions
+            // ----------------------------------------------------------------
+            "GetCompatibleVersions" => {
+                let compatible_versions: Vec<Value> = COMPATIBLE_VERSIONS
+                    .iter()
+                    .map(|(source, targets)| {
+                        json!({
+                            "SourceVersion": source,
+                            "TargetVersions": targets,
+                        })
+                    })
+                    .collect();
+                Ok(json_ok(json!({
+                    "CompatibleVersions": compatible_versions
+                })))
+            }
+
+            // ----------------------------------------------------------------
+            // ListVersions  GET /2021-01-01/opensearch/versions
+            // ----------------------------------------------------------------
+            "ListVersions" => Ok(json_ok(json!({
+                "Versions": SUPPORTED_VERSIONS,
+                "NextToken": null,
+            }))),
+
+            // ----------------------------------------------------------------
+            // StartServiceSoftwareUpdate  POST /2021-01-01/opensearch/serviceSoftwareUpdate/start
+            // ----------------------------------------------------------------
+            "StartServiceSoftwareUpdate" => {
+                let domain_name = match str_param(ctx, "DomainName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "DomainName required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.domains.get_mut(&domain_name) {
+                    Some(domain) => {
+                        domain.service_software_options.update_status = "IN_PROGRESS".to_string();
+                        domain.service_software_options.update_available = false;
+                        domain.service_software_options.cancellable = true;
+                        domain.service_software_options.description =
+                            "A service software update is in progress.".to_string();
+                        let options = domain.service_software_options.clone();
+                        Ok(json_ok(json!({
+                            "ServiceSoftwareOptions": {
+                                "CurrentVersion": options.current_version,
+                                "NewVersion": options.new_version,
+                                "UpdateAvailable": options.update_available,
+                                "Cancellable": options.cancellable,
+                                "UpdateStatus": options.update_status,
+                                "Description": options.description,
+                            }
+                        })))
+                    }
+                    None => Ok(json_error(
+                        "ResourceNotFoundException",
+                        &format!("Domain not found: {domain_name}"),
+                        404,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // CancelServiceSoftwareUpdate  POST /2021-01-01/opensearch/serviceSoftwareUpdate/cancel
+            // ----------------------------------------------------------------
+            "CancelServiceSoftwareUpdate" => {
+                let domain_name = match str_param(ctx, "DomainName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "DomainName required",
+                            400,
+                        ));
+                    }
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                match store.domains.get_mut(&domain_name) {
+                    Some(domain) => {
+                        domain.service_software_options.update_status = "NOT_ELIGIBLE".to_string();
+                        domain.service_software_options.cancellable = false;
+                        domain.service_software_options.description =
+                            "Service software update was cancelled.".to_string();
+                        let options = domain.service_software_options.clone();
+                        Ok(json_ok(json!({
+                            "ServiceSoftwareOptions": {
+                                "CurrentVersion": options.current_version,
+                                "NewVersion": options.new_version,
+                                "UpdateAvailable": options.update_available,
+                                "Cancellable": options.cancellable,
+                                "UpdateStatus": options.update_status,
+                                "Description": options.description,
                             }
                         })))
                     }

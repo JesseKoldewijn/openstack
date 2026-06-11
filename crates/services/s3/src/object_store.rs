@@ -214,8 +214,8 @@ impl ObjectFileStore {
     ///
     /// All objects use [`write_via_copy`]: an async read loop with a 512 KiB
     /// `BufReader` feeding an adaptive `BufWriter` (2–8 MiB depending on
-    /// `content_length`).  Pre-allocates the file with `set_len` when size
-    /// is known to avoid block-level fragmentation.
+    /// `content_length`).  On Linux, pre-allocates with `fallocate` for objects
+    /// at or above 50 MiB; smaller known-size objects use `set_len` only.
     ///
     /// Returns `(final_path, bytes_written)`.
     pub async fn write_object_from_reader<R>(
@@ -602,10 +602,12 @@ where
 
     let file = fs::File::create(tmp_path).await?;
 
-    // Pre-allocate to avoid block-level fragmentation on ext4/xfs.
+    // Pre-allocate only for larger streamed objects. For mid-sized uploads
+    // (like the 10 MiB benchmark tier), Linux fallocate on container-backed
+    // filesystems can add enough fixed latency to dominate p95.
     #[cfg(target_os = "linux")]
     if let Some(len) = content_length
-        && len > 0
+        && len >= 50 * 1024 * 1024
     {
         use std::os::unix::io::{AsRawFd, BorrowedFd};
 

@@ -51,6 +51,13 @@ async fn create_stack(p: &CloudFormationProvider, name: &str) {
     assert_eq!(resp.status_code, 200);
 }
 
+async fn delete_stack(p: &CloudFormationProvider, name: &str) {
+    let mut params = HashMap::new();
+    params.insert("StackName".to_string(), name.to_string());
+    let resp = p.dispatch(&make_ctx("DeleteStack", params)).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+}
+
 #[tokio::test]
 async fn perf_create_stack_throughput() {
     let p = CloudFormationProvider::new();
@@ -112,6 +119,26 @@ async fn perf_get_template_round_trip() {
     assert!(
         elapsed.as_millis() < 1000,
         "GetTemplate x100 took {}ms — expected <1000ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_create_delete_stack_round_trip() {
+    let p = CloudFormationProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let name = format!("perf-delete-stack-{i:03}");
+        create_stack(&p, &name).await;
+        delete_stack(&p, &name).await;
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2500,
+        "CreateStack+DeleteStack round-trip x{n} took {}ms — expected <2500ms",
         elapsed.as_millis()
     );
 }

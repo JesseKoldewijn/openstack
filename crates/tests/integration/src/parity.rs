@@ -136,6 +136,11 @@ fn all_service_names() -> Vec<String> {
         "redshift",
         "cloudformation",
         "lambda",
+        "ecs",
+        "rds",
+        "cognito",
+        "elasticache",
+        "cloudtrail",
     ]
     .into_iter()
     .map(|s| s.to_string())

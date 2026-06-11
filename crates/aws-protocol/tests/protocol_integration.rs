@@ -254,10 +254,18 @@ mod protocol_integration_tests {
         assert_eq!(AwsProtocol::from_service("ecr"), AwsProtocol::Json);
         assert_eq!(AwsProtocol::from_service("events"), AwsProtocol::Json);
         assert_eq!(AwsProtocol::from_service("states"), AwsProtocol::Json);
+        assert_eq!(AwsProtocol::from_service("cognito"), AwsProtocol::Json);
+        assert_eq!(AwsProtocol::from_service("cognito-idp"), AwsProtocol::Json);
         assert_eq!(AwsProtocol::from_service("ecs"), AwsProtocol::Json);
         assert_eq!(AwsProtocol::from_service("cloudtrail"), AwsProtocol::Json);
-        assert_eq!(AwsProtocol::from_service("cognito-idp"), AwsProtocol::Json);
         // unknown service falls back to rest-json
         assert_eq!(AwsProtocol::from_service("unknown"), AwsProtocol::RestJson);
+    }
+
+    #[test]
+    fn protocol_routing_normalizes_case_and_underscore_aliases() {
+        assert_eq!(AwsProtocol::from_service("SQS"), AwsProtocol::Query);
+        assert_eq!(AwsProtocol::from_service("COGNITO_IDP"), AwsProtocol::Json);
+        assert_eq!(AwsProtocol::from_service("es"), AwsProtocol::RestJson);
     }
 }

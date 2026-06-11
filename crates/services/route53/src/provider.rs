@@ -10,7 +10,7 @@ use openstack_service_framework::xml::xml_escape;
 use openstack_state::AccountRegionBundle;
 use uuid::Uuid;
 
-use crate::store::{HostedZone, ResourceRecordSet, Route53Store};
+use crate::store::{HealthCheck, HealthCheckConfig, HostedZone, ResourceRecordSet, Route53Store};
 
 pub struct Route53Provider {
     store: Arc<AccountRegionBundle<Route53Store>>,
@@ -97,7 +97,6 @@ fn xml_text(xml: &str, tag: &str) -> Option<String> {
 
 /// Parse ResourceRecordSet entries from ChangeResourceRecordSets XML body
 fn parse_rrsets(xml: &str) -> Vec<(String, ResourceRecordSet)> {
-    // Minimal parser: find <Change> blocks
     let mut results = Vec::new();
     let mut remaining = xml;
     while let Some(start) = remaining.find("<Change>") {
@@ -133,6 +132,71 @@ fn parse_rrsets(xml: &str) -> Vec<(String, ResourceRecordSet)> {
     results
 }
 
+fn zone_xml(zone: &HostedZone) -> String {
+    format!(
+        "<HostedZone>\
+<Id>/hostedzone/{}</Id>\
+<Name>{}</Name>\
+<CallerReference>{}</CallerReference>\
+<Config><Comment>{}</Comment><PrivateZone>{}</PrivateZone></Config>\
+<ResourceRecordSetCount>{}</ResourceRecordSetCount>\
+</HostedZone>",
+        zone.id,
+        xml_escape(&zone.name),
+        xml_escape(&zone.caller_reference),
+        xml_escape(&zone.comment),
+        zone.private_zone,
+        zone.record_count
+    )
+}
+
+fn health_check_xml(hc: &HealthCheck) -> String {
+    let ip_xml = hc
+        .config
+        .ip_address
+        .as_deref()
+        .map(|ip| format!("<IPAddress>{}</IPAddress>", xml_escape(ip)))
+        .unwrap_or_default();
+    let path_xml = hc
+        .config
+        .resource_path
+        .as_deref()
+        .map(|p| format!("<ResourcePath>{}</ResourcePath>", xml_escape(p)))
+        .unwrap_or_default();
+    let fqdn_xml = hc
+        .config
+        .fully_qualified_domain_name
+        .as_deref()
+        .map(|f| {
+            format!(
+                "<FullyQualifiedDomainName>{}</FullyQualifiedDomainName>",
+                xml_escape(f)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "<Id>{}</Id>\
+<CallerReference>{}</CallerReference>\
+<HealthCheckConfig>\
+{ip_xml}\
+<Port>{}</Port>\
+<Type>{}</Type>\
+{path_xml}\
+{fqdn_xml}\
+<RequestInterval>{}</RequestInterval>\
+<FailureThreshold>{}</FailureThreshold>\
+</HealthCheckConfig>\
+<HealthCheckVersion>{}</HealthCheckVersion>",
+        xml_escape(&hc.id),
+        xml_escape(&hc.caller_reference),
+        hc.config.port,
+        xml_escape(&hc.config.health_check_type),
+        hc.config.request_interval,
+        hc.config.failure_threshold,
+        hc.health_check_version,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // ServiceProvider
 // ---------------------------------------------------------------------------
@@ -154,7 +218,6 @@ impl ServiceProvider for Route53Provider {
             "CreateHostedZone" => {
                 let raw = String::from_utf8_lossy(ctx.raw_body_bytes());
                 let name_raw = xml_text(&raw, "Name").unwrap_or_default();
-                // Normalize: ensure trailing dot
                 let name = if name_raw.ends_with('.') {
                     name_raw
                 } else {
@@ -208,7 +271,6 @@ impl ServiceProvider for Route53Provider {
             // DeleteHostedZone  DELETE /2013-04-01/hostedzone/{Id}
             // ----------------------------------------------------------------
             "DeleteHostedZone" => {
-                // Extract zone ID from path: /2013-04-01/hostedzone/{id}
                 let zone_id = ctx.path.split('/').next_back().unwrap_or("").to_string();
                 let mut store = self.store.get_or_create(account_id, ROUTE53_REGION);
                 store.zones.remove(&zone_id);
@@ -238,27 +300,7 @@ impl ServiceProvider for Route53Provider {
                     );
                     return Ok(xml_ok(body));
                 };
-                let zones_xml: String = store
-                    .zones
-                    .values()
-                    .map(|z| {
-                        format!(
-                            "<HostedZone>\
-<Id>/hostedzone/{}</Id>\
-<Name>{}</Name>\
-<CallerReference>{}</CallerReference>\
-<Config><Comment>{}</Comment><PrivateZone>{}</PrivateZone></Config>\
-<ResourceRecordSetCount>{}</ResourceRecordSetCount>\
-</HostedZone>",
-                            z.id,
-                            xml_escape(&z.name),
-                            xml_escape(&z.caller_reference),
-                            xml_escape(&z.comment),
-                            z.private_zone,
-                            z.record_count
-                        )
-                    })
-                    .collect();
+                let zones_xml: String = store.zones.values().map(zone_xml).collect();
                 let body = format!(
                     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ListHostedZonesResponse xmlns=\"{ROUTE53_NS}\">\
@@ -292,20 +334,9 @@ impl ServiceProvider for Route53Provider {
                 let body = format!(
                     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <GetHostedZoneResponse xmlns=\"{ROUTE53_NS}\">\
-<HostedZone>\
-<Id>/hostedzone/{}</Id>\
-<Name>{}</Name>\
-<CallerReference>{}</CallerReference>\
-<Config><Comment>{}</Comment><PrivateZone>{}</PrivateZone></Config>\
-<ResourceRecordSetCount>{}</ResourceRecordSetCount>\
-</HostedZone>\
+{}\
 </GetHostedZoneResponse>",
-                    zone.id,
-                    xml_escape(&zone.name),
-                    xml_escape(&zone.caller_reference),
-                    xml_escape(&zone.comment),
-                    zone.private_zone,
-                    zone.record_count
+                    zone_xml(zone)
                 );
                 Ok(xml_ok(body))
             }
@@ -328,9 +359,7 @@ impl ServiceProvider for Route53Provider {
             // ChangeResourceRecordSets  POST /2013-04-01/hostedzone/{Id}/rrset
             // ----------------------------------------------------------------
             "ChangeResourceRecordSets" => {
-                // Path: /2013-04-01/hostedzone/{id}/rrset
                 let parts: Vec<&str> = ctx.path.split('/').collect();
-                // find "hostedzone" segment
                 let zone_id = parts
                     .iter()
                     .enumerate()
@@ -355,7 +384,6 @@ impl ServiceProvider for Route53Provider {
                             store.records.remove(&key);
                         }
                         _ => {
-                            // CREATE | UPSERT
                             store.records.insert(key, rrset);
                         }
                     }
@@ -434,6 +462,313 @@ impl ServiceProvider for Route53Provider {
 <IsTruncated>false</IsTruncated>\
 <MaxItems>100</MaxItems>\
 </ListResourceRecordSetsResponse>"
+                );
+                Ok(xml_ok(body))
+            }
+
+            // ----------------------------------------------------------------
+            // ListHostedZonesByName  GET /2013-04-01/hostedzonesbyname
+            // ----------------------------------------------------------------
+            "ListHostedZonesByName" => {
+                let Some(store) = self.store.get(account_id, ROUTE53_REGION) else {
+                    let body = format!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ListHostedZonesByNameResponse xmlns=\"{ROUTE53_NS}\">\
+<HostedZones></HostedZones>\
+<IsTruncated>false</IsTruncated>\
+<MaxItems>100</MaxItems>\
+</ListHostedZonesByNameResponse>"
+                    );
+                    return Ok(xml_ok(body));
+                };
+                let dns_name_filter = ctx
+                    .query_params
+                    .get("dnsname")
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let mut zones: Vec<&HostedZone> = store
+                    .zones
+                    .values()
+                    .filter(|z| {
+                        dns_name_filter.is_empty()
+                            || z.name
+                                .trim_end_matches('.')
+                                .ends_with(dns_name_filter.trim_end_matches('.'))
+                    })
+                    .collect();
+                zones.sort_by(|a, b| a.name.cmp(&b.name));
+                let zones_xml: String = zones.iter().map(|z| zone_xml(z)).collect();
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ListHostedZonesByNameResponse xmlns=\"{ROUTE53_NS}\">\
+<HostedZones>{zones_xml}</HostedZones>\
+<IsTruncated>false</IsTruncated>\
+<MaxItems>100</MaxItems>\
+</ListHostedZonesByNameResponse>"
+                );
+                Ok(xml_ok(body))
+            }
+
+            // ----------------------------------------------------------------
+            // GetHostedZoneCount  GET /2013-04-01/hostedzonecount
+            // ----------------------------------------------------------------
+            "GetHostedZoneCount" => {
+                let count = self
+                    .store
+                    .get(account_id, ROUTE53_REGION)
+                    .map(|s| s.zones.len())
+                    .unwrap_or(0);
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<GetHostedZoneCountResponse xmlns=\"{ROUTE53_NS}\">\
+<HostedZoneCount>{count}</HostedZoneCount>\
+</GetHostedZoneCountResponse>"
+                );
+                Ok(xml_ok(body))
+            }
+
+            // ----------------------------------------------------------------
+            // CreateHealthCheck  POST /2013-04-01/healthcheck
+            // ----------------------------------------------------------------
+            "CreateHealthCheck" => {
+                let raw = String::from_utf8_lossy(ctx.raw_body_bytes());
+                let caller_reference = xml_text(&raw, "CallerReference").unwrap_or_else(req_id);
+                let health_check_type =
+                    xml_text(&raw, "Type").unwrap_or_else(|| "HTTP".to_string());
+                let ip_address = xml_text(&raw, "IPAddress");
+                let port: u16 = xml_text(&raw, "Port")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(80);
+                let resource_path = xml_text(&raw, "ResourcePath");
+                let fqdn = xml_text(&raw, "FullyQualifiedDomainName");
+                let request_interval: u32 = xml_text(&raw, "RequestInterval")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(30);
+                let failure_threshold: u32 = xml_text(&raw, "FailureThreshold")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(3);
+
+                let hc_id = short_id();
+                let hc = HealthCheck {
+                    id: hc_id.clone(),
+                    caller_reference,
+                    config: HealthCheckConfig {
+                        ip_address,
+                        port,
+                        health_check_type,
+                        resource_path,
+                        fully_qualified_domain_name: fqdn,
+                        request_interval,
+                        failure_threshold,
+                    },
+                    health_check_version: 1,
+                };
+
+                let mut store = self.store.get_or_create(account_id, ROUTE53_REGION);
+                store.health_checks.insert(hc_id.clone(), hc.clone());
+
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<CreateHealthCheckResponse xmlns=\"{ROUTE53_NS}\">\
+<HealthCheck>{}</HealthCheck>\
+</CreateHealthCheckResponse>",
+                    health_check_xml(&hc)
+                );
+                Ok(xml_created(
+                    body,
+                    &format!("/2013-04-01/healthcheck/{hc_id}"),
+                ))
+            }
+
+            // ----------------------------------------------------------------
+            // GetHealthCheck  GET /2013-04-01/healthcheck/{Id}
+            // ----------------------------------------------------------------
+            "GetHealthCheck" => {
+                let hc_id = ctx.path.split('/').next_back().unwrap_or("").to_string();
+                let Some(store) = self.store.get(account_id, ROUTE53_REGION) else {
+                    return Ok(xml_error(
+                        "NoSuchHealthCheck",
+                        &format!("No health check with ID: {hc_id}"),
+                        404,
+                    ));
+                };
+                match store.health_checks.get(&hc_id) {
+                    Some(hc) => {
+                        let body = format!(
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<GetHealthCheckResponse xmlns=\"{ROUTE53_NS}\">\
+<HealthCheck>{}</HealthCheck>\
+</GetHealthCheckResponse>",
+                            health_check_xml(hc)
+                        );
+                        Ok(xml_ok(body))
+                    }
+                    None => Ok(xml_error(
+                        "NoSuchHealthCheck",
+                        &format!("No health check with ID: {hc_id}"),
+                        404,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // DeleteHealthCheck  DELETE /2013-04-01/healthcheck/{Id}
+            // ----------------------------------------------------------------
+            "DeleteHealthCheck" => {
+                let hc_id = ctx.path.split('/').next_back().unwrap_or("").to_string();
+                let mut store = self.store.get_or_create(account_id, ROUTE53_REGION);
+                if store.health_checks.remove(&hc_id).is_none() {
+                    return Ok(xml_error(
+                        "NoSuchHealthCheck",
+                        &format!("No health check with ID: {hc_id}"),
+                        404,
+                    ));
+                }
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<DeleteHealthCheckResponse xmlns=\"{ROUTE53_NS}\"></DeleteHealthCheckResponse>"
+                );
+                Ok(xml_ok(body))
+            }
+
+            // ----------------------------------------------------------------
+            // ListHealthChecks  GET /2013-04-01/healthcheck
+            // ----------------------------------------------------------------
+            "ListHealthChecks" => {
+                let Some(store) = self.store.get(account_id, ROUTE53_REGION) else {
+                    let body = format!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ListHealthChecksResponse xmlns=\"{ROUTE53_NS}\">\
+<HealthChecks></HealthChecks>\
+<IsTruncated>false</IsTruncated>\
+<MaxItems>100</MaxItems>\
+</ListHealthChecksResponse>"
+                    );
+                    return Ok(xml_ok(body));
+                };
+                let hcs_xml: String = store
+                    .health_checks
+                    .values()
+                    .map(|hc| format!("<HealthCheck>{}</HealthCheck>", health_check_xml(hc)))
+                    .collect();
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ListHealthChecksResponse xmlns=\"{ROUTE53_NS}\">\
+<HealthChecks>{hcs_xml}</HealthChecks>\
+<IsTruncated>false</IsTruncated>\
+<MaxItems>100</MaxItems>\
+</ListHealthChecksResponse>"
+                );
+                Ok(xml_ok(body))
+            }
+
+            // ----------------------------------------------------------------
+            // ChangeTagsForResource  POST /2013-04-01/tags/{ResourceType}/{ResourceId}
+            // ----------------------------------------------------------------
+            "ChangeTagsForResource" => {
+                // Path: /2013-04-01/tags/{resourcetype}/{resourceid}
+                let parts: Vec<&str> = ctx.path.split('/').collect();
+                let (resource_type, resource_id) = parts
+                    .iter()
+                    .enumerate()
+                    .find(|(_, p)| *p == &"tags")
+                    .map(|(i, _)| {
+                        let rtype = parts.get(i + 1).copied().unwrap_or("");
+                        let rid = parts.get(i + 2).copied().unwrap_or("");
+                        (rtype.to_string(), rid.to_string())
+                    })
+                    .unwrap_or_default();
+
+                let raw = String::from_utf8_lossy(ctx.raw_body_bytes());
+                let mut store = self.store.get_or_create(account_id, ROUTE53_REGION);
+                let tag_map = store.tags.entry((resource_type, resource_id)).or_default();
+
+                // Parse <AddTags><Tag><Key>...</Key><Value>...</Value></Tag></AddTags>
+                let mut rest = raw.as_ref();
+                while let Some(start) = rest.find("<Tag>") {
+                    let chunk = &rest[start..];
+                    let end = chunk.find("</Tag>").unwrap_or(chunk.len());
+                    let tag_block = &chunk[..end];
+                    if let (Some(key), Some(value)) =
+                        (xml_text(tag_block, "Key"), xml_text(tag_block, "Value"))
+                    {
+                        tag_map.insert(key, value);
+                    }
+                    rest = &rest[start + end..];
+                }
+
+                // Parse <RemoveTagKeys><Key>...</Key></RemoveTagKeys>
+                let mut remove_rest = raw.as_ref();
+                if let Some(remove_start) = remove_rest.find("<RemoveTagKeys>") {
+                    let remove_chunk = &remove_rest[remove_start..];
+                    let remove_end = remove_chunk
+                        .find("</RemoveTagKeys>")
+                        .unwrap_or(remove_chunk.len());
+                    let remove_block = &remove_chunk[..remove_end];
+                    remove_rest = remove_block;
+                    while let Some(ks) = remove_rest.find("<Key>") {
+                        let after = &remove_rest[ks + 5..];
+                        if let Some(ke) = after.find("</Key>") {
+                            let k = &after[..ke];
+                            tag_map.remove(k);
+                        }
+                        remove_rest = &remove_rest[ks + 5..];
+                    }
+                }
+
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ChangeTagsForResourceResponse xmlns=\"{ROUTE53_NS}\"></ChangeTagsForResourceResponse>"
+                );
+                Ok(xml_ok(body))
+            }
+
+            // ----------------------------------------------------------------
+            // ListTagsForResource  GET /2013-04-01/tags/{ResourceType}/{ResourceId}
+            // ----------------------------------------------------------------
+            "ListTagsForResource" => {
+                let parts: Vec<&str> = ctx.path.split('/').collect();
+                let (resource_type, resource_id) = parts
+                    .iter()
+                    .enumerate()
+                    .find(|(_, p)| *p == &"tags")
+                    .map(|(i, _)| {
+                        let rtype = parts.get(i + 1).copied().unwrap_or("");
+                        let rid = parts.get(i + 2).copied().unwrap_or("");
+                        (rtype.to_string(), rid.to_string())
+                    })
+                    .unwrap_or_default();
+
+                let tags_xml = self
+                    .store
+                    .get(account_id, ROUTE53_REGION)
+                    .and_then(|store| {
+                        store
+                            .tags
+                            .get(&(resource_type.clone(), resource_id.clone()))
+                            .map(|tags| {
+                                tags.iter()
+                                    .map(|(k, v)| {
+                                        format!(
+                                            "<Tag><Key>{}</Key><Value>{}</Value></Tag>",
+                                            xml_escape(k),
+                                            xml_escape(v)
+                                        )
+                                    })
+                                    .collect::<String>()
+                            })
+                    })
+                    .unwrap_or_default();
+
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ListTagsForResourceResponse xmlns=\"{ROUTE53_NS}\">\
+<ResourceTagSet>\
+<ResourceType>{resource_type}</ResourceType>\
+<ResourceId>{resource_id}</ResourceId>\
+<Tags>{tags_xml}</Tags>\
+</ResourceTagSet>\
+</ListTagsForResourceResponse>"
                 );
                 Ok(xml_ok(body))
             }

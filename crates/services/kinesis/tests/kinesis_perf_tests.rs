@@ -43,6 +43,14 @@ async fn create_stream(p: &KinesisProvider, name: &str) {
     assert_eq!(resp.status_code, 200);
 }
 
+async fn delete_stream(p: &KinesisProvider, name: &str) {
+    let resp = p
+        .dispatch(&make_ctx("DeleteStream", json!({ "StreamName": name })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+}
+
 // ---------------------------------------------------------------------------
 // Perf 1 — AddTags + ListTags round-trip latency
 //
@@ -223,6 +231,26 @@ async fn perf_remove_tags_round_trip() {
     assert!(
         elapsed.as_millis() < 500,
         "RemoveTags+ListTags round-trip took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_create_and_delete_stream_round_trip() {
+    let p = KinesisProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let name = format!("perf-delete-stream-{i:03}");
+        create_stream(&p, &name).await;
+        delete_stream(&p, &name).await;
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2000,
+        "CreateStream/DeleteStream x{n} took {}ms — expected <2000ms",
         elapsed.as_millis()
     );
 }

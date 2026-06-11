@@ -55,6 +55,11 @@ COPY crates/services/acm/Cargo.toml           crates/services/acm/Cargo.toml
 COPY crates/services/ecr/Cargo.toml           crates/services/ecr/Cargo.toml
 COPY crates/services/opensearch/Cargo.toml    crates/services/opensearch/Cargo.toml
 COPY crates/services/redshift/Cargo.toml      crates/services/redshift/Cargo.toml
+COPY crates/services/ecs/Cargo.toml           crates/services/ecs/Cargo.toml
+COPY crates/services/rds/Cargo.toml           crates/services/rds/Cargo.toml
+COPY crates/services/cognito/Cargo.toml       crates/services/cognito/Cargo.toml
+COPY crates/services/elasticache/Cargo.toml   crates/services/elasticache/Cargo.toml
+COPY crates/services/cloudtrail/Cargo.toml    crates/services/cloudtrail/Cargo.toml
 COPY crates/tests/integration/Cargo.toml     crates/tests/integration/Cargo.toml
 
 # Create stub lib.rs / main.rs files so Cargo can resolve the dependency graph

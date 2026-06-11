@@ -1,0 +1,87 @@
+{
+  "schemaVersion": "1.2",
+  "service": "cognito",
+  "protocol": "json_target",
+  "inputs": [
+    { "name": "pool_name", "type": "string", "required": true, "description": "Name for the Cognito user pool" },
+    { "name": "username", "type": "string", "required": true, "description": "Username for the test user" }
+  ],
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create-user-pool",
+          "title": "Create user pool",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonCognitoIdentityProvider.CreateUserPool", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"PoolName\":\"{{inputs.pool_name}}\"}"
+          },
+          "captures": [{ "name": "pool_id", "source": "UserPool.Id" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "create-user-pool-client",
+          "title": "Create app client",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonCognitoIdentityProvider.CreateUserPoolClient", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"UserPoolId\":\"{{captures.pool_id}}\",\"ClientName\":\"test-client\"}"
+          },
+          "captures": [{ "name": "client_id", "source": "UserPoolClient.ClientId" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "admin-create-user",
+          "title": "Create user",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonCognitoIdentityProvider.AdminCreateUser", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"UserPoolId\":\"{{captures.pool_id}}\",\"Username\":\"{{inputs.username}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-users",
+          "title": "List users",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonCognitoIdentityProvider.ListUsers", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"UserPoolId\":\"{{captures.pool_id}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "admin-delete-user",
+          "title": "Delete user",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonCognitoIdentityProvider.AdminDeleteUser", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"UserPoolId\":\"{{captures.pool_id}}\",\"Username\":\"{{inputs.username}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "delete-user-pool",
+          "title": "Delete user pool",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonCognitoIdentityProvider.DeleteUserPool", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"UserPoolId\":\"{{captures.pool_id}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}

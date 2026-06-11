@@ -1,0 +1,87 @@
+{
+  "schemaVersion": "1.2",
+  "service": "ecs",
+  "protocol": "json_target",
+  "inputs": [
+    { "name": "cluster_name", "type": "string", "required": true, "description": "Name for the ECS cluster" },
+    { "name": "task_family", "type": "string", "required": true, "description": "Task definition family name" }
+  ],
+  "flows": [
+    {
+      "id": "l1-basic",
+      "level": "L1",
+      "steps": [
+        {
+          "id": "create-cluster",
+          "title": "Create cluster",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerServiceV20141113.CreateCluster", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"clusterName\":\"{{inputs.cluster_name}}\"}"
+          },
+          "captures": [{ "name": "cluster_arn", "source": "cluster.clusterArn" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "register-task-definition",
+          "title": "Register task definition",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerServiceV20141113.RegisterTaskDefinition", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"family\":\"{{inputs.task_family}}\",\"containerDefinitions\":[{\"name\":\"app\",\"image\":\"nginx:latest\",\"essential\":true}]}"
+          },
+          "captures": [{ "name": "task_def_arn", "source": "taskDefinition.taskDefinitionArn" }],
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-clusters",
+          "title": "List clusters",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerServiceV20141113.ListClusters", "content-type": "application/x-amz-json-1.1" },
+            "body": "{}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "list-task-definitions",
+          "title": "List task definitions",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerServiceV20141113.ListTaskDefinitions", "content-type": "application/x-amz-json-1.1" },
+            "body": "{}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ],
+      "cleanup": [
+        {
+          "id": "deregister-task-definition",
+          "title": "Deregister task definition",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerServiceV20141113.DeregisterTaskDefinition", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"taskDefinition\":\"{{captures.task_def_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        },
+        {
+          "id": "delete-cluster",
+          "title": "Delete cluster",
+          "operation": {
+            "method": "POST",
+            "path": "/",
+            "headers": { "x-amz-target": "AmazonEC2ContainerServiceV20141113.DeleteCluster", "content-type": "application/x-amz-json-1.1" },
+            "body": "{\"cluster\":\"{{captures.cluster_arn}}\"}"
+          },
+          "assertions": [{ "kind": "status", "target": "status", "expected": "200" }]
+        }
+      ]
+    }
+  ]
+}

@@ -9,8 +9,9 @@ use openstack_service_framework::traits::{
 };
 use openstack_state::AccountRegionBundle;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
-use crate::store::{Parameter, ParameterType, SsmStore};
+use crate::store::{Command, CommandInvocation, Document, Parameter, ParameterType, SsmStore};
 
 pub struct SsmProvider {
     store: Arc<AccountRegionBundle<SsmStore>>,
@@ -77,6 +78,10 @@ fn param_to_json(p: &Parameter) -> Value {
     })
 }
 
+fn req_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
 // ---------------------------------------------------------------------------
 // ServiceProvider
 // ---------------------------------------------------------------------------
@@ -93,6 +98,9 @@ impl ServiceProvider for SsmProvider {
         let region = &ctx.region;
 
         match op {
+            // ----------------------------------------------------------------
+            // PutParameter
+            // ----------------------------------------------------------------
             "PutParameter" => {
                 let name = match str_param(ctx, "Name") {
                     Some(n) => n,
@@ -137,10 +145,19 @@ impl ServiceProvider for SsmProvider {
                     arn,
                     overwrite,
                 };
+                // Keep version history
+                store
+                    .parameter_history
+                    .entry(name.clone())
+                    .or_default()
+                    .push(param.clone());
                 store.parameters.insert(name, param);
                 Ok(json_ok(json!({ "Version": version, "Tier": "Standard" })))
             }
 
+            // ----------------------------------------------------------------
+            // GetParameter
+            // ----------------------------------------------------------------
             "GetParameter" => {
                 let name = match str_param(ctx, "Name") {
                     Some(n) => n,
@@ -163,6 +180,9 @@ impl ServiceProvider for SsmProvider {
                 }
             }
 
+            // ----------------------------------------------------------------
+            // GetParameters
+            // ----------------------------------------------------------------
             "GetParameters" => {
                 let names = ctx
                     .request_body
@@ -196,6 +216,9 @@ impl ServiceProvider for SsmProvider {
                 })))
             }
 
+            // ----------------------------------------------------------------
+            // GetParametersByPath
+            // ----------------------------------------------------------------
             "GetParametersByPath" => {
                 let path = match str_param(ctx, "Path") {
                     Some(p) => p,
@@ -216,7 +239,6 @@ impl ServiceProvider for SsmProvider {
                         if recursive {
                             p.name.starts_with(&path)
                         } else {
-                            // Direct children only: path must be the parent
                             p.name.starts_with(&path)
                                 && !p.name[path.len()..].trim_start_matches('/').contains('/')
                         }
@@ -226,6 +248,9 @@ impl ServiceProvider for SsmProvider {
                 Ok(json_ok(json!({ "Parameters": params })))
             }
 
+            // ----------------------------------------------------------------
+            // DeleteParameter
+            // ----------------------------------------------------------------
             "DeleteParameter" => {
                 let name = match str_param(ctx, "Name") {
                     Some(n) => n,
@@ -242,6 +267,9 @@ impl ServiceProvider for SsmProvider {
                 Ok(json_ok(json!({})))
             }
 
+            // ----------------------------------------------------------------
+            // DeleteParameters
+            // ----------------------------------------------------------------
             "DeleteParameters" => {
                 let names = ctx
                     .request_body
@@ -267,6 +295,9 @@ impl ServiceProvider for SsmProvider {
                 })))
             }
 
+            // ----------------------------------------------------------------
+            // DescribeParameters
+            // ----------------------------------------------------------------
             "DescribeParameters" => {
                 let Some(store) = self.store.get(account_id, region) else {
                     return Ok(json_ok(json!({ "Parameters": [] })));
@@ -286,6 +317,455 @@ impl ServiceProvider for SsmProvider {
                     })
                     .collect();
                 Ok(json_ok(json!({ "Parameters": params })))
+            }
+
+            // ----------------------------------------------------------------
+            // GetParameterHistory
+            // ----------------------------------------------------------------
+            "GetParameterHistory" => {
+                let name = match str_param(ctx, "Name") {
+                    Some(n) => n,
+                    None => return Ok(json_error("ValidationException", "Name is required", 400)),
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "ParameterNotFound",
+                        &format!("Parameter {name} not found"),
+                        400,
+                    ));
+                };
+                if !store.parameters.contains_key(&name) {
+                    return Ok(json_error(
+                        "ParameterNotFound",
+                        &format!("Parameter {name} not found"),
+                        400,
+                    ));
+                }
+                let history: Vec<Value> = store
+                    .parameter_history
+                    .get(&name)
+                    .map(|versions| versions.iter().map(param_to_json).collect())
+                    .unwrap_or_default();
+                Ok(json_ok(json!({ "Parameters": history })))
+            }
+
+            // ----------------------------------------------------------------
+            // CreateDocument
+            // ----------------------------------------------------------------
+            "CreateDocument" => {
+                let name = match str_param(ctx, "Name") {
+                    Some(n) => n,
+                    None => return Ok(json_error("ValidationException", "Name is required", 400)),
+                };
+                let content = match str_param(ctx, "Content") {
+                    Some(c) => c,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "Content is required",
+                            400,
+                        ));
+                    }
+                };
+                let document_type =
+                    str_param(ctx, "DocumentType").unwrap_or_else(|| "Command".to_string());
+                let document_format =
+                    str_param(ctx, "DocumentFormat").unwrap_or_else(|| "JSON".to_string());
+
+                let mut store = self.store.get_or_create(account_id, region);
+                if store.documents.contains_key(&name) {
+                    return Ok(json_error(
+                        "DocumentAlreadyExists",
+                        &format!("Document {name} already exists"),
+                        400,
+                    ));
+                }
+                let doc = Document {
+                    name: name.clone(),
+                    document_type: document_type.clone(),
+                    document_format: document_format.clone(),
+                    schema_version: "2.2".to_string(),
+                    status: "Active".to_string(),
+                    content,
+                    owner: account_id.clone(),
+                    created: Utc::now(),
+                    tags: Default::default(),
+                };
+                store.documents.insert(name.clone(), doc);
+                Ok(json_ok(json!({
+                    "DocumentDescription": {
+                        "Name": name,
+                        "DocumentType": document_type,
+                        "DocumentFormat": document_format,
+                        "Status": "Active",
+                        "SchemaVersion": "2.2",
+                        "Owner": account_id,
+                    }
+                })))
+            }
+
+            // ----------------------------------------------------------------
+            // DeleteDocument
+            // ----------------------------------------------------------------
+            "DeleteDocument" => {
+                let name = match str_param(ctx, "Name") {
+                    Some(n) => n,
+                    None => return Ok(json_error("ValidationException", "Name is required", 400)),
+                };
+                let mut store = self.store.get_or_create(account_id, region);
+                if store.documents.remove(&name).is_none() {
+                    return Ok(json_error(
+                        "InvalidDocument",
+                        &format!("Document {name} does not exist"),
+                        400,
+                    ));
+                }
+                Ok(json_ok(json!({})))
+            }
+
+            // ----------------------------------------------------------------
+            // DescribeDocument
+            // ----------------------------------------------------------------
+            "DescribeDocument" => {
+                let name = match str_param(ctx, "Name") {
+                    Some(n) => n,
+                    None => return Ok(json_error("ValidationException", "Name is required", 400)),
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "InvalidDocument",
+                        &format!("Document {name} does not exist"),
+                        400,
+                    ));
+                };
+                match store.documents.get(&name) {
+                    Some(doc) => Ok(json_ok(json!({
+                        "Document": {
+                            "Name": doc.name,
+                            "DocumentType": doc.document_type,
+                            "DocumentFormat": doc.document_format,
+                            "SchemaVersion": doc.schema_version,
+                            "Status": doc.status,
+                            "Owner": doc.owner,
+                        }
+                    }))),
+                    None => Ok(json_error(
+                        "InvalidDocument",
+                        &format!("Document {name} does not exist"),
+                        400,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // GetDocument
+            // ----------------------------------------------------------------
+            "GetDocument" => {
+                let name = match str_param(ctx, "Name") {
+                    Some(n) => n,
+                    None => return Ok(json_error("ValidationException", "Name is required", 400)),
+                };
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "InvalidDocument",
+                        &format!("Document {name} does not exist"),
+                        400,
+                    ));
+                };
+                match store.documents.get(&name) {
+                    Some(doc) => Ok(json_ok(json!({
+                        "Name": doc.name,
+                        "DocumentType": doc.document_type,
+                        "DocumentFormat": doc.document_format,
+                        "Content": doc.content,
+                        "Status": doc.status,
+                    }))),
+                    None => Ok(json_error(
+                        "InvalidDocument",
+                        &format!("Document {name} does not exist"),
+                        400,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // ListDocuments
+            // ----------------------------------------------------------------
+            "ListDocuments" => {
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "DocumentIdentifiers": [] })));
+                };
+                let docs: Vec<Value> = store
+                    .documents
+                    .values()
+                    .map(|d| {
+                        json!({
+                            "Name": d.name,
+                            "DocumentType": d.document_type,
+                            "DocumentFormat": d.document_format,
+                            "SchemaVersion": d.schema_version,
+                            "Owner": d.owner,
+                        })
+                    })
+                    .collect();
+                Ok(json_ok(json!({ "DocumentIdentifiers": docs })))
+            }
+
+            // ----------------------------------------------------------------
+            // SendCommand
+            // ----------------------------------------------------------------
+            "SendCommand" => {
+                let document_name = match str_param(ctx, "DocumentName") {
+                    Some(n) => n,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "DocumentName is required",
+                            400,
+                        ));
+                    }
+                };
+                let instance_ids: Vec<String> = ctx
+                    .request_body
+                    .get("InstanceIds")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let command_id = req_id();
+                let now = Utc::now();
+
+                let invocations: Vec<CommandInvocation> = instance_ids
+                    .iter()
+                    .map(|iid| CommandInvocation {
+                        command_id: command_id.clone(),
+                        instance_id: iid.clone(),
+                        document_name: document_name.clone(),
+                        status: "Success".to_string(),
+                        status_details: "Success".to_string(),
+                        output: String::new(),
+                        response_code: 0,
+                    })
+                    .collect();
+
+                let command = Command {
+                    command_id: command_id.clone(),
+                    document_name: document_name.clone(),
+                    status: "Success".to_string(),
+                    requested_date: now,
+                    instance_ids: instance_ids.clone(),
+                    invocations,
+                };
+
+                let mut store = self.store.get_or_create(account_id, region);
+                store.commands.insert(command_id.clone(), command);
+
+                Ok(json_ok(json!({
+                    "Command": {
+                        "CommandId": command_id,
+                        "DocumentName": document_name,
+                        "Status": "Success",
+                        "RequestedDateTime": now.to_rfc3339(),
+                        "InstanceIds": instance_ids,
+                    }
+                })))
+            }
+
+            // ----------------------------------------------------------------
+            // ListCommands
+            // ----------------------------------------------------------------
+            "ListCommands" => {
+                let command_id_filter = str_param(ctx, "CommandId");
+                let instance_id_filter = str_param(ctx, "InstanceId");
+
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_ok(json!({ "Commands": [] })));
+                };
+
+                let commands: Vec<Value> = store
+                    .commands
+                    .values()
+                    .filter(|c| {
+                        command_id_filter
+                            .as_deref()
+                            .map(|id| c.command_id == id)
+                            .unwrap_or(true)
+                    })
+                    .filter(|c| {
+                        instance_id_filter
+                            .as_deref()
+                            .map(|id| c.instance_ids.contains(&id.to_string()))
+                            .unwrap_or(true)
+                    })
+                    .map(|c| {
+                        json!({
+                            "CommandId": c.command_id,
+                            "DocumentName": c.document_name,
+                            "Status": c.status,
+                            "RequestedDateTime": c.requested_date.to_rfc3339(),
+                            "InstanceIds": c.instance_ids,
+                        })
+                    })
+                    .collect();
+
+                Ok(json_ok(json!({ "Commands": commands })))
+            }
+
+            // ----------------------------------------------------------------
+            // GetCommandInvocation
+            // ----------------------------------------------------------------
+            "GetCommandInvocation" => {
+                let command_id = match str_param(ctx, "CommandId") {
+                    Some(id) => id,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "CommandId is required",
+                            400,
+                        ));
+                    }
+                };
+                let instance_id = match str_param(ctx, "InstanceId") {
+                    Some(id) => id,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "InstanceId is required",
+                            400,
+                        ));
+                    }
+                };
+
+                let Some(store) = self.store.get(account_id, region) else {
+                    return Ok(json_error(
+                        "InvocationDoesNotExist",
+                        "Command invocation not found",
+                        400,
+                    ));
+                };
+
+                let invocation = store.commands.get(&command_id).and_then(|cmd| {
+                    cmd.invocations
+                        .iter()
+                        .find(|inv| inv.instance_id == instance_id)
+                });
+
+                match invocation {
+                    Some(inv) => Ok(json_ok(json!({
+                        "CommandId": inv.command_id,
+                        "InstanceId": inv.instance_id,
+                        "DocumentName": inv.document_name,
+                        "Status": inv.status,
+                        "StatusDetails": inv.status_details,
+                        "StandardOutputContent": inv.output,
+                        "ResponseCode": inv.response_code,
+                    }))),
+                    None => Ok(json_error(
+                        "InvocationDoesNotExist",
+                        "Command invocation not found",
+                        400,
+                    )),
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // AddTagsToResource / ListTagsForResource / RemoveTagsFromResource
+            // ----------------------------------------------------------------
+            "AddTagsToResource" => {
+                let resource_type = match str_param(ctx, "ResourceType") {
+                    Some(t) => t,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "ResourceType is required",
+                            400,
+                        ));
+                    }
+                };
+                let resource_id = match str_param(ctx, "ResourceId") {
+                    Some(id) => id,
+                    None => {
+                        return Ok(json_error(
+                            "ValidationException",
+                            "ResourceId is required",
+                            400,
+                        ));
+                    }
+                };
+                let tag_list = ctx
+                    .request_body
+                    .get("Tags")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                let mut store = self.store.get_or_create(account_id, region);
+                if resource_type == "Document"
+                    && let Some(doc) = store.documents.get_mut(&resource_id)
+                {
+                    for tag in &tag_list {
+                        if let (Some(k), Some(v)) = (
+                            tag.get("Key").and_then(|v| v.as_str()),
+                            tag.get("Value").and_then(|v| v.as_str()),
+                        ) {
+                            doc.tags.insert(k.to_string(), v.to_string());
+                        }
+                    }
+                }
+                Ok(json_ok(json!({})))
+            }
+
+            "ListTagsForResource" => {
+                let resource_type = str_param(ctx, "ResourceType").unwrap_or_default();
+                let resource_id = str_param(ctx, "ResourceId").unwrap_or_default();
+
+                let tags: Vec<Value> = self
+                    .store
+                    .get(account_id, region)
+                    .and_then(|store| {
+                        if resource_type == "Document" {
+                            store.documents.get(&resource_id).map(|doc| {
+                                doc.tags
+                                    .iter()
+                                    .map(|(k, v)| json!({"Key": k, "Value": v}))
+                                    .collect()
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+
+                Ok(json_ok(json!({ "TagList": tags })))
+            }
+
+            "RemoveTagsFromResource" => {
+                let resource_type = str_param(ctx, "ResourceType").unwrap_or_default();
+                let resource_id = str_param(ctx, "ResourceId").unwrap_or_default();
+                let tag_keys: Vec<String> = ctx
+                    .request_body
+                    .get("TagKeys")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let mut store = self.store.get_or_create(account_id, region);
+                if resource_type == "Document"
+                    && let Some(doc) = store.documents.get_mut(&resource_id)
+                {
+                    for k in &tag_keys {
+                        doc.tags.remove(k);
+                    }
+                }
+                Ok(json_ok(json!({})))
             }
 
             _ => Ok(json_error(

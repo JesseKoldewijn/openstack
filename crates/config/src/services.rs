@@ -1,5 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
+fn canonical_service_name(service: &str) -> String {
+    let normalized = service.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "es" => "opensearch".to_string(),
+        "cognito" | "cognito-idp" => "cognito-idp".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Configuration for which services are enabled and their provider overrides.
 #[derive(Debug, Clone)]
 pub struct ServicesConfig {
@@ -24,7 +33,7 @@ impl ServicesConfig {
             enabled: Some(
                 services
                     .into_iter()
-                    .map(|s| s.into().to_lowercase())
+                    .map(|s| canonical_service_name(&s.into()))
                     .collect(),
             ),
             overrides: HashMap::new(),
@@ -34,7 +43,7 @@ impl ServicesConfig {
     pub fn from_env() -> Self {
         let enabled = std::env::var("SERVICES").ok().map(|v| {
             v.split(',')
-                .map(|s| s.trim().to_lowercase())
+                .map(canonical_service_name)
                 .filter(|s| !s.is_empty())
                 .collect()
         });
@@ -43,7 +52,7 @@ impl ServicesConfig {
         let overrides = std::env::vars()
             .filter_map(|(key, value)| {
                 key.strip_prefix("PROVIDER_OVERRIDE_")
-                    .map(|service| (service.to_lowercase(), value))
+                    .map(|service| (canonical_service_name(service), value))
             })
             .collect();
 
@@ -52,17 +61,17 @@ impl ServicesConfig {
 
     /// Returns true if the given service is enabled.
     pub fn is_enabled(&self, service: &str) -> bool {
+        let service = canonical_service_name(service);
         match &self.enabled {
-            Some(set) => set.contains(&service.to_lowercase()),
+            Some(set) => set.contains(&service),
             None => true,
         }
     }
 
     /// Returns the provider override for a service, if any.
     pub fn get_override(&self, service: &str) -> Option<&str> {
-        self.overrides
-            .get(&service.to_lowercase())
-            .map(|s| s.as_str())
+        let service = canonical_service_name(service);
+        self.overrides.get(&service).map(|s| s.as_str())
     }
 
     /// Returns the set of explicitly enabled services, or None if all are enabled.
@@ -107,5 +116,22 @@ mod tests {
         assert_eq!(config.get_override("sqs"), Some("v2"));
         assert_eq!(config.get_override("SQS"), Some("v2"));
         assert_eq!(config.get_override("s3"), None);
+    }
+
+    #[test]
+    fn test_cognito_aliases_are_canonicalized() {
+        let config = ServicesConfig::only(["cognito"]);
+        assert!(config.is_enabled("cognito"));
+        assert!(config.is_enabled("cognito-idp"));
+    }
+
+    #[test]
+    fn test_provider_override_normalizes_underscore_env_keys() {
+        let config = ServicesConfig {
+            enabled: None,
+            overrides: [(canonical_service_name("COGNITO_IDP"), "custom".to_string())].into(),
+        };
+        assert_eq!(config.get_override("cognito-idp"), Some("custom"));
+        assert_eq!(config.get_override("COGNITO_IDP"), Some("custom"));
     }
 }

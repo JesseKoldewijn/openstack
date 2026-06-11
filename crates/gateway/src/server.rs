@@ -3111,7 +3111,8 @@ mod tests {
 
     use super::{
         detect_service, extract_rest_operation, is_s3_object_body_request,
-        rewrite_s3_virtual_hosted_path, should_rewrite_s3_vhost_for_body_check,
+        rewrite_s3_virtual_hosted_path, service_from_target,
+        should_rewrite_s3_vhost_for_body_check,
     };
 
     #[test]
@@ -3241,7 +3242,7 @@ mod tests {
     #[test]
     fn service_from_target_recognizes_cloudtrail_parity_target() {
         assert_eq!(
-            super::service_from_target("com.amazonaws.cloudtrail.v20131101.DescribeTrails"),
+            service_from_target("com.amazonaws.cloudtrail.v20131101.DescribeTrails"),
             Some("cloudtrail")
         );
     }
@@ -3249,7 +3250,7 @@ mod tests {
     #[test]
     fn service_from_target_recognizes_cloudtrail_guided_target() {
         assert_eq!(
-            super::service_from_target(
+            service_from_target(
                 "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.CreateTrail"
             ),
             Some("cloudtrail")
@@ -3259,7 +3260,7 @@ mod tests {
     #[test]
     fn service_from_target_rejects_cloudtrail_prefix_overmatch() {
         assert_eq!(
-            super::service_from_target("com.amazonaws.cloudtrailx.v20131101.DescribeTrails"),
+            service_from_target("com.amazonaws.cloudtrailx.v20131101.DescribeTrails"),
             None
         );
     }
@@ -3267,7 +3268,7 @@ mod tests {
     #[test]
     fn service_from_target_recognizes_versioned_ecs_target() {
         assert_eq!(
-            super::service_from_target("AmazonEC2ContainerServiceV20141113.ListClusters"),
+            service_from_target("AmazonEC2ContainerServiceV20141113.ListClusters"),
             Some("ecs")
         );
     }

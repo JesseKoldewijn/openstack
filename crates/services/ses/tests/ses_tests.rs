@@ -274,3 +274,303 @@ async fn test_verify_email_identity_missing_address() {
     let body = body_str(&resp);
     assert!(body.contains("MissingParameter"));
 }
+
+// ---------------------------------------------------------------------------
+// GetSendQuota
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_send_quota_empty() {
+    let p = SesProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("GetSendQuota", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetSendQuotaResponse"));
+    assert!(body.contains("<Max24HourSend>50000.0</Max24HourSend>"));
+    assert!(body.contains("<SentLast24Hours>0</SentLast24Hours>"));
+}
+
+#[tokio::test]
+async fn test_get_send_quota_after_sends() {
+    let p = SesProvider::new();
+    for i in 0..3u8 {
+        let mut params = HashMap::new();
+        params.insert("Source".to_string(), "s@example.com".to_string());
+        params.insert(
+            "Destination.ToAddresses.member.1".to_string(),
+            format!("d{i}@example.com"),
+        );
+        params.insert("Message.Subject.Data".to_string(), "hi".to_string());
+        p.dispatch(&make_ctx("SendEmail", params)).await.unwrap();
+    }
+    let resp = p
+        .dispatch(&make_ctx("GetSendQuota", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("<SentLast24Hours>3</SentLast24Hours>"));
+}
+
+// ---------------------------------------------------------------------------
+// GetSendStatistics
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_send_statistics_empty() {
+    let p = SesProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("GetSendStatistics", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetSendStatisticsResponse"));
+    assert!(body.contains("<SendDataPoints"));
+}
+
+#[tokio::test]
+async fn test_get_send_statistics_after_sends() {
+    let p = SesProvider::new();
+    let mut params = HashMap::new();
+    params.insert("Source".to_string(), "s@example.com".to_string());
+    params.insert(
+        "Destination.ToAddresses.member.1".to_string(),
+        "d@example.com".to_string(),
+    );
+    params.insert("Message.Subject.Data".to_string(), "stat test".to_string());
+    p.dispatch(&make_ctx("SendEmail", params)).await.unwrap();
+
+    let resp = p
+        .dispatch(&make_ctx("GetSendStatistics", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("<DeliveryAttempts>1</DeliveryAttempts>"));
+}
+
+// ---------------------------------------------------------------------------
+// Template CRUD
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_create_and_get_template() {
+    let p = SesProvider::new();
+    let mut params = HashMap::new();
+    params.insert("Template.TemplateName".to_string(), "welcome".to_string());
+    params.insert(
+        "Template.SubjectPart".to_string(),
+        "Welcome {{name}}!".to_string(),
+    );
+    params.insert(
+        "Template.HtmlPart".to_string(),
+        "<h1>Hi {{name}}</h1>".to_string(),
+    );
+    params.insert("Template.TextPart".to_string(), "Hi {{name}}".to_string());
+    let resp = p
+        .dispatch(&make_ctx("CreateTemplate", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("CreateTemplateResponse"));
+
+    let mut get_params = HashMap::new();
+    get_params.insert("TemplateName".to_string(), "welcome".to_string());
+    let resp = p
+        .dispatch(&make_ctx("GetTemplate", get_params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetTemplateResponse"));
+    assert!(body.contains("<TemplateName>welcome</TemplateName>"));
+    assert!(body.contains("Welcome {{name}}!"));
+}
+
+#[tokio::test]
+async fn test_create_template_duplicate_fails() {
+    let p = SesProvider::new();
+    let mut params = HashMap::new();
+    params.insert("Template.TemplateName".to_string(), "dup".to_string());
+    p.dispatch(&make_ctx("CreateTemplate", params.clone()))
+        .await
+        .unwrap();
+    let resp = p
+        .dispatch(&make_ctx("CreateTemplate", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("AlreadyExists"));
+}
+
+#[tokio::test]
+async fn test_get_template_not_found() {
+    let p = SesProvider::new();
+    let mut params = HashMap::new();
+    params.insert("TemplateName".to_string(), "nonexistent".to_string());
+    let resp = p.dispatch(&make_ctx("GetTemplate", params)).await.unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("TemplateDoesNotExist"));
+}
+
+#[tokio::test]
+async fn test_list_templates() {
+    let p = SesProvider::new();
+    for name in ["tmpl-a", "tmpl-b"] {
+        let mut params = HashMap::new();
+        params.insert("Template.TemplateName".to_string(), name.to_string());
+        p.dispatch(&make_ctx("CreateTemplate", params))
+            .await
+            .unwrap();
+    }
+    let resp = p
+        .dispatch(&make_ctx("ListTemplates", HashMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("tmpl-a"));
+    assert!(body.contains("tmpl-b"));
+}
+
+#[tokio::test]
+async fn test_delete_template() {
+    let p = SesProvider::new();
+    let mut params = HashMap::new();
+    params.insert("Template.TemplateName".to_string(), "to-delete".to_string());
+    p.dispatch(&make_ctx("CreateTemplate", params))
+        .await
+        .unwrap();
+
+    let mut del_params = HashMap::new();
+    del_params.insert("TemplateName".to_string(), "to-delete".to_string());
+    let resp = p
+        .dispatch(&make_ctx("DeleteTemplate", del_params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+
+    let mut get_params = HashMap::new();
+    get_params.insert("TemplateName".to_string(), "to-delete".to_string());
+    let resp = p
+        .dispatch(&make_ctx("GetTemplate", get_params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("TemplateDoesNotExist"));
+}
+
+// ---------------------------------------------------------------------------
+// SendTemplatedEmail
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_send_templated_email() {
+    let p = SesProvider::new();
+    let mut t_params = HashMap::new();
+    t_params.insert("Template.TemplateName".to_string(), "greet".to_string());
+    t_params.insert(
+        "Template.SubjectPart".to_string(),
+        "Hello there".to_string(),
+    );
+    t_params.insert(
+        "Template.HtmlPart".to_string(),
+        "<p>Greetings</p>".to_string(),
+    );
+    p.dispatch(&make_ctx("CreateTemplate", t_params))
+        .await
+        .unwrap();
+
+    let mut params = HashMap::new();
+    params.insert("Source".to_string(), "from@example.com".to_string());
+    params.insert("Template".to_string(), "greet".to_string());
+    params.insert(
+        "Destination.ToAddresses.member.1".to_string(),
+        "to@example.com".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("SendTemplatedEmail", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("SendTemplatedEmailResponse"));
+    assert!(body.contains("<MessageId>"));
+}
+
+#[tokio::test]
+async fn test_send_templated_email_missing_template() {
+    let p = SesProvider::new();
+    let mut params = HashMap::new();
+    params.insert("Source".to_string(), "from@example.com".to_string());
+    params.insert("Template".to_string(), "nonexistent".to_string());
+    params.insert(
+        "Destination.ToAddresses.member.1".to_string(),
+        "to@example.com".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("SendTemplatedEmail", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 400);
+    let body = body_str(&resp);
+    assert!(body.contains("TemplateDoesNotExist"));
+}
+
+// ---------------------------------------------------------------------------
+// Notification attributes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_set_identity_feedback_forwarding_enabled() {
+    let p = SesProvider::new();
+    let mut verify = HashMap::new();
+    verify.insert("EmailAddress".to_string(), "notif@example.com".to_string());
+    p.dispatch(&make_ctx("VerifyEmailIdentity", verify))
+        .await
+        .unwrap();
+
+    let mut params = HashMap::new();
+    params.insert("Identity".to_string(), "notif@example.com".to_string());
+    params.insert("ForwardingEnabled".to_string(), "false".to_string());
+    let resp = p
+        .dispatch(&make_ctx("SetIdentityFeedbackForwardingEnabled", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("SetIdentityFeedbackForwardingEnabledResponse"));
+}
+
+#[tokio::test]
+async fn test_get_identity_notification_attributes() {
+    let p = SesProvider::new();
+    let mut verify = HashMap::new();
+    verify.insert("EmailAddress".to_string(), "notif2@example.com".to_string());
+    p.dispatch(&make_ctx("VerifyEmailIdentity", verify))
+        .await
+        .unwrap();
+
+    let mut params = HashMap::new();
+    params.insert(
+        "Identities.member.1".to_string(),
+        "notif2@example.com".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("GetIdentityNotificationAttributes", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("GetIdentityNotificationAttributesResponse"));
+    assert!(body.contains("notif2@example.com"));
+    assert!(body.contains("<ForwardingEnabled>true</ForwardingEnabled>"));
+}

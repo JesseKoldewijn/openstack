@@ -43,6 +43,14 @@ async fn create_user(p: &IamProvider, user_name: &str) {
     assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
 }
 
+async fn delete_user(p: &IamProvider, user_name: &str) {
+    let resp = p
+        .dispatch(&make_ctx("DeleteUser", &[("UserName", user_name)]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200, "{}", body_str(&resp));
+}
+
 async fn create_role(p: &IamProvider, role_name: &str) {
     let resp = p
         .dispatch(&make_ctx(
@@ -119,6 +127,26 @@ async fn perf_create_and_get_role_round_trip() {
     assert!(
         elapsed.as_millis() < 2500,
         "CreateRole/GetRole x{n} took {}ms — expected <2500ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_create_and_delete_user_round_trip() {
+    let p = IamProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let user_name = format!("perf-delete-user-{i:03}");
+        create_user(&p, &user_name).await;
+        delete_user(&p, &user_name).await;
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2500,
+        "CreateUser/DeleteUser x{n} took {}ms — expected <2500ms",
         elapsed.as_millis()
     );
 }

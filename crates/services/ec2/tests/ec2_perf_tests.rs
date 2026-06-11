@@ -30,6 +30,31 @@ fn body_str(resp: &DispatchResponse) -> String {
     String::from_utf8_lossy(resp.body.as_bytes()).to_string()
 }
 
+fn extract_tag(body: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = body
+        .find(&open)
+        .map(|idx| idx + open.len())
+        .unwrap_or_else(|| panic!("missing opening tag <{tag}>"));
+    let end = body
+        .find(&close)
+        .unwrap_or_else(|| panic!("missing closing tag </{tag}>"));
+    assert!(start <= end, "malformed tag bounds for <{tag}>");
+    body[start..end].to_string()
+}
+
+async fn run_instance(p: &Ec2Provider, image_id: &str) -> String {
+    let mut params = HashMap::new();
+    params.insert("ImageId".to_string(), image_id.to_string());
+    params.insert("InstanceType".to_string(), "t2.micro".to_string());
+    params.insert("MaxCount".to_string(), "1".to_string());
+    params.insert("MinCount".to_string(), "1".to_string());
+    let resp = p.dispatch(&make_ctx("RunInstances", params)).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    extract_tag(&body_str(&resp), "instanceId")
+}
+
 async fn create_vpc(p: &Ec2Provider, cidr: &str) -> String {
     let mut params = HashMap::new();
     params.insert("CidrBlock".to_string(), cidr.to_string());
@@ -131,6 +156,31 @@ async fn perf_security_group_ingress_round_trip() {
     assert!(
         elapsed.as_millis() < 1000,
         "AuthorizeSecurityGroupIngress x50 took {}ms — expected <1000ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_run_and_terminate_instances_round_trip() {
+    let p = Ec2Provider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let instance_id = run_instance(&p, &format!("ami-perf-{i:08}")).await;
+        let mut params = HashMap::new();
+        params.insert("InstanceId.1".to_string(), instance_id);
+        let resp = p
+            .dispatch(&make_ctx("TerminateInstances", params))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2500,
+        "RunInstances/TerminateInstances x{n} took {}ms — expected <2500ms",
         elapsed.as_millis()
     );
 }

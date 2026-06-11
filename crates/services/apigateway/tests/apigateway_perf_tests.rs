@@ -128,3 +128,43 @@ async fn perf_create_resource_round_trip() {
         elapsed.as_millis()
     );
 }
+
+#[tokio::test]
+async fn perf_get_and_delete_rest_api_round_trip() {
+    let p = ApiGatewayProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let (api_id, _) = create_api(&p, &format!("perf-round-trip-api-{i:03}")).await;
+
+        let get_resp = p
+            .dispatch(&make_ctx(
+                "GetRestApi",
+                json!({}),
+                &format!("/restapis/{api_id}"),
+                "GET",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status_code, 200);
+
+        let delete_resp = p
+            .dispatch(&make_ctx(
+                "DeleteRestApi",
+                json!({}),
+                &format!("/restapis/{api_id}"),
+                "DELETE",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(delete_resp.status_code, 202);
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2500,
+        "GetRestApi+DeleteRestApi round-trip x{n} took {}ms — expected <2500ms",
+        elapsed.as_millis()
+    );
+}

@@ -207,9 +207,11 @@ jobs:
       openstack_runtime_image_id: ${{ steps.runtime_id.outputs.image_id }}
       openstack_runtime_image_artifact: ${{ steps.runtime_meta.outputs.image_artifact }}
     steps:
-      - uses: actions/checkout@v4
+      - if: env.ACT != 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.check-trigger.outputs.pr_sha || github.sha }}
+          persist-credentials: false
       - name: Compute deterministic runtime image reference
         id: runtime_meta
         run: |
@@ -220,7 +222,11 @@ jobs:
       - name: Build OpenStack runtime image once
         run: |
           set -euo pipefail
-          docker build --target runtime -t "${{ steps.runtime_meta.outputs.image_ref }}" .
+          if [[ "${ACT:-}" == "true" ]]; then
+            docker buildx build --load --target runtime -t "${{ steps.runtime_meta.outputs.image_ref }}" .
+          else
+            docker build --target runtime -t "${{ steps.runtime_meta.outputs.image_ref }}" .
+          fi
       - name: Capture immutable runtime image id
         id: runtime_id
         run: |
@@ -228,12 +234,14 @@ jobs:
           image_id="$(docker image inspect "${{ steps.runtime_meta.outputs.image_ref }}" --format '{{.Id}}')"
           echo "image_id=${image_id}" >> "$GITHUB_OUTPUT"
           echo "image_id=${image_id}" >> "$GITHUB_STEP_SUMMARY"
-      - name: Export runtime image as artifact
+      - if: env.ACT != 'true'
+        name: Export runtime image as artifact
         run: |
           set -euo pipefail
           docker save "${{ steps.runtime_meta.outputs.image_ref }}" -o /tmp/openstack-runtime-image.tar
-      - name: Upload runtime image artifact
-        uses: actions/upload-artifact@v4
+      - if: env.ACT != 'true'
+        name: Upload runtime image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.runtime_meta.outputs.image_artifact }}
           path: /tmp/openstack-runtime-image.tar
@@ -252,15 +260,19 @@ jobs:
       BENCH_PROFILE: ${{ needs.check-trigger.outputs.profile }}
       PR_NUMBER: ${{ needs.check-trigger.outputs.pr_number }}
     steps:
-      - uses: actions/checkout@v4
+      - if: env.ACT != 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.check-trigger.outputs.pr_sha || github.sha }}
-      - name: Load deterministic OpenStack runtime image
-        uses: actions/download-artifact@v4
+          persist-credentials: false
+      - if: env.ACT != 'true'
+        name: Load deterministic OpenStack runtime image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ needs.prepare-openstack-runtime-image.outputs.openstack_runtime_image_artifact }}
           path: /tmp
-      - name: Import deterministic OpenStack runtime image
+      - if: env.ACT != 'true'
+        name: Import deterministic OpenStack runtime image
         run: |
           set -euo pipefail
           docker load -i /tmp/openstack-runtime-image.tar
@@ -357,8 +369,8 @@ jobs:
               --body "$BODY"
           fi
       - name: Upload benchmark report artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: benchmark-${{ env.BENCH_PROFILE }}-report
           path: |

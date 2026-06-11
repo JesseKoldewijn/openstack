@@ -31,6 +31,21 @@ fn body(resp: &DispatchResponse) -> Value {
     serde_json::from_slice(resp.body.as_bytes()).expect("response body is valid JSON")
 }
 
+async fn put_parameter(p: &SsmProvider, name: &str, value: &str) {
+    let resp = p
+        .dispatch(&make_ctx(
+            "PutParameter",
+            json!({
+                "Name": name,
+                "Value": value,
+                "Type": "String",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+}
+
 #[tokio::test]
 async fn perf_put_parameter_throughput() {
     let p = SsmProvider::new();
@@ -136,6 +151,30 @@ async fn perf_get_parameters_by_path_many() {
     assert!(
         elapsed.as_millis() < 500,
         "GetParametersByPath({n}) took {}ms — expected <500ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn perf_put_and_delete_parameter_round_trip() {
+    let p = SsmProvider::new();
+    let n = 100usize;
+
+    let start = Instant::now();
+    for i in 0..n {
+        let name = format!("/perf/delete/{i:03}");
+        put_parameter(&p, &name, &format!("value-{i:03}")).await;
+        let resp = p
+            .dispatch(&make_ctx("DeleteParameter", json!({ "Name": name })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status_code, 200);
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 1500,
+        "PutParameter/DeleteParameter x{n} took {}ms — expected <1500ms",
         elapsed.as_millis()
     );
 }

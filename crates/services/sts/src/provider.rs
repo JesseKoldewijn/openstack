@@ -148,6 +148,71 @@ impl ServiceProvider for StsProvider {
                 Ok(xml_resp("GetAccessKeyInfo", &rid, &inner))
             }
 
+            "AssumeRoleWithWebIdentity" => {
+                let role_arn = param(ctx, "RoleArn")
+                    .unwrap_or_else(|| format!("arn:aws:iam::{account_id}:role/default"));
+                let role_name = role_arn
+                    .rsplit('/')
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("default")
+                    .to_string();
+                let session_name =
+                    param(ctx, "RoleSessionName").unwrap_or_else(|| "web-session".to_string());
+                let provider_id =
+                    param(ctx, "ProviderId").unwrap_or_else(|| "www.amazon.com".to_string());
+                let subject = param(ctx, "WebIdentityToken")
+                    .map(|t| t[..t.len().min(12)].to_string())
+                    .unwrap_or_else(|| "sub-fake-0000".to_string());
+                let creds = temp_credentials_xml("wi//");
+                let role_id_suffix =
+                    &Uuid::new_v4().to_string().replace('-', "")[..16].to_uppercase();
+                let inner = format!(
+                    "{creds}\
+<SubjectFromWebIdentityToken>{subject}</SubjectFromWebIdentityToken>\
+<Provider>{}</Provider>\
+<AssumedRoleUser>\
+<AssumedRoleId>AROA{role_id_suffix}:{session_name}</AssumedRoleId>\
+<Arn>arn:aws:sts::{account_id}:assumed-role/{role_name}/{session_name}</Arn>\
+</AssumedRoleUser>",
+                    xml_escape(&provider_id)
+                );
+                Ok(xml_resp("AssumeRoleWithWebIdentity", &rid, &inner))
+            }
+
+            "AssumeRoleWithSAML" => {
+                let role_arn = param(ctx, "RoleArn")
+                    .unwrap_or_else(|| format!("arn:aws:iam::{account_id}:role/default"));
+                let role_name = role_arn
+                    .rsplit('/')
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("default")
+                    .to_string();
+                let principal_arn = param(ctx, "PrincipalArn").unwrap_or_else(|| {
+                    format!("arn:aws:iam::{account_id}:saml-provider/MyProvider")
+                });
+                let session_name = "saml-session".to_string();
+                let creds = temp_credentials_xml("saml//");
+                let role_id_suffix =
+                    &Uuid::new_v4().to_string().replace('-', "")[..16].to_uppercase();
+                let inner = format!(
+                    "{creds}\
+<Issuer>{}</Issuer>\
+<AssumedRoleUser>\
+<AssumedRoleId>AROA{role_id_suffix}:{session_name}</AssumedRoleId>\
+<Arn>arn:aws:sts::{account_id}:assumed-role/{role_name}/{session_name}</Arn>\
+</AssumedRoleUser>\
+<NameQualifier>fake-nq</NameQualifier>\
+<Subject>fake-subject</Subject>\
+<SubjectType>persistent</SubjectType>\
+<Audience>{}</Audience>",
+                    xml_escape(&principal_arn),
+                    xml_escape(&role_arn)
+                );
+                Ok(xml_resp("AssumeRoleWithSAML", &rid, &inner))
+            }
+
             "DecodeAuthorizationMessage" => {
                 // Base64-decode the EncodedMessage and return it as DecodedMessage.
                 // In AWS this contains a JSON policy evaluation context; here we decode

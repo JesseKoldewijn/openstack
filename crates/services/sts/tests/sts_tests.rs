@@ -166,3 +166,78 @@ async fn test_decode_authorization_message_invalid_base64_returns_error() {
         body_str(&resp)
     );
 }
+
+// ---------------------------------------------------------------------------
+// AssumeRoleWithWebIdentity
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_assume_role_with_web_identity() {
+    let p = StsProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "AssumeRoleWithWebIdentity",
+            &[
+                ("RoleArn", "arn:aws:iam::000000000000:role/WebRole"),
+                ("RoleSessionName", "web-session"),
+                ("WebIdentityToken", "fake-web-token-12345"),
+                ("ProviderId", "cognito-identity.amazonaws.com"),
+            ],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("AssumeRoleWithWebIdentityResponse"));
+    assert!(body.contains("<AccessKeyId>"));
+    assert!(body.contains("<SessionToken>"));
+    assert!(body.contains("<Expiration>"));
+    assert!(body.contains("<SubjectFromWebIdentityToken>"));
+    assert!(body.contains("<Provider>cognito-identity.amazonaws.com</Provider>"));
+    assert!(body.contains("arn:aws:sts::000000000000:assumed-role/WebRole/web-session"));
+}
+
+#[tokio::test]
+async fn test_assume_role_with_web_identity_defaults() {
+    let p = StsProvider::new();
+    let resp = p
+        .dispatch(&make_ctx("AssumeRoleWithWebIdentity", &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("AssumeRoleWithWebIdentityResponse"));
+    assert!(body.contains("<AccessKeyId>"));
+}
+
+// ---------------------------------------------------------------------------
+// AssumeRoleWithSAML
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_assume_role_with_saml() {
+    let p = StsProvider::new();
+    let resp = p
+        .dispatch(&make_ctx(
+            "AssumeRoleWithSAML",
+            &[
+                ("RoleArn", "arn:aws:iam::000000000000:role/SamlRole"),
+                (
+                    "PrincipalArn",
+                    "arn:aws:iam::000000000000:saml-provider/MySAML",
+                ),
+                ("SAMLAssertion", "PHNhbWw+ZmFrZTwvc2FtbD4="),
+            ],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 200);
+    let body = body_str(&resp);
+    assert!(body.contains("AssumeRoleWithSAMLResponse"));
+    assert!(body.contains("<AccessKeyId>"));
+    assert!(body.contains("<SessionToken>"));
+    assert!(body.contains("<Expiration>"));
+    assert!(body.contains("<Issuer>"));
+    assert!(body.contains("arn:aws:sts::000000000000:assumed-role/SamlRole/saml-session"));
+    assert!(body.contains("<SubjectType>persistent</SubjectType>"));
+}
