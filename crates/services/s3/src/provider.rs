@@ -45,7 +45,7 @@ fn inline_object_threshold() -> u64 {
 
 const GET_OBJECT_STREAM_READ_BUF_SMALL: usize = 1024 * 1024;
 const GET_OBJECT_STREAM_READ_BUF_LARGE: usize = 4 * 1024 * 1024;
-const GET_OBJECT_STREAM_LARGE_CUTOFF: u64 = 10 * 1024 * 1024;
+const GET_OBJECT_STREAM_LARGE_CUTOFF: u64 = 50 * 1024 * 1024;
 
 fn get_object_stream_read_buf(size: u64) -> usize {
     if size <= GET_OBJECT_STREAM_LARGE_CUTOFF {
@@ -845,9 +845,9 @@ async fn handle_get_object_async(
                             }
                         }
                     } else {
-                        // Keep smaller streamed objects on the existing 1 MiB
-                        // buffer, but use larger reads once objects exceed
-                        // 10 MiB to reduce chunking overhead on large GETs.
+                        // Keep the existing 1 MiB buffer for smaller streamed
+                        // objects and only grow reads once objects reach the
+                        // large benchmark tiers.
                         match ObjectFileStore::read_object_at(&path).await {
                             Ok(file) => {
                                 let stream = ReaderStream::with_capacity(
