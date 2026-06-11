@@ -95,6 +95,8 @@ fn client_json(c: &UserPoolClient) -> Value {
         "UserPoolId": c.user_pool_id,
         "ClientSecret": c.client_secret,
         "ExplicitAuthFlows": c.explicit_auth_flows,
+        "CallbackURLs": c.callback_urls,
+        "LogoutURLs": c.logout_urls,
         "CreationDate": c.creation_date.timestamp(),
         "LastModifiedDate": c.last_modified_date.timestamp(),
     })
@@ -345,8 +347,26 @@ impl ServiceProvider for CognitoProvider {
                     explicit_auth_flows,
                     allowed_o_auth_flows: Vec::new(),
                     allowed_o_auth_scopes: Vec::new(),
-                    callback_ur_ls: Vec::new(),
-                    logout_ur_ls: Vec::new(),
+                    callback_urls: ctx
+                        .request_body
+                        .get("CallbackURLs")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    logout_urls: ctx
+                        .request_body
+                        .get("LogoutURLs")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     creation_date: now,
                     last_modified_date: now,
                 };

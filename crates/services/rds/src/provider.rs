@@ -425,25 +425,17 @@ impl ServiceProvider for RdsProvider {
                         400,
                     ));
                 }
-                let (engine, engine_version, allocated_storage, master_username) = store
-                    .instances
-                    .get(&db_id)
-                    .map(|db| {
-                        (
-                            db.engine.clone(),
-                            db.engine_version.clone(),
-                            db.allocated_storage,
-                            db.master_username.clone(),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        (
-                            "mysql".to_string(),
-                            "8.0".to_string(),
-                            20,
-                            "admin".to_string(),
-                        )
-                    });
+                let Some(db) = store.instances.get(&db_id) else {
+                    return Ok(xml_error(
+                        "DBInstanceNotFound",
+                        &format!("DB instance {db_id} not found"),
+                        404,
+                    ));
+                };
+                let engine = db.engine.clone();
+                let engine_version = db.engine_version.clone();
+                let allocated_storage = db.allocated_storage;
+                let master_username = db.master_username.clone();
                 let snap = DbSnapshot {
                     db_snapshot_identifier: snapshot_id.clone(),
                     db_instance_identifier: db_id,

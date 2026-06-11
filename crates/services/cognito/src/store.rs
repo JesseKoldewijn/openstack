@@ -35,8 +35,10 @@ pub struct UserPoolClient {
     pub explicit_auth_flows: Vec<String>,
     pub allowed_o_auth_flows: Vec<String>,
     pub allowed_o_auth_scopes: Vec<String>,
-    pub callback_ur_ls: Vec<String>,
-    pub logout_ur_ls: Vec<String>,
+    #[serde(rename = "CallbackURLs")]
+    pub callback_urls: Vec<String>,
+    #[serde(rename = "LogoutURLs")]
+    pub logout_urls: Vec<String>,
     pub creation_date: DateTime<Utc>,
     pub last_modified_date: DateTime<Utc>,
 }

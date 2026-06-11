@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 fn canonical_service_name(service: &str) -> String {
-    match service.trim().to_ascii_lowercase().as_str() {
+    let normalized = service.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
         "es" => "opensearch".to_string(),
         "cognito" | "cognito-idp" => "cognito-idp".to_string(),
         other => other.to_string(),
@@ -122,5 +123,15 @@ mod tests {
         let config = ServicesConfig::only(["cognito"]);
         assert!(config.is_enabled("cognito"));
         assert!(config.is_enabled("cognito-idp"));
+    }
+
+    #[test]
+    fn test_provider_override_normalizes_underscore_env_keys() {
+        let config = ServicesConfig {
+            enabled: None,
+            overrides: [(canonical_service_name("COGNITO_IDP"), "custom".to_string())].into(),
+        };
+        assert_eq!(config.get_override("cognito-idp"), Some("custom"));
+        assert_eq!(config.get_override("COGNITO_IDP"), Some("custom"));
     }
 }

@@ -301,7 +301,13 @@ impl ServiceProvider for ElastiCacheProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(xml_error(
+                        "CacheClusterNotFound",
+                        &format!("Cache cluster {cluster_id} not found"),
+                        400,
+                    ));
+                };
                 match store.clusters.remove(&cluster_id) {
                     Some(c) => {
                         let inner =
@@ -352,7 +358,13 @@ impl ServiceProvider for ElastiCacheProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(xml_error(
+                        "CacheClusterNotFound",
+                        &format!("Cache cluster {cluster_id} not found"),
+                        400,
+                    ));
+                };
                 match store.clusters.get_mut(&cluster_id) {
                     Some(cluster) => {
                         if let Some(node_type) = str_param(ctx, "CacheNodeType") {
@@ -389,7 +401,13 @@ impl ServiceProvider for ElastiCacheProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(xml_error(
+                        "CacheClusterNotFound",
+                        &format!("Cache cluster {cluster_id} not found"),
+                        400,
+                    ));
+                };
                 match store.clusters.get_mut(&cluster_id) {
                     Some(cluster) => {
                         cluster.cache_cluster_status = "available".to_string();
@@ -531,7 +549,13 @@ impl ServiceProvider for ElastiCacheProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(xml_error(
+                        "ReplicationGroupNotFoundFault",
+                        &format!("Replication group {rg_id} not found"),
+                        400,
+                    ));
+                };
                 match store.replication_groups.remove(&rg_id) {
                     Some(rg) => {
                         // Clean up member clusters
@@ -592,7 +616,13 @@ impl ServiceProvider for ElastiCacheProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(xml_error(
+                        "ReplicationGroupNotFoundFault",
+                        &format!("Replication group {rg_id} not found"),
+                        400,
+                    ));
+                };
                 match store.replication_groups.get_mut(&rg_id) {
                     Some(rg) => {
                         if let Some(desc) = str_param(ctx, "ReplicationGroupDescription") {
@@ -686,7 +716,13 @@ impl ServiceProvider for ElastiCacheProvider {
                         ));
                     }
                 };
-                let mut store = self.store.get_or_create(account_id, region);
+                let Some(mut store) = self.store.get_mut(account_id, region) else {
+                    return Ok(xml_error(
+                        "CacheSubnetGroupNotFoundFault",
+                        &format!("Cache subnet group {name} not found"),
+                        400,
+                    ));
+                };
                 if store.subnet_groups.remove(&name).is_none() {
                     return Ok(xml_error(
                         "CacheSubnetGroupNotFoundFault",

@@ -208,9 +208,10 @@ jobs:
       openstack_runtime_image_artifact: ${{ steps.runtime_meta.outputs.image_artifact }}
     steps:
       - if: env.ACT != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.check-trigger.outputs.pr_sha || github.sha }}
+          persist-credentials: false
       - name: Compute deterministic runtime image reference
         id: runtime_meta
         run: |
@@ -260,9 +261,10 @@ jobs:
       PR_NUMBER: ${{ needs.check-trigger.outputs.pr_number }}
     steps:
       - if: env.ACT != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.check-trigger.outputs.pr_sha || github.sha }}
+          persist-credentials: false
       - if: env.ACT != 'true'
         name: Load deterministic OpenStack runtime image
         uses: actions/download-artifact@v4

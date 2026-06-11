@@ -248,8 +248,34 @@ async fn test_create_and_describe_snapshot() {
 }
 
 #[tokio::test]
+async fn test_create_snapshot_missing_instance_fails() {
+    let p = RdsProvider::new();
+    let mut params = HashMap::new();
+    params.insert("DBInstanceIdentifier".to_string(), "missing-db".to_string());
+    params.insert(
+        "DBSnapshotIdentifier".to_string(),
+        "orphan-snap".to_string(),
+    );
+    let resp = p
+        .dispatch(&make_ctx("CreateDBSnapshot", params))
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 404);
+    let body = body_str(&resp);
+    assert!(body.contains("DBInstanceNotFound"));
+    assert!(body.contains("missing-db"));
+}
+
+#[tokio::test]
 async fn test_delete_snapshot() {
     let p = RdsProvider::new();
+    p.dispatch(&make_ctx(
+        "CreateDBInstance",
+        base_instance_params("db-x"),
+    ))
+    .await
+    .unwrap();
+
     let mut params = HashMap::new();
     params.insert("DBInstanceIdentifier".to_string(), "db-x".to_string());
     params.insert("DBSnapshotIdentifier".to_string(), "del-snap".to_string());

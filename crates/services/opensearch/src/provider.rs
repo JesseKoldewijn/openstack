@@ -225,13 +225,16 @@ impl ServiceProvider for OpenSearchProvider {
                 let domain_name = ctx.path.split('/').next_back().unwrap_or("").to_string();
                 let mut store = self.store.get_or_create(account_id, region);
                 match store.domains.remove(&domain_name) {
-                    Some(d) => Ok(json_ok(json!({
-                        "DomainStatus": {
-                            "DomainName": d.domain_name,
-                            "ARN": d.arn,
-                            "Deleted": true,
-                        }
-                    }))),
+                    Some(d) => {
+                        store.tags.remove(&d.arn);
+                        Ok(json_ok(json!({
+                            "DomainStatus": {
+                                "DomainName": d.domain_name,
+                                "ARN": d.arn,
+                                "Deleted": true,
+                            }
+                        })))
+                    }
                     None => Ok(json_error(
                         "ResourceNotFoundException",
                         &format!("Domain not found: {domain_name}"),

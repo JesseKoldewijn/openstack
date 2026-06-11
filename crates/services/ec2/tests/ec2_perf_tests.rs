@@ -31,8 +31,16 @@ fn body_str(resp: &DispatchResponse) -> String {
 }
 
 fn extract_tag(body: &str, tag: &str) -> String {
-    let start = body.find(&format!("<{tag}>")).unwrap() + tag.len() + 2;
-    let end = body.find(&format!("</{tag}>")).unwrap();
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = body
+        .find(&open)
+        .map(|idx| idx + open.len())
+        .unwrap_or_else(|| panic!("missing opening tag <{tag}>"));
+    let end = body
+        .find(&close)
+        .unwrap_or_else(|| panic!("missing closing tag </{tag}>"));
+    assert!(start <= end, "malformed tag bounds for <{tag}>");
     body[start..end].to_string()
 }
 

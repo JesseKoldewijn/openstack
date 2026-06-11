@@ -807,7 +807,13 @@ async fn test_describe_regions() {
 fn extract_tag(xml: &str, tag: &str) -> String {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
-    let start = xml.find(&open).unwrap_or(0) + open.len();
-    let end = xml.find(&close).unwrap_or(xml.len());
+    let start = xml
+        .find(&open)
+        .map(|idx| idx + open.len())
+        .unwrap_or_else(|| panic!("missing opening tag <{tag}>"));
+    let end = xml
+        .find(&close)
+        .unwrap_or_else(|| panic!("missing closing tag </{tag}>"));
+    assert!(start <= end, "malformed tag bounds for <{tag}>");
     xml[start..end].to_string()
 }

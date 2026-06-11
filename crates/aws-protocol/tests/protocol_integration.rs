@@ -261,4 +261,11 @@ mod protocol_integration_tests {
         // unknown service falls back to rest-json
         assert_eq!(AwsProtocol::from_service("unknown"), AwsProtocol::RestJson);
     }
+
+    #[test]
+    fn protocol_routing_normalizes_case_and_underscore_aliases() {
+        assert_eq!(AwsProtocol::from_service("SQS"), AwsProtocol::Query);
+        assert_eq!(AwsProtocol::from_service("COGNITO_IDP"), AwsProtocol::Json);
+        assert_eq!(AwsProtocol::from_service("es"), AwsProtocol::RestJson);
+    }
 }

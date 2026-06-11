@@ -426,6 +426,51 @@ async fn test_delete_domain() {
     assert_eq!(lb["DomainNames"].as_array().unwrap().len(), 0);
 }
 
+#[tokio::test]
+async fn test_delete_domain_removes_tags() {
+    let p = OpenSearchProvider::new();
+    let create_resp = p
+        .dispatch(&make_ctx(
+            "CreateDomain",
+            json!({ "DomainName": "tagged-del" }),
+            "/2021-01-01/opensearch/domain",
+            "POST",
+        ))
+        .await
+        .unwrap();
+    let arn = body_json(&create_resp)["DomainStatus"]["ARN"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    p.dispatch(&make_ctx(
+        "AddTags",
+        json!({
+            "ARN": arn,
+            "TagList": [{"Key": "env", "Value": "test"}]
+        }),
+        "/2021-01-01/tags",
+        "POST",
+    ))
+    .await
+    .unwrap();
+
+    p.dispatch(&make_ctx(
+        "DeleteDomain",
+        json!({}),
+        "/2021-01-01/opensearch/domain/tagged-del",
+        "DELETE",
+    ))
+    .await
+    .unwrap();
+
+    let mut list_ctx = make_ctx("ListTags", json!({}), "/2021-01-01/tags", "GET");
+    list_ctx.query_params.insert("arn".to_string(), arn);
+    let resp = p.dispatch(&list_ctx).await.unwrap();
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(body_json(&resp)["TagList"].as_array().unwrap().len(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // DescribeDomains (batch)
 // ---------------------------------------------------------------------------
